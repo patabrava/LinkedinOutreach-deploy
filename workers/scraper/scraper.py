@@ -10,11 +10,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from playwright.async_api import BrowserContext, Page
+from playwright.async_api import BrowserContext, Page, TimeoutError
 from supabase import Client, create_client
 from tenacity import retry, stop_after_attempt, wait_fixed
 
-from auth import AUTH_STATE_PATH, open_browser, save_storage_state, shutdown
+from auth import AUTH_STATE_PATH, is_logged_in, open_browser, save_storage_state, shutdown
 
 load_dotenv()
 
@@ -100,30 +100,88 @@ def safe_text(value: Optional[str]) -> str:
     return value.strip() if value else ""
 
 
+async def safe_text_content(page: Page, selector: str, timeout: int = 6_000) -> str:
+    try:
+        return safe_text(await page.text_content(selector, timeout=timeout))
+    except Exception:
+        return ""
+
+
+async def gentle_nav(page: Page, url: str) -> None:
+    """Navigate with forgiving waits to avoid networkidle timeouts."""
+    await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    await page.wait_for_timeout(1_200)
+
+
+async def slow_scroll(page: Page, steps: int = 6) -> None:
+    """Scroll down to trigger lazy-loaded sections."""
+    for _ in range(steps):
+        await page.mouse.wheel(0, random.randint(500, 900))
+        await asyncio.sleep(random.uniform(0.2, 0.5))
+
+
 async def expand_about(page: Page) -> None:
     button = page.locator("#about button:has-text('more'), #about button:has-text('See more')")
     if await button.count() > 0:
         await safe_click(page, "#about button:has-text('more'), #about button:has-text('See more')")
 
 
-async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
-    await page.goto(url, wait_until="networkidle")
-    await random_pause()
+async def scrape_experience(page: Page, max_items: int = 3) -> List[Dict[str, str]]:
+    section = page.locator("section[id*=experience], section[data-section='experience'], section:has-text('Experience')")
+    if await section.count() == 0:
+        return []
 
+    try:
+        await section.first.scroll_into_view_if_needed(timeout=5_000)
+    except Exception:
+        pass
+
+    items = section.locator("li")
+    total = min(await items.count(), max_items)
+    results: List[Dict[str, str]] = []
+
+    for idx in range(total):
+        entry = items.nth(idx)
+        try:
+            title = safe_text(await entry.locator("span[aria-hidden=true]").nth(0).text_content(timeout=4_000))
+        except Exception:
+            title = ""
+        try:
+            company = safe_text(await entry.locator("span[aria-hidden=true]").nth(1).text_content(timeout=4_000))
+        except Exception:
+            company = ""
+        try:
+            tenure = safe_text(
+                await entry.locator("span:has-text('Present'), span:has-text(' yr'), span:has-text(' mos')")
+                .first.text_content(timeout=3_000)
+            )
+        except Exception:
+            tenure = ""
+
+        if title or company:
+            results.append({"title": title, "company": company, "tenure": tenure})
+
+    return results
+
+
+async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
+    normalized = url.replace("http://", "https://")
+    page.set_default_timeout(20_000)
+    page.set_default_navigation_timeout(60_000)
+
+    await gentle_nav(page, normalized)
+    await slow_scroll(page)
     await expand_about(page)
 
-    name = safe_text(await page.text_content("main h1.text-heading-xlarge"))
-    headline = safe_text(await page.text_content("main .text-heading-medium"))
-    about = safe_text(await page.text_content("#about .inline-show-more-text"))
+    name = await safe_text_content(page, "main h1.text-heading-xlarge")
+    headline = await safe_text_content(page, "main .text-heading-medium")
+    about = await safe_text_content(page, "#about .inline-show-more-text")
 
-    current_company = safe_text(
-        await page.text_content(
-            "#experience section:first-of-type li a span:has-text('Company') >> .. >> span[aria-hidden=true]"
-        )
+    current_company = await safe_text_content(
+        page, "#experience section:first-of-type li a span:has-text('Company') >> .. >> span[aria-hidden=true]"
     )
-    current_title = safe_text(
-        await page.text_content("#experience section:first-of-type li span[aria-hidden=true]")
-    )
+    current_title = await safe_text_content(page, "#experience section:first-of-type li span[aria-hidden=true]")
+    experience = await scrape_experience(page)
 
     profile_data = {
         "name": name,
@@ -131,7 +189,8 @@ async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
         "about": about,
         "current_company": current_company,
         "current_title": current_title,
-        "url": url,
+        "url": normalized,
+        "experience": experience,
     }
     return profile_data
 
@@ -140,8 +199,8 @@ async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str,
     base = profile_url.rstrip("/")
     activity_url = f"{base}/recent-activity/all/"
 
-    await page.goto(activity_url, wait_until="networkidle")
-    await random_pause()
+    await gentle_nav(page, activity_url)
+    await slow_scroll(page, steps=4)
 
     articles = page.locator("article")
     count = min(await articles.count(), 3)
@@ -149,22 +208,27 @@ async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str,
 
     for idx in range(count):
         article = articles.nth(idx)
-        content = safe_text(await article.inner_text())
-        if not content or "Repost" in content and "reposted" in content:
+        try:
+            content = safe_text(await article.inner_text(timeout=8_000))
+        except Exception:
+            continue
+        if not content or ("Repost" in content and "reposted" in content):
             continue
 
-        date_text = safe_text(await article.locator("span:has-text('d'), span:has-text('w')").first.text_content())
-        likes_text = safe_text(
-            await article.locator("button:has-text('Like'), span:has-text('Like')").first.text_content()
-        )
+        try:
+            date_text = safe_text(
+                await article.locator("span:has-text('d'), span:has-text('w')").first.text_content(timeout=4_000)
+            )
+        except Exception:
+            date_text = ""
+        try:
+            likes_text = safe_text(
+                await article.locator("button:has-text('Like'), span:has-text('Like')").first.text_content(timeout=4_000)
+            )
+        except Exception:
+            likes_text = ""
 
-        results.append(
-            {
-                "text": content,
-                "date": date_text,
-                "likes": likes_text,
-            }
-    )
+        results.append({"text": content, "date": date_text, "likes": likes_text})
 
     return results[:3]
 
@@ -172,25 +236,34 @@ async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str,
 async def login_with_credentials(context: BrowserContext, creds: LinkedinCredentials) -> None:
     """Log into LinkedIn using saved credentials and persist auth.json."""
     page = await context.new_page()
-    await page.goto("https://www.linkedin.com/login", wait_until="networkidle")
+    await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=60_000)
     await page.fill("input#username", creds.email)
     await page.fill("input#password", creds.password)
     await safe_click(page, "button[type=submit]")
     await page.wait_for_timeout(2_000)
-    await page.wait_for_url("**/feed**", timeout=25_000)
+    await page.wait_for_url("**/feed**", timeout=40_000)
     await save_storage_state(context, path=AUTH_STATE_PATH)
     await page.close()
 
 
 async def ensure_linkedin_auth(context: BrowserContext, creds: Optional[LinkedinCredentials]) -> None:
-    if AUTH_STATE_PATH.exists():
+    if await is_logged_in(context):
+        if not AUTH_STATE_PATH.exists():
+            await save_storage_state(context)
         return
+
     if not creds:
         raise RuntimeError(
-            "Missing auth.json and no LinkedIn credentials configured. "
-            "Add them in the web UI (Settings → LinkedIn credentials) and retry."
+            "Unable to authenticate with LinkedIn. Upload a fresh auth.json via the login launcher "
+            "or add credentials in Settings so the scraper can sign in automatically."
         )
+
     await login_with_credentials(context, creds)
+
+    if not await is_logged_in(context):
+        raise RuntimeError(
+            "LinkedIn login failed. Complete any verification in the opened browser window, then retry."
+        )
 
 
 def update_lead(
@@ -211,7 +284,11 @@ def update_lead(
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 async def enrich_one(page: Page, client: Client, lead: Lead) -> None:
     profile = await scrape_profile(page, lead.linkedin_url)
-    activity = await scrape_recent_activity(page, lead.linkedin_url)
+    try:
+        activity = await scrape_recent_activity(page, lead.linkedin_url)
+    except Exception as exc:
+        print(f"Activity scrape failed for {lead.id}: {exc}", file=sys.stderr)
+        activity = []
     update_lead(client, lead.id, profile, activity)
 
 
@@ -224,6 +301,9 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
         try:
             await enrich_one(page, client, lead)
             print(f"Lead {lead.id} enriched.")
+        except TimeoutError as exc:
+            print(f"Timeout enriching {lead.id}: {exc}", file=sys.stderr)
+            client.table("leads").update({"status": "NEW"}).eq("id", lead.id).execute()
         except Exception as exc:
             print(f"Failed to enrich {lead.id}: {exc}", file=sys.stderr)
             client.table("leads").update({"status": "NEW"}).eq("id", lead.id).execute()
