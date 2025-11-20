@@ -1,6 +1,10 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
 import type { LeadListRow } from "../app/actions";
+import { supabaseBrowserClient } from "../lib/supabaseClient";
 
 type Props = {
   leads: LeadListRow[];
@@ -55,30 +59,81 @@ export function LeadList({
   condensed = false,
   maxRows,
 }: Props) {
-  const leadArray = Array.isArray(leads) ? leads : [];
-  const hasData = leadArray.length > 0;
-
-  const rows = leadArray.map((lead) => {
+  const mapLeadToRow = (lead: LeadListRow) => {
     const statusKey = (lead.status || "NEW").toUpperCase();
     const style = statusStyle[statusKey] || { bg: "rgba(255,255,255,0.08)", color: "#cbd5e1" };
     const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim() || "Name pending";
-    const company = lead.company_name || "Company pending";
+    const company = lead.company_name || lead.profile_data?.current_company || "Company pending";
+    const headline =
+      lead.profile_data?.headline ||
+      lead.profile_data?.current_title ||
+      lead.profile_data?.about ||
+      "";
+    const recentActivity = Array.isArray(lead.recent_activity) ? lead.recent_activity : [];
 
     return {
       id: lead.id,
       name,
       company,
+      headline: headline || null,
       linkedinUrl: lead.linkedin_url || "",
       status: statusKey,
       style,
       createdAt: lead.created_at,
       updatedAt: lead.updated_at,
+      recentActivity,
     };
-  });
+  };
 
-  const displayRows = typeof maxRows === "number" && maxRows >= 0 ? rows.slice(0, maxRows) : rows;
+  const [rows, setRows] = useState(() => (Array.isArray(leads) ? leads.map(mapLeadToRow) : []));
+
+  // Keep local state in sync when server data changes
+  useEffect(() => {
+    setRows(Array.isArray(leads) ? leads.map(mapLeadToRow) : []);
+  }, [leads]);
+
+  // Subscribe to realtime lead updates so status bar and enrichment details stay fresh
+  useEffect(() => {
+    const supabase = supabaseBrowserClient();
+    const channel = supabase
+      .channel("leads-status-feed")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "leads" },
+        (payload) => {
+          const updated = payload.new as LeadListRow | null;
+          if (!updated) return;
+
+          setRows((current) => {
+            const incoming = mapLeadToRow(updated);
+            const existingIdx = current.findIndex((row) => row.id === incoming.id);
+            if (existingIdx === -1) {
+              // Only add new rows to the top if we are showing the newest slice
+              const next = [incoming, ...current];
+              return typeof maxRows === "number" && maxRows >= 0 ? next.slice(0, maxRows) : next;
+            }
+            const next = [...current];
+            next[existingIdx] = incoming;
+            // Keep newest first by createdAt if available
+            return next.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [maxRows]);
+
+  const displayRows = useMemo(() => {
+    const limited = typeof maxRows === "number" && maxRows >= 0 ? rows.slice(0, maxRows) : rows;
+    return limited;
+  }, [rows, maxRows]);
+
   const shownCount = displayRows.length;
   const totalCount = rows.length;
+  const hasData = shownCount > 0;
 
   return (
     <section className="card">
@@ -138,6 +193,17 @@ export function LeadList({
                       >
                         {row.linkedinUrl?.trim() || "LinkedIn pending"}
                       </a>
+                      {row.headline ? (
+                        <span className="muted" style={{ fontSize: condensed ? 12 : 13 }}>
+                          {row.headline}
+                        </span>
+                      ) : null}
+                      {row.recentActivity?.[0]?.text ? (
+                        <span className="muted" style={{ fontSize: condensed ? 12 : 13 }}>
+                          Recent: {row.recentActivity[0].text.slice(0, 140)}
+                          {row.recentActivity[0].text.length > 140 ? "…" : ""}
+                        </span>
+                      ) : null}
                     </div>
                   </td>
                   <td>{row.company}</td>

@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 
-import { approveDraft, regenerateDraft, rejectDraft } from "../app/actions";
+import { approveDraft, fetchDraftFeed, regenerateDraft, rejectDraft } from "../app/actions";
+import { supabaseBrowserClient } from "../lib/supabaseClient";
 
 export type DraftWithLead = {
   leadId: string;
@@ -25,7 +26,63 @@ type Props = {
 };
 
 export function DraftFeed({ drafts }: Props) {
-  if (!drafts.length) {
+  const [localDrafts, setLocalDrafts] = useState<DraftWithLead[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // Fetch all DRAFT_READY leads with their drafts using server action
+  const fetchDrafts = async () => {
+    setLoading(true);
+    try {
+      const mapped = await fetchDraftFeed();
+      setLocalDrafts(mapped);
+    } catch (err) {
+      console.error("Failed to fetch drafts:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch existing drafts on mount
+  useEffect(() => {
+    fetchDrafts();
+  }, []);
+
+  // Subscribe to real-time updates on leads table
+  useEffect(() => {
+    const supabase = supabaseBrowserClient();
+    const channel = supabase
+      .channel("draft-feed-updates")
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "leads",
+          filter: "status=eq.DRAFT_READY",
+        },
+        () => {
+          fetchDrafts();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "drafts",
+        },
+        () => {
+          fetchDrafts();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  if (!localDrafts.length && !loading) {
     return (
       <div className="card" style={{ marginTop: 20 }}>
         <div className="pill">Draft Feed</div>
@@ -37,14 +94,20 @@ export function DraftFeed({ drafts }: Props) {
 
   return (
     <div className="grid">
-      {drafts.map((draft) => (
-        <DraftCard key={draft.draftId || draft.leadId} draft={draft} />
-      ))}
+      {loading && !localDrafts.length ? (
+        <div className="card">
+          <div className="muted">Loading drafts...</div>
+        </div>
+      ) : (
+        localDrafts.map((draft) => (
+          <DraftCard key={draft.draftId || draft.leadId} draft={draft} onAction={fetchDrafts} />
+        ))
+      )}
     </div>
   );
 }
 
-function DraftCard({ draft }: { draft: DraftWithLead }) {
+function DraftCard({ draft, onAction }: { draft: DraftWithLead; onAction?: () => void }) {
   const [localDraft, setLocalDraft] = useState({
     opener: draft.opener,
     body: draft.body,
@@ -67,6 +130,10 @@ function DraftCard({ draft }: { draft: DraftWithLead }) {
       try {
         await action();
         setMessage("Done");
+        // Refresh the draft list after action
+        if (onAction) {
+          setTimeout(onAction, 500);
+        }
       } catch (err: any) {
         setMessage(err?.message || "Action failed");
       }
