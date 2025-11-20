@@ -1,4 +1,3 @@
-import { CSVUploader } from "../components/CSVUploader";
 import { DraftFeed } from "../components/DraftFeed";
 import { LeadList } from "../components/LeadList";
 import { fetchDraftFeed, fetchLeadList } from "./actions";
@@ -25,12 +24,6 @@ export default async function MissionControlPage() {
               Set LinkedIn credentials →
             </a>
           </div>
-        </div>
-        <div className="card" style={{ width: 320 }}>
-          <div className="muted" style={{ marginBottom: 8 }}>
-            CSV Uploader
-          </div>
-          <CSVUploader />
         </div>
       </div>
 

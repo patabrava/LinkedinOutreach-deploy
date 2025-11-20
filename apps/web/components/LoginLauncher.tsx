@@ -4,7 +4,6 @@ import { useState } from "react";
 
 import type { LinkedinCredentialSummary } from "../app/actions";
 import { LinkedinCredentialsForm } from "./LinkedinCredentialsForm";
-import { StartEnrichmentButton } from "./StartEnrichmentButton";
 import { StartLoginButton } from "./StartLoginButton";
 
 type Props = {
@@ -19,13 +18,10 @@ export function LoginLauncher({ existingCreds }: Props) {
       <div className="pill">Lead Enrichment</div>
       <h3 style={{ margin: "10px 0 6px 0" }}>LinkedIn Session</h3>
       <div className="muted" style={{ marginBottom: 10 }}>
-        Kick off LinkedIn login and scraping. Save credentials first so Playwright can sign in and cache auth.json.
+        Kick off LinkedIn login. Save credentials first so Playwright can sign in and cache auth.json.
       </div>
 
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <StartLoginButton onStart={() => setShowForm(true)} />
-        <StartEnrichmentButton />
-      </div>
+      <StartLoginButton onStart={() => setShowForm(true)} />
 
       {showForm ? (
         <div style={{ marginTop: 12 }}>

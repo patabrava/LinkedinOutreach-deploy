@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import json
 import os
 import random
 import sys
@@ -107,9 +109,25 @@ async def safe_text_content(page: Page, selector: str, timeout: int = 6_000) -> 
         return ""
 
 
+async def safe_inner_text(page: Page, selector: str, timeout: int = 6_000) -> str:
+    """Get inner text from an element, which preserves more formatting."""
+    try:
+        locator = page.locator(selector)
+        if await locator.count() > 0:
+            return safe_text(await locator.first.inner_text(timeout=timeout))
+    except Exception:
+        pass
+    return ""
+
+
 async def first_match_text(page: Page, selectors: List[str], timeout: int = 6_000) -> str:
     """Return the first non-empty text for the provided selectors."""
     for selector in selectors:
+        # Try inner_text first (better for multi-line content)
+        text = await safe_inner_text(page, selector, timeout=timeout)
+        if text:
+            return text
+        # Fallback to text_content
         text = await safe_text_content(page, selector, timeout=timeout)
         if text:
             return text
@@ -130,9 +148,22 @@ async def slow_scroll(page: Page, steps: int = 6) -> None:
 
 
 async def expand_about(page: Page) -> None:
-    button = page.locator("#about button:has-text('more'), #about button:has-text('See more')")
-    if await button.count() > 0:
-        await safe_click(page, "#about button:has-text('more'), #about button:has-text('See more')")
+    """Try to expand the About section if there's a 'See more' button."""
+    selectors = [
+        "section#about button:has-text('more')",
+        "section#about button:has-text('See more')",
+        "section:has-text('About') button:has-text('more')",
+        "section:has-text('About') button:has-text('See more')",
+    ]
+    for selector in selectors:
+        try:
+            button = page.locator(selector)
+            if await button.count() > 0:
+                await button.first.click(timeout=5_000)
+                await page.wait_for_timeout(500)
+                break
+        except Exception:
+            continue
 
 
 async def scrape_experience(page: Page, max_items: int = 3) -> List[Dict[str, str]]:
@@ -179,40 +210,52 @@ async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
     page.set_default_navigation_timeout(60_000)
 
     await gentle_nav(page, normalized)
+    await page.wait_for_selector("main", timeout=20_000)
     await slow_scroll(page)
     await expand_about(page)
 
+    # Extract name
     name = await first_match_text(
         page,
         [
             "main h1.text-heading-xlarge",
             "main h1",
             "header h1",
-        ],
-    )
-    headline = await first_match_text(
-        page,
-        [
-            "main .text-body-medium.break-words",
-            "main .text-heading-medium",
-            "main p",
-        ],
-    )
-    about = await first_match_text(
-        page,
-        [
-            "section#about span[data-testid='expandable-text-box']",
-            "section:has(#about) span[data-testid='expandable-text-box']",
-            "section:has-text('About') span[data-testid='expandable-text-box']",
-            "#about .inline-show-more-text",
+            "div.pv-text-details__left-panel h1",
         ],
     )
 
-    current_company = await safe_text_content(
-        page, "#experience section:first-of-type li a span:has-text('Company') >> .. >> span[aria-hidden=true]"
+    # Extract headline - the classes you provided
+    headline = await first_match_text(
+        page,
+        [
+            "p._190e3b93._63ebc304.ec1ff1cf._47b2b2dd._79d083f8.c701dbb2.e51537ee._5a2e2bd7._8b56d53f.ff36582f._3935efd9",
+            "main .text-body-medium.break-words",
+            "div.text-body-medium.break-words",
+            "main div.pv-text-details__left-panel div.text-body-medium",
+            "main p",
+        ],
     )
-    current_title = await safe_text_content(page, "#experience section:first-of-type li span[aria-hidden=true]")
+
+    # Extract about - the span with data-testid you provided
+    about = await first_match_text(
+        page,
+        [
+            "span._2ac2b8a9._3b0da042[data-testid='expandable-text-box']",
+            "section#about span[data-testid='expandable-text-box']",
+            "section:has-text('About') span[data-testid='expandable-text-box']",
+            "#about .inline-show-more-text",
+            "section#about div.display-flex.ph5.pv3",
+        ],
+    )
+
+    # Extract current company and title from experience section
     experience = await scrape_experience(page)
+    current_company = ""
+    current_title = ""
+    if experience and len(experience) > 0:
+        current_title = experience[0].get("title", "")
+        current_company = experience[0].get("company", "")
 
     profile_data = {
         "name": name,
@@ -233,45 +276,44 @@ async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str,
     await gentle_nav(page, activity_url)
     await slow_scroll(page, steps=4)
 
-    def post_locators() -> List[str]:
-        # Try the modern "feed-commentary" nodes first, fall back to older article nodes.
-        return [
-            "div[data-view-name='feed-commentary']",
-            "div[data-testid='carousel'] div[data-view-name='feed-commentary']",
-            "article",
-        ]
-
     results: List[Dict[str, Any]] = []
-    for selector in post_locators():
-        posts = page.locator(selector)
-        count = min(await posts.count(), 5)
+    # Strategy:
+    # 1) Grab the carousel/list item cards (role=listitem) because they wrap the feed-commentary shown in the sample.
+    # 2) Prefer the explicit span[data-testid='expandable-text-box'] for text.
+    # 3) Fall back to other feed/commentary/article blocks if nothing is found.
+
+    card_selectors: List[str] = [
+        "div[role='listitem']:has(span[data-testid='expandable-text-box'])",
+        "div[data-view-name='feed-commentary']",
+        "div[data-testid='carousel'] div[data-view-name='feed-commentary']",
+        "article",
+    ]
+
+    for selector in card_selectors:
+        cards = page.locator(selector)
+        count = min(await cards.count(), 5)
         if count == 0:
             continue
 
         for idx in range(count):
-            post = posts.nth(idx)
+            card = cards.nth(idx)
             try:
-                # Prefer the explicit expandable text box the user shared.
-                text_locator = post.locator("span[data-testid='expandable-text-box']")
-                if await text_locator.count() > 0:
-                    content = safe_text(" ".join(await text_locator.all_inner_texts()))
+                text_nodes = card.locator("span[data-testid='expandable-text-box']")
+                if await text_nodes.count() > 0:
+                    content = safe_text(" ".join(await text_nodes.all_inner_texts()))
                 else:
-                    content = safe_text(await post.inner_text(timeout=8_000))
+                    content = safe_text(await card.inner_text(timeout=8_000))
             except Exception:
                 continue
 
             if not content or ("Repost" in content and "reposted" in content):
                 continue
 
-            # Walk up to the listitem (card) to pull metadata like date/likes.
-            try:
-                card = post.locator("xpath=ancestor::div[@role='listitem'][1]")
-            except Exception:
-                card = post
-
             try:
                 date_text = safe_text(
-                    await card.locator("p:has-text('•'), span:has-text('d'), span:has-text('w'), span:has-text('mo')")
+                    await card.locator(
+                        "p:has-text('•'), span:has-text('d '), span:has-text('w '), span:has-text('mo '), span:has-text('y ')"
+                    )
                     .first.text_content(timeout=4_000)
                 )
             except Exception:
@@ -289,7 +331,6 @@ async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str,
 
             results.append({"text": content, "date": date_text, "likes": likes_text})
 
-        # If we found anything with the current selector, no need to probe fallbacks.
         if results:
             break
 
@@ -396,10 +437,10 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
         await random_pause()
 
 
-async def main() -> None:
+async def main(limit: int = 10) -> None:
     client = get_supabase_client()
     creds = fetch_linkedin_credentials(client)
-    leads = fetch_new_leads(client, limit=10)
+    leads = fetch_new_leads(client, limit=limit)
     if not leads:
         print("No NEW leads to process.")
         return
@@ -412,5 +453,27 @@ async def main() -> None:
         await shutdown(playwright, browser)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="LinkedIn enrichment scraper")
+    parser.add_argument(
+        "--run",
+        action="store_true",
+        help="Execute the scraper. Without this flag the script exits without doing any work.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="Maximum number of leads to process in a single run (default: 10).",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    args = parse_args()
+    if not args.run:
+        print("Scraper invoked without --run flag. Exiting without processing leads.")
+        sys.exit(0)
+
+    limit = args.limit if isinstance(args.limit, int) and args.limit > 0 else 10
+    asyncio.run(main(limit=limit))

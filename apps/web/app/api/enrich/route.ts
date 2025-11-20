@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import { NextResponse } from "next/server";
 
-export async function POST() {
+export async function POST(request: Request) {
   try {
     const webDir = process.cwd();
     const repoRoot = path.resolve(webDir, "..", "..");
@@ -16,7 +16,10 @@ export async function POST() {
     const venvPython = path.join(scraperDir, "venv", "bin", "python");
     const pythonCmd = fs.existsSync(venvPython) ? venvPython : "python3";
 
-    const child = spawn(pythonCmd, ["scraper.py"], {
+    const { limit } = (await request.json().catch(() => ({}))) as { limit?: number };
+    const limitArg = typeof limit === "number" && limit > 0 ? ["--limit", String(limit)] : [];
+
+    const child = spawn(pythonCmd, ["scraper.py", "--run", ...limitArg], {
       cwd: scraperDir,
       env: { ...process.env },
       stdio: "ignore",
