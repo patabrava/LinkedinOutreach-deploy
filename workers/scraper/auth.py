@@ -7,6 +7,15 @@ from typing import Tuple
 
 from playwright.async_api import Browser, BrowserContext, Playwright, TimeoutError, async_playwright
 
+__all__ = [
+    "AUTH_STATE_PATH",
+    "open_browser",
+    "save_storage_state",
+    "is_logged_in",
+    "require_auth_state",
+    "shutdown",
+]
+
 AUTH_STATE_PATH = Path(__file__).parent / "auth.json"
 
 
@@ -53,4 +62,3 @@ def require_auth_state() -> None:
 async def shutdown(playwright: Playwright, browser: Browser) -> None:
     await browser.close()
     await playwright.stop()
-
