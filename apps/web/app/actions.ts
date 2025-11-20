@@ -67,6 +67,8 @@ export type LeadListRow = {
   status: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+  profile_data?: any;
+  recent_activity?: any;
 };
 
 export type LeadListResult = {
@@ -83,9 +85,12 @@ export async function fetchLeadList(page = 1, pageSize = 50): Promise<LeadListRe
   const to = from + pageSize - 1;
   const { data, error, count } = await client
     .from("leads")
-    .select("id, linkedin_url, first_name, last_name, company_name, status, created_at, updated_at", {
-      count: "exact",
-    })
+    .select(
+      "id, linkedin_url, first_name, last_name, company_name, status, created_at, updated_at, profile_data, recent_activity",
+      {
+        count: "exact",
+      }
+    )
     .order("created_at", { ascending: false })
     .range(from, to);
 
@@ -103,6 +108,8 @@ export async function fetchLeadList(page = 1, pageSize = 50): Promise<LeadListRe
     status: lead.status || "NEW",
     created_at: lead.created_at,
     updated_at: lead.updated_at,
+    profile_data: lead.profile_data || null,
+    recent_activity: lead.recent_activity || null,
   }));
 
   const total = count || 0;

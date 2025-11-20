@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { supabaseBrowserClient } from "../lib/supabaseClient";
 
 type StatusCounts = Record<string, number>;
 
@@ -56,6 +57,27 @@ export function StartEnrichmentButton() {
     refreshStatus();
   }, [refreshStatus]);
 
+  // Subscribe to real-time lead updates to refresh status immediately
+  useEffect(() => {
+    const supabase = supabaseBrowserClient();
+    const channel = supabase
+      .channel("enrichment-status-updates")
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "leads" },
+        () => {
+          // Refresh status silently whenever any lead is updated
+          refreshStatus({ silent: true }).catch(() => undefined);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [refreshStatus]);
+
+  // Poll as backup in case real-time updates fail
   useEffect(() => {
     if (!polling) {
       return;

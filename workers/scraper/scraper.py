@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import json
 import os
 import random
@@ -19,6 +20,9 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 from auth import AUTH_STATE_PATH, is_logged_in, open_browser, save_storage_state, shutdown
 
 load_dotenv()
+
+# Avoid tripping LinkedIn automation warnings by capping daily enrichments.
+DAILY_ENRICHMENT_CAP = 50
 
 
 @dataclass
@@ -54,6 +58,19 @@ def fetch_new_leads(client: Client, limit: int = 10) -> List[Lead]:
     )
     leads: List[Lead] = [Lead(**row) for row in resp.data or []]
     return leads
+
+
+def fetch_today_enrichment_count(client: Client) -> int:
+    """Return count of leads marked ENRICHED since 00:00 UTC today."""
+    start_of_day = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    resp = (
+        client.table("leads")
+        .select("id", count="exact")
+        .eq("status", "ENRICHED")
+        .gte("updated_at", start_of_day)
+        .execute()
+    )
+    return resp.count or 0
 
 
 def fetch_linkedin_credentials(client: Client) -> Optional[LinkedinCredentials]:
@@ -403,6 +420,53 @@ async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str,
     return results[:3]
 
 
+async def send_connection_request(page: Page, profile_url: str) -> bool:
+    """Attempt to send a connection request to the profile. Returns True if a send was attempted."""
+    normalized = profile_url.replace("http://", "https://").split("?")[0]
+    try:
+        await gentle_nav(page, normalized)
+    except Exception:
+        return False
+
+    # If already connected, there might be no Connect button.
+    connect_candidates = [
+        "button:has-text('Connect')",
+        "a:has-text('Connect')",
+        "button[aria-label*='Connect']",
+    ]
+    connect = None
+    for selector in connect_candidates:
+        locator = page.locator(selector)
+        if await locator.count() > 0:
+            connect = locator.first
+            break
+
+    if not connect:
+        return False
+
+    try:
+        await connect.click(timeout=6_000)
+    except Exception:
+        return False
+
+    send_candidates = [
+        "button:has-text('Send without a note')",
+        "button:has-text('Send')",
+        "button:has-text('Send now')",
+    ]
+    for selector in send_candidates:
+        try:
+            target = page.locator(selector)
+            if await target.count() > 0:
+                await target.first.click(timeout=6_000)
+                await page.wait_for_timeout(800)
+                return True
+        except Exception:
+            continue
+
+    return False
+
+
 async def login_with_credentials(context: BrowserContext, creds: LinkedinCredentials) -> None:
     """Log into LinkedIn using saved credentials and persist auth.json."""
     page = await context.new_page()
@@ -488,6 +552,12 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
         try:
             await enrich_one(page, client, lead)
             print(f"Lead {lead.id} enriched.")
+            try:
+                sent = await send_connection_request(page, lead.linkedin_url)
+                if sent:
+                    print(f"Connection request sent to {lead.id}.")
+            except Exception as exc:
+                print(f"Connection request failed for {lead.id}: {exc}", file=sys.stderr)
         except TimeoutError as exc:
             print(f"Timeout enriching {lead.id}: {exc}", file=sys.stderr)
             client.table("leads").update({"status": "NEW"}).eq("id", lead.id).execute()
@@ -506,7 +576,19 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
 async def main(limit: int = 10) -> None:
     client = get_supabase_client()
     creds = fetch_linkedin_credentials(client)
-    leads = fetch_new_leads(client, limit=limit)
+    enriched_today = fetch_today_enrichment_count(client)
+    remaining_quota = max(0, DAILY_ENRICHMENT_CAP - enriched_today)
+
+    if remaining_quota <= 0:
+        print(f"Daily enrichment cap of {DAILY_ENRICHMENT_CAP} reached. Skipping run.")
+        return
+
+    effective_limit = min(limit, remaining_quota)
+    if effective_limit <= 0:
+        print("No quota left for today.")
+        return
+
+    leads = fetch_new_leads(client, limit=effective_limit)
     if not leads:
         print("No NEW leads to process.")
         return
