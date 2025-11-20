@@ -7,6 +7,7 @@ import type { LinkedinCredentialSummary, LinkedinCredentialState } from "../app/
 
 type Props = {
   existing: LinkedinCredentialSummary;
+  useCard?: boolean;
 };
 
 const initialState: LinkedinCredentialState = { success: false };
@@ -20,11 +21,11 @@ function SubmitButton() {
   );
 }
 
-export function LinkedinCredentialsForm({ existing }: Props) {
+export function LinkedinCredentialsForm({ existing, useCard = true }: Props) {
   const [state, formAction] = useFormState(saveLinkedinCredentials, initialState);
 
-  return (
-    <form className="card" action={formAction}>
+  const content = (
+    <>
       <div className="pill">LinkedIn Auth</div>
       <h3 style={{ margin: "10px 0 6px 0" }}>Credentials</h3>
       <div className="muted" style={{ marginBottom: 12 }}>
@@ -69,6 +70,20 @@ export function LinkedinCredentialsForm({ existing }: Props) {
           </span>
         ) : null}
       </div>
+    </>
+  );
+
+  if (useCard === false) {
+    return (
+      <form action={formAction} style={{ marginTop: 8 }}>
+        {content}
+      </form>
+    );
+  }
+
+  return (
+    <form className="card" action={formAction}>
+      {content}
     </form>
   );
 }

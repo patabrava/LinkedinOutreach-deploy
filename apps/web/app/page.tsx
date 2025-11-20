@@ -1,10 +1,15 @@
 import { CSVUploader } from "../components/CSVUploader";
 import { DraftFeed } from "../components/DraftFeed";
 import { LeadList } from "../components/LeadList";
-import { fetchDraftFeed, fetchLeadList } from "./actions";
+import { LoginLauncher } from "../components/LoginLauncher";
+import { fetchDraftFeed, fetchLeadList, fetchLinkedinCredentials } from "./actions";
 
 export default async function MissionControlPage() {
-  const [drafts, leads] = await Promise.all([fetchDraftFeed(), fetchLeadList()]);
+  const [drafts, leadResult, creds] = await Promise.all([
+    fetchDraftFeed(),
+    fetchLeadList(1, 50),
+    fetchLinkedinCredentials(),
+  ]);
 
   return (
     <div className="page">
@@ -32,9 +37,10 @@ export default async function MissionControlPage() {
           </div>
           <CSVUploader />
         </div>
+        <LoginLauncher existingCreds={creds} />
       </div>
 
-      <LeadList leads={leads} />
+      <LeadList leads={leadResult.leads} condensed maxRows={8} />
 
       <DraftFeed drafts={drafts} />
     </div>

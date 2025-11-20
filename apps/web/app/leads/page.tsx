@@ -1,9 +1,13 @@
 import { CSVUploader } from "../../components/CSVUploader";
 import { LeadList } from "../../components/LeadList";
 import { fetchLeadList } from "../actions";
-
-export default async function LeadsPage() {
-  const leads = await fetchLeadList(250);
+export default async function LeadsPage({
+  searchParams,
+}: {
+  searchParams?: { page?: string };
+}) {
+  const currentPage = Math.max(1, Number(searchParams?.page) || 1);
+  const leads = await fetchLeadList(currentPage, 50);
 
   return (
     <div className="page">
@@ -26,7 +30,15 @@ export default async function LeadsPage() {
         </div>
       </div>
 
-      <LeadList leads={leads} />
+      <LeadList
+        leads={leads.leads}
+        total={leads.total}
+        page={leads.page}
+        totalPages={leads.totalPages}
+        pageSize={leads.pageSize}
+        basePath="/leads"
+        showPagination
+      />
     </div>
   );
 }

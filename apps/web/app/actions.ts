@@ -69,20 +69,32 @@ export type LeadListRow = {
   updated_at?: string | null;
 };
 
-export async function fetchLeadList(limit = 120): Promise<LeadListRow[]> {
+export type LeadListResult = {
+  leads: LeadListRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+};
+
+export async function fetchLeadList(page = 1, pageSize = 50): Promise<LeadListResult> {
   const client = supabaseAdmin();
-  const { data, error } = await client
+  const from = (page - 1) * pageSize;
+  const to = from + pageSize - 1;
+  const { data, error, count } = await client
     .from("leads")
-    .select("id, linkedin_url, first_name, last_name, company_name, status, created_at, updated_at")
+    .select("id, linkedin_url, first_name, last_name, company_name, status, created_at, updated_at", {
+      count: "exact",
+    })
     .order("created_at", { ascending: false })
-    .limit(limit);
+    .range(from, to);
 
   if (error) {
     console.error("fetchLeadList error", error);
-    return [];
+    return { leads: [], total: 0, page, pageSize, totalPages: 0 };
   }
 
-  return (data || []).map((lead) => ({
+  const leads = (data || []).map((lead) => ({
     id: lead.id,
     linkedin_url: lead.linkedin_url,
     first_name: lead.first_name || null,
@@ -92,6 +104,11 @@ export async function fetchLeadList(limit = 120): Promise<LeadListRow[]> {
     created_at: lead.created_at,
     updated_at: lead.updated_at,
   }));
+
+  const total = count || 0;
+  const totalPages = total ? Math.max(1, Math.ceil(total / pageSize)) : 1;
+
+  return { leads, total: total || 0, page, pageSize, totalPages };
 }
 
 export async function approveDraft(input: DraftInput) {
