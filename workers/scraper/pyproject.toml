@@ -11,6 +11,12 @@ dependencies = [
     "tenacity>=8.2.3",
 ]
 
+[tool.setuptools]
+py-modules = [
+    "auth",
+    "scraper",
+]
+
 [tool.black]
 line-length = 100
 

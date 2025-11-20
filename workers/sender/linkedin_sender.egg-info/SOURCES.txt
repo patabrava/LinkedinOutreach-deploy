@@ -1,0 +1,9 @@
+README.md
+monitor.py
+pyproject.toml
+sender.py
+linkedin_sender.egg-info/PKG-INFO
+linkedin_sender.egg-info/SOURCES.txt
+linkedin_sender.egg-info/dependency_links.txt
+linkedin_sender.egg-info/requires.txt
+linkedin_sender.egg-info/top_level.txt

@@ -1,0 +1,9 @@
+README.md
+auth.py
+pyproject.toml
+scraper.py
+linkedin_scraper.egg-info/PKG-INFO
+linkedin_scraper.egg-info/SOURCES.txt
+linkedin_scraper.egg-info/dependency_links.txt
+linkedin_scraper.egg-info/requires.txt
+linkedin_scraper.egg-info/top_level.txt
