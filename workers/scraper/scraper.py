@@ -107,6 +107,15 @@ async def safe_text_content(page: Page, selector: str, timeout: int = 6_000) -> 
         return ""
 
 
+async def first_match_text(page: Page, selectors: List[str], timeout: int = 6_000) -> str:
+    """Return the first non-empty text for the provided selectors."""
+    for selector in selectors:
+        text = await safe_text_content(page, selector, timeout=timeout)
+        if text:
+            return text
+    return ""
+
+
 async def gentle_nav(page: Page, url: str) -> None:
     """Navigate with forgiving waits to avoid networkidle timeouts."""
     await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
@@ -173,9 +182,31 @@ async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
     await slow_scroll(page)
     await expand_about(page)
 
-    name = await safe_text_content(page, "main h1.text-heading-xlarge")
-    headline = await safe_text_content(page, "main .text-heading-medium")
-    about = await safe_text_content(page, "#about .inline-show-more-text")
+    name = await first_match_text(
+        page,
+        [
+            "main h1.text-heading-xlarge",
+            "main h1",
+            "header h1",
+        ],
+    )
+    headline = await first_match_text(
+        page,
+        [
+            "main .text-body-medium.break-words",
+            "main .text-heading-medium",
+            "main p",
+        ],
+    )
+    about = await first_match_text(
+        page,
+        [
+            "section#about span[data-testid='expandable-text-box']",
+            "section:has(#about) span[data-testid='expandable-text-box']",
+            "section:has-text('About') span[data-testid='expandable-text-box']",
+            "#about .inline-show-more-text",
+        ],
+    )
 
     current_company = await safe_text_content(
         page, "#experience section:first-of-type li a span:has-text('Company') >> .. >> span[aria-hidden=true]"
@@ -202,33 +233,65 @@ async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str,
     await gentle_nav(page, activity_url)
     await slow_scroll(page, steps=4)
 
-    articles = page.locator("article")
-    count = min(await articles.count(), 3)
+    def post_locators() -> List[str]:
+        # Try the modern "feed-commentary" nodes first, fall back to older article nodes.
+        return [
+            "div[data-view-name='feed-commentary']",
+            "div[data-testid='carousel'] div[data-view-name='feed-commentary']",
+            "article",
+        ]
+
     results: List[Dict[str, Any]] = []
-
-    for idx in range(count):
-        article = articles.nth(idx)
-        try:
-            content = safe_text(await article.inner_text(timeout=8_000))
-        except Exception:
-            continue
-        if not content or ("Repost" in content and "reposted" in content):
+    for selector in post_locators():
+        posts = page.locator(selector)
+        count = min(await posts.count(), 5)
+        if count == 0:
             continue
 
-        try:
-            date_text = safe_text(
-                await article.locator("span:has-text('d'), span:has-text('w')").first.text_content(timeout=4_000)
-            )
-        except Exception:
-            date_text = ""
-        try:
-            likes_text = safe_text(
-                await article.locator("button:has-text('Like'), span:has-text('Like')").first.text_content(timeout=4_000)
-            )
-        except Exception:
-            likes_text = ""
+        for idx in range(count):
+            post = posts.nth(idx)
+            try:
+                # Prefer the explicit expandable text box the user shared.
+                text_locator = post.locator("span[data-testid='expandable-text-box']")
+                if await text_locator.count() > 0:
+                    content = safe_text(" ".join(await text_locator.all_inner_texts()))
+                else:
+                    content = safe_text(await post.inner_text(timeout=8_000))
+            except Exception:
+                continue
 
-        results.append({"text": content, "date": date_text, "likes": likes_text})
+            if not content or ("Repost" in content and "reposted" in content):
+                continue
+
+            # Walk up to the listitem (card) to pull metadata like date/likes.
+            try:
+                card = post.locator("xpath=ancestor::div[@role='listitem'][1]")
+            except Exception:
+                card = post
+
+            try:
+                date_text = safe_text(
+                    await card.locator("p:has-text('•'), span:has-text('d'), span:has-text('w'), span:has-text('mo')")
+                    .first.text_content(timeout=4_000)
+                )
+            except Exception:
+                date_text = ""
+
+            try:
+                likes_text = safe_text(
+                    await card.locator(
+                        "button[aria-label*=' reactions'], button:has-text(' reactions'), button:has-text('Like'), span:has-text(' reactions')"
+                    )
+                    .first.text_content(timeout=4_000)
+                )
+            except Exception:
+                likes_text = ""
+
+            results.append({"text": content, "date": date_text, "likes": likes_text})
+
+        # If we found anything with the current selector, no need to probe fallbacks.
+        if results:
+            break
 
     return results[:3]
 
