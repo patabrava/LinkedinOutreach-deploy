@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Tuple
 
-from playwright.async_api import Browser, BrowserContext, Playwright, async_playwright
+from playwright.async_api import Browser, BrowserContext, Playwright, TimeoutError, async_playwright
 
 AUTH_STATE_PATH = Path(__file__).parent / "auth.json"
 
@@ -22,6 +22,19 @@ async def open_browser(headless: bool = True) -> Tuple[Playwright, Browser, Brow
 async def save_storage_state(context: BrowserContext, path: Path = AUTH_STATE_PATH) -> None:
     """Persist cookies/session to disk after a successful login."""
     await context.storage_state(path=str(path))
+
+
+async def is_logged_in(context: BrowserContext) -> bool:
+    """Return True if the current context appears to be authenticated on LinkedIn."""
+    page = await context.new_page()
+    try:
+        await page.goto("https://www.linkedin.com/feed/", wait_until="networkidle", timeout=25_000)
+        await page.wait_for_selector("button[aria-label='Start a post']", timeout=10_000)
+        return True
+    except TimeoutError:
+        return False
+    finally:
+        await page.close()
 
 
 def require_auth_state() -> None:

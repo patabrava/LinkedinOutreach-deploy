@@ -55,9 +55,10 @@ export function LeadList({
   condensed = false,
   maxRows,
 }: Props) {
-  const hasData = leads && leads.length > 0;
+  const leadArray = Array.isArray(leads) ? leads : [];
+  const hasData = leadArray.length > 0;
 
-  const rows = (leads || []).map((lead) => {
+  const rows = leadArray.map((lead) => {
     const statusKey = (lead.status || "NEW").toUpperCase();
     const style = statusStyle[statusKey] || { bg: "rgba(255,255,255,0.08)", color: "#cbd5e1" };
     const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim() || "Name pending";

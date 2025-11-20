@@ -1,13 +1,14 @@
 import { CSVUploader } from "../../components/CSVUploader";
 import { LeadList } from "../../components/LeadList";
-import { fetchLeadList } from "../actions";
+import { LoginLauncher } from "../../components/LoginLauncher";
+import { fetchLeadList, fetchLinkedinCredentials } from "../actions";
 export default async function LeadsPage({
   searchParams,
 }: {
   searchParams?: { page?: string };
 }) {
   const currentPage = Math.max(1, Number(searchParams?.page) || 1);
-  const leads = await fetchLeadList(currentPage, 50);
+  const [leads, creds] = await Promise.all([fetchLeadList(currentPage, 50), fetchLinkedinCredentials()]);
 
   return (
     <div className="page">
@@ -28,6 +29,7 @@ export default async function LeadsPage({
           </div>
           <CSVUploader />
         </div>
+        <LoginLauncher existingCreds={creds} />
       </div>
 
       <LeadList

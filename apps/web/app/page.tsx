@@ -4,7 +4,7 @@ import { LeadList } from "../components/LeadList";
 import { fetchDraftFeed, fetchLeadList } from "./actions";
 
 export default async function MissionControlPage() {
-  const [drafts, leads] = await Promise.all([fetchDraftFeed(), fetchLeadList()]);
+  const [drafts, leadResult] = await Promise.all([fetchDraftFeed(), fetchLeadList(1, 50)]);
 
   return (
     <div className="page">
@@ -34,7 +34,7 @@ export default async function MissionControlPage() {
         </div>
       </div>
 
-      <LeadList leads={leads} />
+      <LeadList leads={leadResult.leads} condensed maxRows={8} />
 
       <DraftFeed drafts={drafts} />
     </div>
