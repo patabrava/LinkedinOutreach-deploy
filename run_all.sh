@@ -1,0 +1,62 @@
+#!/bin/bash
+# Launch scraper, MCP agent, sender, and web UI together.
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG_DIR="$ROOT_DIR/.logs"
+mkdir -p "$LOG_DIR"
+
+PIDS=()
+
+cleanup() {
+  echo "\n🧹 Stopping all services..."
+  for pid in "${PIDS[@]}"; do
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+  echo "✅ All processes terminated."
+}
+
+trap cleanup INT TERM EXIT
+
+run_service() {
+  local name="$1"
+  local cmd="$2"
+  local logfile="$LOG_DIR/${name}.log"
+
+  echo "🚀 Starting $name (log: $logfile)"
+  bash -c "$cmd" \
+    >>"$logfile" 2>&1 &
+  local pid=$!
+  PIDS+=("$pid")
+  echo "   ↳ PID $pid"
+}
+
+# Scraper (processes NEW leads and exits when queue is empty)
+run_service "scraper" "cd '$ROOT_DIR/workers/scraper' && source venv/bin/activate && python scraper.py"
+
+# MCP agent (turns ENRICHED leads into drafts)
+run_service "agent" "cd '$ROOT_DIR/mcp-server' && source venv/bin/activate && python run_agent.py"
+
+# Sender (types/sends APPROVED drafts)
+run_service "sender" "cd '$ROOT_DIR/workers/sender' && source venv/bin/activate && python sender.py"
+
+# Web UI (Mission Control dashboard)
+run_service "web" "cd '$ROOT_DIR' && npm run dev:web"
+
+cat <<'EOF'
+📟 Services launched:
+  - Scraper  (logs: .logs/scraper.log)
+  - Agent    (logs: .logs/agent.log)
+  - Sender   (logs: .logs/sender.log)
+  - Web UI   (logs: .logs/web.log)
+
+Press Ctrl+C to stop everything.
+EOF
+
+# Keep script running so trap handles cleanup
+wait -n || true
+wait

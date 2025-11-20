@@ -17,6 +17,20 @@ Workspace that hosts the web UI, scraping/sending workers, and MCP agent.
 5) **Sender**: `cd workers/sender && pip install -e . && python -m playwright install chromium` then `python sender.py` to type/send APPROVED drafts (obeys `DAILY_SEND_LIMIT`). `monitor.py` flags replies.  
 6) **Web**: `npm install` then `npm run dev:web` to open Mission Control (draft feed, approve/reject/regenerate, CSV importer).  
 
+### Run everything at once
+After completing the setup steps above (including environment variables and Playwright login), you can launch the scraper, MCP agent, sender, and Mission Control UI together:
+
+```bash
+./run_all.sh
+```
+
+Logs are written to `.logs/` and the script stops all processes when you press `Ctrl+C`.
+
 ## Automation targets
 - Cron suggestion: scraper every 2h, agent hourly, sender every 15m during 09:00–17:00 M–F.
 - Deploy: Supabase (cloud), UI on Vercel, workers on a VPS with Docker Compose (persistent browser).
+
+## CSV importer format
+- Accepted columns (case-insensitive): `linkedin_url` (required), `first_name`, `last_name`, `company_name`.  
+- Aliases: `LinkedIn`, `linkedin`; `Company`/`company`/`organization_name`.  
+- Extra columns are ignored. Duplicates are deduped by `linkedin_url`.

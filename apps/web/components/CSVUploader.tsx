@@ -34,7 +34,12 @@ export function CSVUploader({ afterImport }: Props) {
             linkedin_url: r.linkedin_url || r["LinkedIn"] || r["linkedin"] || "",
             first_name: r.first_name || r["firstName"] || r["First Name"],
             last_name: r.last_name || r["lastName"] || r["Last Name"],
-            company_name: r.company_name || r["Company"] || r["company"],
+            company_name:
+              r.company_name ||
+              r["Company"] ||
+              r["company"] ||
+              r["organization_name"] ||
+              r["organization"],
           }));
           const response = await importLeads(rows);
           setStatus(`Inserted ${response.inserted} leads`);
