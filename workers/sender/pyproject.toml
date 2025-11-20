@@ -1,0 +1,14 @@
+[project]
+name = "linkedin-sender"
+version = "0.1.0"
+description = "Safe message sender for LinkedIn using Playwright and Supabase"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.48.0",
+    "supabase>=2.4.0",
+    "python-dotenv>=1.0.1",
+]
+
+[tool.black]
+line-length = 100
+

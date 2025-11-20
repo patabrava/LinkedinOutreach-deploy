@@ -1,0 +1,19 @@
+[project]
+name = "linkedin-scraper"
+version = "0.1.0"
+description = "LinkedIn scraper using Playwright and Supabase"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.48.0",
+    "supabase>=2.4.0",
+    "python-dotenv>=1.0.1",
+    "tenacity>=8.2.3",
+]
+
+[tool.black]
+line-length = 100
+
+[tool.isort]
+profile = "black"
+

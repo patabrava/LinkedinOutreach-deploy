@@ -1,0 +1,15 @@
+[project]
+name = "linkedin-mcp-server"
+version = "0.1.0"
+description = "MCP server connecting OpenAI and Supabase for outreach drafts"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=0.0.5",
+    "openai>=1.52.0",
+    "supabase>=2.4.0",
+    "python-dotenv>=1.0.1",
+]
+
+[tool.black]
+line-length = 100
+
