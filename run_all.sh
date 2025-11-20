@@ -9,8 +9,48 @@ mkdir -p "$LOG_DIR"
 
 SERVICE_PIDS=()
 TAIL_PIDS=()
+CLEANED_UP=0
+
+load_envs() {
+  # Export env vars for Python services if not already present. Priority:
+  # 1) $ROOT_DIR/.env
+  # 2) $ROOT_DIR/mcp-server/.env
+  # 3) $ROOT_DIR/workers/.env
+  # 4) $ROOT_DIR/apps/web/.env.local
+  local candidates=(
+    "$ROOT_DIR/.env"
+    "$ROOT_DIR/mcp-server/.env"
+    "$ROOT_DIR/workers/.env"
+    "$ROOT_DIR/apps/web/.env.local"
+  )
+  for f in "${candidates[@]}"; do
+    if [ -f "$f" ]; then
+      # shellcheck disable=SC1090
+      set -a; . "$f"; set +a
+      echo "[env] loaded $f"
+    fi
+  done
+}
+
+check_auth() {
+  local missing=0
+  if [ ! -f "$ROOT_DIR/workers/scraper/auth.json" ]; then
+    echo "[scraper] ⚠ Missing auth.json at workers/scraper/auth.json. Login once via:"
+    echo "[scraper]   playwright codegen --save-storage=auth.json https://www.linkedin.com/login"
+    missing=1
+  fi
+  if [ ! -f "$ROOT_DIR/workers/sender/auth.json" ]; then
+    echo "[sender] ⚠ Missing auth.json at workers/sender/auth.json. Copy it from scraper or generate via codegen."
+    missing=1
+  fi
+  return $missing
+}
 
 cleanup() {
+  if [ "$CLEANED_UP" -eq 1 ]; then
+    return
+  fi
+  CLEANED_UP=1
   printf '\n🧹 Stopping all services...\n'
 
   for pid in "${TAIL_PIDS[@]}"; do
@@ -31,6 +71,8 @@ cleanup() {
 }
 
 trap cleanup INT TERM EXIT
+
+load_envs
 
 run_service() {
   local name="$1"
@@ -54,13 +96,21 @@ run_service() {
 
 # Scraper (processes NEW leads and exits when queue is empty)
 # Use -u to disable Python stdout buffering so logs stream immediately to file.
-run_service "scraper" "cd '$ROOT_DIR/workers/scraper' && source venv/bin/activate && python -u scraper.py"
+if [ -f "$ROOT_DIR/workers/scraper/auth.json" ]; then
+  run_service "scraper" "cd '$ROOT_DIR/workers/scraper' && source venv/bin/activate && while true; do python -u scraper.py; sleep 15; done"
+else
+  echo "[scraper] ⏭ Skipping start (missing workers/scraper/auth.json)."
+fi
 
 # MCP agent (turns ENRICHED leads into drafts)
-run_service "agent" "cd '$ROOT_DIR/mcp-server' && source venv/bin/activate && python -u run_agent.py"
+run_service "agent" "cd '$ROOT_DIR/mcp-server' && source venv/bin/activate && while true; do python -u run_agent.py; sleep 15; done"
 
 # Sender (types/sends APPROVED drafts)
-run_service "sender" "cd '$ROOT_DIR/workers/sender' && source venv/bin/activate && python -u sender.py"
+if [ -f "$ROOT_DIR/workers/sender/auth.json" ]; then
+  run_service "sender" "cd '$ROOT_DIR/workers/sender' && source venv/bin/activate && while true; do python -u sender.py; sleep 20; done"
+else
+  echo "[sender] ⏭ Skipping start (missing workers/sender/auth.json)."
+fi
 
 # Web UI (Mission Control dashboard)
 run_service "web" "cd '$ROOT_DIR' && npm run dev:web"

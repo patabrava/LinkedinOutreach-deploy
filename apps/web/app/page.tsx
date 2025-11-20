@@ -1,9 +1,10 @@
 import { CSVUploader } from "../components/CSVUploader";
 import { DraftFeed } from "../components/DraftFeed";
-import { fetchDraftFeed } from "./actions";
+import { LeadList } from "../components/LeadList";
+import { fetchDraftFeed, fetchLeadList } from "./actions";
 
 export default async function MissionControlPage() {
-  const drafts = await fetchDraftFeed();
+  const [drafts, leads] = await Promise.all([fetchDraftFeed(), fetchLeadList()]);
 
   return (
     <div className="page">
@@ -14,6 +15,11 @@ export default async function MissionControlPage() {
             Mission Control
           </h1>
           <div className="muted">Review, edit, and approve AI-generated outreach.</div>
+          <div style={{ marginTop: 6 }}>
+            <a className="muted" href="/leads">
+              View all leads →
+            </a>
+          </div>
         </div>
         <div className="card" style={{ width: 320 }}>
           <div className="muted" style={{ marginBottom: 8 }}>
@@ -22,6 +28,8 @@ export default async function MissionControlPage() {
           <CSVUploader />
         </div>
       </div>
+
+      <LeadList leads={leads} />
 
       <DraftFeed drafts={drafts} />
     </div>

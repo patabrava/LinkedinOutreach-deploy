@@ -48,6 +48,42 @@ export async function fetchDraftFeed() {
 const buildFinalMessage = (opener: string, body: string, cta: string) =>
   [opener, body, cta].filter(Boolean).join("\n\n");
 
+export type LeadListRow = {
+  id: string;
+  linkedin_url: string;
+  first_name: string | null;
+  last_name: string | null;
+  company_name: string | null;
+  status: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export async function fetchLeadList(limit = 120): Promise<LeadListRow[]> {
+  const client = supabaseAdmin();
+  const { data, error } = await client
+    .from("leads")
+    .select("id, linkedin_url, first_name, last_name, company_name, status, created_at, updated_at")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    console.error("fetchLeadList error", error);
+    return [];
+  }
+
+  return (data || []).map((lead) => ({
+    id: lead.id,
+    linkedin_url: lead.linkedin_url,
+    first_name: lead.first_name || null,
+    last_name: lead.last_name || null,
+    company_name: lead.company_name || null,
+    status: lead.status || "NEW",
+    created_at: lead.created_at,
+    updated_at: lead.updated_at,
+  }));
+}
+
 export async function approveDraft(input: DraftInput) {
   const client = supabaseAdmin();
   const finalMessage = buildFinalMessage(input.opener, input.body, input.cta);
@@ -135,6 +171,6 @@ export async function importLeads(rows: LeadCsvRow[]) {
     throw error;
   }
   revalidatePath("/");
+  revalidatePath("/leads");
   return { inserted: count || sanitized.length };
 }
-
