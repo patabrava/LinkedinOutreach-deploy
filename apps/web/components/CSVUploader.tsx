@@ -5,8 +5,8 @@ import Papa from "papaparse";
 
 import { importLeads } from "../app/actions";
 
-type Row = {
-  linkedin_url: string;
+type Row = Partial<Record<string, string>> & {
+  linkedin_url?: string;
   first_name?: string;
   last_name?: string;
   company_name?: string;

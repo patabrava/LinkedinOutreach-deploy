@@ -7,16 +7,26 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$ROOT_DIR/.logs"
 mkdir -p "$LOG_DIR"
 
-PIDS=()
+SERVICE_PIDS=()
+TAIL_PIDS=()
 
 cleanup() {
-  echo "\n🧹 Stopping all services..."
-  for pid in "${PIDS[@]}"; do
+  printf '\n🧹 Stopping all services...\n'
+
+  for pid in "${TAIL_PIDS[@]}"; do
     if kill -0 "$pid" >/dev/null 2>&1; then
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
     fi
   done
+
+  for pid in "${SERVICE_PIDS[@]}"; do
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+
   echo "✅ All processes terminated."
 }
 
@@ -27,12 +37,18 @@ run_service() {
   local cmd="$2"
   local logfile="$LOG_DIR/${name}.log"
 
+  # Truncate previous logs so each run is fresh
+  : >"$logfile"
+
   echo "🚀 Starting $name (log: $logfile)"
-  bash -c "$cmd" \
-    >>"$logfile" 2>&1 &
-  local pid=$!
-  PIDS+=("$pid")
-  echo "   ↳ PID $pid"
+  bash -c "$cmd" >>"$logfile" 2>&1 &
+  local service_pid=$!
+  SERVICE_PIDS+=("$service_pid")
+  echo "   ↳ PID $service_pid"
+
+  tail -F "$logfile" | sed "s/^/[$name] /" &
+  local tail_pid=$!
+  TAIL_PIDS+=("$tail_pid")
 }
 
 # Scraper (processes NEW leads and exits when queue is empty)
@@ -58,5 +74,8 @@ Press Ctrl+C to stop everything.
 EOF
 
 # Keep script running so trap handles cleanup
-wait -n || true
-wait
+if [ "${#SERVICE_PIDS[@]}" -gt 0 ]; then
+  for pid in "${SERVICE_PIDS[@]}"; do
+    wait "$pid" || true
+  done
+fi
