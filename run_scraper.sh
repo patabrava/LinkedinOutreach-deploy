@@ -3,4 +3,4 @@
 
 cd "$(dirname "$0")/workers/scraper"
 source venv/bin/activate
-python scraper.py
+python scraper.py --run

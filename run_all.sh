@@ -97,7 +97,7 @@ run_service() {
 # Scraper (processes NEW leads and exits when queue is empty)
 # Use -u to disable Python stdout buffering so logs stream immediately to file.
 if [ -f "$ROOT_DIR/workers/scraper/auth.json" ]; then
-  run_service "scraper" "cd '$ROOT_DIR/workers/scraper' && source venv/bin/activate && while true; do python -u scraper.py; sleep 15; done"
+  run_service "scraper" "cd '$ROOT_DIR/workers/scraper' && source venv/bin/activate && while true; do python -u scraper.py --run; sleep 15; done"
 else
   echo "[scraper] ⏭ Skipping start (missing workers/scraper/auth.json)."
 fi
