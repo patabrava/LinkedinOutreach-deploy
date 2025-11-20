@@ -46,19 +46,21 @@ run_service() {
   SERVICE_PIDS+=("$service_pid")
   echo "   ↳ PID $service_pid"
 
-  tail -F "$logfile" | sed "s/^/[$name] /" &
+  # Show logs from the beginning and follow updates. Prefix each line with the service name.
+  tail -n +1 -F "$logfile" | sed "s/^/[$name] /" &
   local tail_pid=$!
   TAIL_PIDS+=("$tail_pid")
 }
 
 # Scraper (processes NEW leads and exits when queue is empty)
-run_service "scraper" "cd '$ROOT_DIR/workers/scraper' && source venv/bin/activate && python scraper.py"
+# Use -u to disable Python stdout buffering so logs stream immediately to file.
+run_service "scraper" "cd '$ROOT_DIR/workers/scraper' && source venv/bin/activate && python -u scraper.py"
 
 # MCP agent (turns ENRICHED leads into drafts)
-run_service "agent" "cd '$ROOT_DIR/mcp-server' && source venv/bin/activate && python run_agent.py"
+run_service "agent" "cd '$ROOT_DIR/mcp-server' && source venv/bin/activate && python -u run_agent.py"
 
 # Sender (types/sends APPROVED drafts)
-run_service "sender" "cd '$ROOT_DIR/workers/sender' && source venv/bin/activate && python sender.py"
+run_service "sender" "cd '$ROOT_DIR/workers/sender' && source venv/bin/activate && python -u sender.py"
 
 # Web UI (Mission Control dashboard)
 run_service "web" "cd '$ROOT_DIR' && npm run dev:web"
