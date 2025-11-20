@@ -237,13 +237,30 @@ async def login_with_credentials(context: BrowserContext, creds: LinkedinCredent
     """Log into LinkedIn using saved credentials and persist auth.json."""
     page = await context.new_page()
     await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=60_000)
-    await page.fill("input#username", creds.email)
-    await page.fill("input#password", creds.password)
-    await safe_click(page, "button[type=submit]")
     await page.wait_for_timeout(2_000)
-    await page.wait_for_url("**/feed**", timeout=40_000)
-    await save_storage_state(context, path=AUTH_STATE_PATH)
-    await page.close()
+    
+    # Check if already logged in (redirected to feed)
+    if "/feed" in page.url:
+        print("Already authenticated, skipping login.")
+        await save_storage_state(context, path=AUTH_STATE_PATH)
+        await page.close()
+        return
+    
+    # Proceed with login
+    try:
+        await page.fill("input#username", creds.email, timeout=10_000)
+        await page.fill("input#password", creds.password, timeout=10_000)
+        await safe_click(page, "button[type=submit]")
+        await page.wait_for_timeout(3_000)
+        await page.wait_for_url("**/feed**", timeout=40_000)
+        await save_storage_state(context, path=AUTH_STATE_PATH)
+    except TimeoutError as e:
+        print(f"Login timeout. Current URL: {page.url}", file=sys.stderr)
+        # Save state anyway in case partially logged in
+        await save_storage_state(context, path=AUTH_STATE_PATH)
+        raise
+    finally:
+        await page.close()
 
 
 async def ensure_linkedin_auth(context: BrowserContext, creds: Optional[LinkedinCredentials]) -> None:

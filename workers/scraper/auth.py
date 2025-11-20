@@ -28,10 +28,13 @@ async def is_logged_in(context: BrowserContext) -> bool:
     """Return True if the current context appears to be authenticated on LinkedIn."""
     page = await context.new_page()
     try:
-        await page.goto("https://www.linkedin.com/feed/", wait_until="networkidle", timeout=25_000)
-        await page.wait_for_selector("button[aria-label='Start a post']", timeout=10_000)
-        return True
-    except TimeoutError:
+        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=20_000)
+        await page.wait_for_timeout(2_000)
+        # Check if we're on the feed (authenticated) or redirected to login
+        current_url = page.url
+        is_authenticated = "/feed" in current_url and "/login" not in current_url
+        return is_authenticated
+    except Exception:
         return False
     finally:
         await page.close()
