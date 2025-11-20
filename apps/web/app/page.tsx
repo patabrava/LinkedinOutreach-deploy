@@ -20,6 +20,11 @@ export default async function MissionControlPage() {
               View all leads →
             </a>
           </div>
+          <div style={{ marginTop: 4 }}>
+            <a className="muted" href="/settings">
+              Set LinkedIn credentials →
+            </a>
+          </div>
         </div>
         <div className="card" style={{ width: 320 }}>
           <div className="muted" style={{ marginBottom: 8 }}>

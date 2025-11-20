@@ -13,6 +13,16 @@ type DraftInput = {
   ctaType?: string;
 };
 
+export type LinkedinCredentialSummary = {
+  email?: string;
+  hasPassword: boolean;
+};
+
+export type LinkedinCredentialState = {
+  success: boolean;
+  error?: string;
+};
+
 export async function fetchDraftFeed() {
   const client = supabaseAdmin();
   const { data, error } = await client
@@ -173,4 +183,50 @@ export async function importLeads(rows: LeadCsvRow[]) {
   revalidatePath("/");
   revalidatePath("/leads");
   return { inserted: count || sanitized.length };
+}
+
+export async function fetchLinkedinCredentials(): Promise<LinkedinCredentialSummary> {
+  const client = supabaseAdmin();
+  const { data, error } = await client
+    .from("settings")
+    .select("value")
+    .eq("key", "linkedin_credentials")
+    .maybeSingle();
+
+  if (error) {
+    console.error("fetchLinkedinCredentials error", error);
+    return { hasPassword: false };
+  }
+
+  const value = (data as any)?.value || {};
+  return {
+    email: value.email || "",
+    hasPassword: Boolean(value.password),
+  };
+}
+
+export async function saveLinkedinCredentials(
+  _prev: LinkedinCredentialState,
+  formData: FormData
+): Promise<LinkedinCredentialState> {
+  const email = (formData.get("email") as string)?.trim();
+  const password = (formData.get("password") as string)?.trim();
+
+  if (!email || !password) {
+    return { success: false, error: "Email and password are required." };
+  }
+
+  const client = supabaseAdmin();
+  const { error } = await client
+    .from("settings")
+    .upsert({ key: "linkedin_credentials", value: { email, password } }, { onConflict: "key" });
+
+  if (error) {
+    console.error("saveLinkedinCredentials error", error);
+    return { success: false, error: "Could not save credentials." };
+  }
+
+  revalidatePath("/");
+  revalidatePath("/settings");
+  return { success: true };
 }

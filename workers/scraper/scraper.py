@@ -14,7 +14,7 @@ from playwright.async_api import BrowserContext, Page
 from supabase import Client, create_client
 from tenacity import retry, stop_after_attempt, wait_fixed
 
-from auth import open_browser, require_auth_state, shutdown
+from auth import AUTH_STATE_PATH, open_browser, save_storage_state, shutdown
 
 load_dotenv()
 
@@ -26,6 +26,12 @@ class Lead:
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     company_name: Optional[str] = None
+
+
+@dataclass
+class LinkedinCredentials:
+    email: str
+    password: str
 
 
 def get_supabase_client() -> Client:
@@ -46,6 +52,22 @@ def fetch_new_leads(client: Client, limit: int = 10) -> List[Lead]:
     )
     leads: List[Lead] = [Lead(**row) for row in resp.data or []]
     return leads
+
+
+def fetch_linkedin_credentials(client: Client) -> Optional[LinkedinCredentials]:
+    resp = (
+        client.table("settings")
+        .select("value")
+        .eq("key", "linkedin_credentials")
+        .limit(1)
+        .execute()
+    )
+    value = (resp.data or [{}])[0].get("value") or {}
+    email = value.get("email") or value.get("username")
+    password = value.get("password")
+    if not email or not password:
+        return None
+    return LinkedinCredentials(email=email, password=password)
 
 
 async def random_pause(min_seconds: float = 3.5, max_seconds: float = 7.2) -> None:
@@ -142,9 +164,33 @@ async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str,
                 "date": date_text,
                 "likes": likes_text,
             }
-        )
+    )
 
     return results[:3]
+
+
+async def login_with_credentials(context: BrowserContext, creds: LinkedinCredentials) -> None:
+    """Log into LinkedIn using saved credentials and persist auth.json."""
+    page = await context.new_page()
+    await page.goto("https://www.linkedin.com/login", wait_until="networkidle")
+    await page.fill("input#username", creds.email)
+    await page.fill("input#password", creds.password)
+    await safe_click(page, "button[type=submit]")
+    await page.wait_for_timeout(2_000)
+    await page.wait_for_url("**/feed**", timeout=25_000)
+    await save_storage_state(context, path=AUTH_STATE_PATH)
+    await page.close()
+
+
+async def ensure_linkedin_auth(context: BrowserContext, creds: Optional[LinkedinCredentials]) -> None:
+    if AUTH_STATE_PATH.exists():
+        return
+    if not creds:
+        raise RuntimeError(
+            "Missing auth.json and no LinkedIn credentials configured. "
+            "Add them in the web UI (Settings → LinkedIn credentials) and retry."
+        )
+    await login_with_credentials(context, creds)
 
 
 def update_lead(
@@ -185,8 +231,8 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
 
 
 async def main() -> None:
-    require_auth_state()
     client = get_supabase_client()
+    creds = fetch_linkedin_credentials(client)
     leads = fetch_new_leads(client, limit=10)
     if not leads:
         print("No NEW leads to process.")
@@ -194,6 +240,7 @@ async def main() -> None:
 
     playwright, browser, context = await open_browser(headless=False)
     try:
+        await ensure_linkedin_auth(context, creds)
         await process_batch(context, client, leads)
     finally:
         await shutdown(playwright, browser)
