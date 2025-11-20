@@ -216,18 +216,24 @@ async def enrich_one(page: Page, client: Client, lead: Lead) -> None:
 
 
 async def process_batch(context: BrowserContext, client: Client, leads: List[Lead]) -> None:
-    page = await context.new_page()
     for lead in leads:
         print(f"Processing lead {lead.id} ({lead.linkedin_url})")
         client.table("leads").update({"status": "PROCESSING"}).eq("id", lead.id).execute()
+
+        page = await context.new_page()
         try:
             await enrich_one(page, client, lead)
             print(f"Lead {lead.id} enriched.")
         except Exception as exc:
             print(f"Failed to enrich {lead.id}: {exc}", file=sys.stderr)
             client.table("leads").update({"status": "NEW"}).eq("id", lead.id).execute()
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
         await random_pause()
-    await page.close()
 
 
 async def main() -> None:
