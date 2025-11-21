@@ -1,14 +1,19 @@
 import { LeadList } from "../../components/LeadList";
-import { LoginLauncher } from "../../components/LoginLauncher";
 import { StartEnrichmentButton } from "../../components/StartEnrichmentButton";
-import { fetchLeadList, fetchLinkedinCredentials } from "../actions";
+import { fetchLeadList } from "../actions";
 export default async function LeadsPage({
   searchParams,
 }: {
-  searchParams?: { page?: string };
+  searchParams?: { page?: string; status?: string; company?: string; name?: string; linkedin?: string };
 }) {
   const currentPage = Math.max(1, Number(searchParams?.page) || 1);
-  const [leads, creds] = await Promise.all([fetchLeadList(currentPage, 50), fetchLinkedinCredentials()]);
+  const filters = {
+    status: (searchParams?.status || "").trim(),
+    company: (searchParams?.company || "").trim(),
+    name: (searchParams?.name || "").trim(),
+    linkedin: (searchParams?.linkedin || "").trim(),
+  };
+  const leads = await fetchLeadList(currentPage, 50, filters);
 
   return (
     <div className="page">
@@ -31,15 +36,15 @@ export default async function LeadsPage({
             </a>
           </div>
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <LoginLauncher existingCreds={creds} />
-          <div className="card" style={{ padding: 16 }}>
-            <div className="pill">Automation Control</div>
-            <h3 style={{ margin: "12px 0 6px 0" }}>Lead enrichment</h3>
-            <div className="muted" style={{ marginBottom: 12 }}>
-              Kick off scraping when you are ready. Progress updates live as leads are enriched.
-            </div>
-            <StartEnrichmentButton />
+        <div className="card" style={{ padding: 16 }}>
+          <div className="pill">Automation Control</div>
+          <h3 style={{ margin: "12px 0 6px 0" }}>Lead enrichment</h3>
+          <div className="muted" style={{ marginBottom: 12 }}>
+            Kick off scraping when you are ready. Progress updates live as leads are enriched.
+          </div>
+          <StartEnrichmentButton />
+          <div className="muted" style={{ marginTop: 10 }}>
+            Manage LinkedIn login & credentials in <a href="/settings">Settings</a>.
           </div>
         </div>
       </div>

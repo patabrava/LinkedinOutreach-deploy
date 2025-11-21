@@ -15,8 +15,8 @@ export function LoginLauncher({ existingCreds }: Props) {
 
   return (
     <div className="card" style={{ width: 380, alignSelf: "flex-start" }}>
-      <div className="pill">Lead Enrichment</div>
-      <h3 style={{ margin: "10px 0 6px 0" }}>LinkedIn Session</h3>
+      <div className="pill">LinkedIn Session</div>
+      <h3 style={{ margin: "10px 0 6px 0" }}>Login & Credentials</h3>
       <div className="muted" style={{ marginBottom: 10 }}>
         Kick off LinkedIn login. Save credentials first so Playwright can sign in and cache auth.json.
       </div>

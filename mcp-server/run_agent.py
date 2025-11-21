@@ -79,7 +79,13 @@ def main() -> None:
             model=OPENAI_MODEL,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": "You are a concise B2B outreach copywriter."},
+                {
+                    "role": "system",
+                    "content": (
+                        "Du bist eine deutschsprachige LinkedIn-Textexpertin mit Schwerpunkt Immobilien. "
+                        "Schreibe prägnante, warme und branchenspezifische Outreach-Nachrichten auf Deutsch."
+                    ),
+                },
                 {"role": "system", "content": PROMPT},
                 {"role": "user", "content": prompt},
             ],
