@@ -412,6 +412,53 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
     print(f"Sent message for lead {lead['id']}")
 
 
+# ------------------------- FOLLOW-UP FLOW -------------------------
+def fetch_next_followup(client: Client) -> Optional[Dict[str, Any]]:
+    resp = (
+        client.table("followups")
+        .select("*, lead:leads(id, linkedin_url)")
+        .eq("status", "APPROVED")
+        .order("updated_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    rows = resp.data or []
+    return rows[0] if rows else None
+
+
+def build_followup_message(fu: Dict[str, Any]) -> str:
+    # Prefer draft_text; fallback to sent_text if somehow present
+    msg = (fu.get("draft_text") or fu.get("sent_text") or "").strip()
+    return msg
+
+
+def mark_followup_sent(client: Client, followup_id: str, message: str) -> None:
+    now_iso = datetime.utcnow().isoformat()
+    client.table("followups").update(
+        {"status": "SENT", "sent_text": message, "sent_at": now_iso}
+    ).eq("id", followup_id).execute()
+
+
+async def process_followup_one(context: BrowserContext, client: Client, followup: Dict[str, Any]) -> None:
+    lead = (followup.get("lead") or {})
+    linkedin_url = str(lead.get("linkedin_url") or "").replace("http://", "https://")
+    if not linkedin_url:
+        raise RuntimeError("Followup has no linked lead URL")
+
+    message = build_followup_message(followup)
+    if not message:
+        raise RuntimeError("Followup has no draft_text to send")
+
+    page = await context.new_page()
+    await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
+    await page.wait_for_timeout(1_000)
+    surface = await open_message_surface(page)
+    await send_message(page, message, surface)
+    await page.close()
+    mark_followup_sent(client, followup["id"], message)
+    print(f"Sent follow-up {followup['id']} for lead {lead.get('id')}")
+
+
 def fetch_linkedin_credentials(client: Client) -> Optional[Dict[str, str]]:
     resp = (
         client.table("settings")
@@ -538,19 +585,44 @@ async def ensure_linkedin_auth(context: BrowserContext, client: Client) -> None:
 async def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Send approved drafts via LinkedIn.")
+    parser = argparse.ArgumentParser(description="Send approved drafts or follow-ups via LinkedIn.")
     parser.add_argument("--lead-id", help="Send only this lead id (bypass queue).")
+    parser.add_argument("--followup", action="store_true", help="Process APPROVED followups instead of initial outreach.")
     args = parser.parse_args()
 
     client = get_supabase_client()
     daily_limit = int(os.getenv("DAILY_SEND_LIMIT", str(DAILY_SEND_DEFAULT)))
     already_sent = sent_today_count(client)
-    if already_sent >= daily_limit:
+    if already_sent >= daily_limit and not args.followup:
         print("Daily send limit reached; exiting.")
         return
 
     leads_to_send = []
     remaining = max(0, daily_limit - already_sent)
+
+    if args.followup:
+        # Process a batch of approved followups; keep simple cap of remaining slots
+        items: list[Dict[str, Any]] = []
+        for _ in range(max(1, daily_limit - already_sent)):
+            fu = fetch_next_followup(client)
+            if not fu:
+                break
+            items.append(fu)
+        if not items:
+            print("No APPROVED followups to send.")
+            return
+        playwright, browser, context = await open_browser(headless=False)
+        try:
+            await ensure_linkedin_auth(context, client)
+            for fu in items:
+                try:
+                    await process_followup_one(context, client, fu)
+                except Exception as exc:
+                    print(f"Failed to send follow-up {fu.get('id')}: {exc}", file=sys.stderr)
+                await random_pause(2, 4)
+        finally:
+            await shutdown(playwright, browser)
+        return
 
     if args.lead_id:
         lead = fetch_lead_by_id(client, args.lead_id)

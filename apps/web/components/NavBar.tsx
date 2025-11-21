@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 const NAV_ITEMS = [
   { href: "/", label: "Mission Control", hint: "Drafts & approvals" },
   { href: "/leads", label: "Leads", hint: "Uploaded pipeline" },
+  { href: "/followups", label: "Follow-ups", hint: "Replies & review" },
   { href: "/upload", label: "Upload", hint: "CSV intake" },
   { href: "/settings", label: "Settings", hint: "LinkedIn credentials" },
 ];

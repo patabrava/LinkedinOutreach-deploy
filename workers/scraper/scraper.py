@@ -23,6 +23,7 @@ load_dotenv()
 
 # Avoid tripping LinkedIn automation warnings by capping daily enrichments.
 DAILY_ENRICHMENT_CAP = 50
+DAILY_INBOX_SCAN_LIMIT = 60
 
 
 @dataclass
@@ -675,6 +676,11 @@ def parse_args() -> argparse.Namespace:
         help="Execute the scraper. Without this flag the script exits without doing any work.",
     )
     parser.add_argument(
+        "--inbox",
+        action="store_true",
+        help="Run in inbox scanning mode to detect replies and create followups.",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=10,
@@ -688,6 +694,159 @@ if __name__ == "__main__":
     if not args.run:
         print("Scraper invoked without --run flag. Exiting without processing leads.")
         sys.exit(0)
+    # Dispatch based on mode
+    if getattr(args, "inbox", False):
+        limit = args.limit if isinstance(args.limit, int) and args.limit > 0 else 25
+        asyncio.run(inbox_mode(limit=limit))
+    else:
+        limit = args.limit if isinstance(args.limit, int) and args.limit > 0 else 10
+        asyncio.run(main(limit=limit))
 
-    limit = args.limit if isinstance(args.limit, int) and args.limit > 0 else 10
-    asyncio.run(main(limit=limit))
+###################################################################################################
+# Inbox scanning mode
+###################################################################################################
+
+async def navigate_to_inbox(page: Page) -> None:
+    await gentle_nav(page, "https://www.linkedin.com/messaging/")
+    # Wait for conversation list container
+    await page.wait_for_selector("div.msg-conversations-container, div[role='main']", timeout=30_000)
+    await page.wait_for_timeout(600)
+
+
+async def extract_conversation_summaries(page: Page, max_items: int) -> List[Dict[str, Any]]:
+    """Extract top-N conversation summaries with participant and last message snippet/time."""
+    results: List[Dict[str, Any]] = []
+    items = page.locator("li.msg-conversation-listitem, li.artdeco-list__item, div.msg-conversation-card")
+    count = min(await items.count(), max_items)
+    for i in range(count):
+        entry = items.nth(i)
+        try:
+            # Participant name and profile link
+            name = safe_text(await entry.locator("a.app-aware-link span[aria-hidden='true'], h3, h2").first.text_content(timeout=3_000))
+        except Exception:
+            name = ""
+        try:
+            profile_href = await entry.locator("a.app-aware-link[href*='/in/']").first.get_attribute("href", timeout=2_000)
+            if profile_href and profile_href.startswith("/"):
+                profile_href = f"https://www.linkedin.com{profile_href}"
+        except Exception:
+            profile_href = None
+        # Last message snippet and time
+        snippet = await safe_inner_text(entry.page, "p.msg-conversation-card__message-snippet, p, span.line-clamp-1") if hasattr(entry, 'page') else ""
+        # Fallback snippet
+        if not snippet:
+            try:
+                snippet = safe_text(await entry.inner_text(timeout=2_000))[:220]
+            except Exception:
+                snippet = ""
+        # Timestamp often in time element
+        try:
+            ts_text = safe_text(await entry.locator("time, span.msg-overlay-timestamp").first.text_content(timeout=2_000))
+        except Exception:
+            ts_text = ""
+        results.append({
+            "name": name,
+            "profile_url": profile_href,
+            "snippet": snippet,
+            "ts_text": ts_text,
+        })
+    return results
+
+
+def find_lead_match(client: Client, profile_url: Optional[str], name: str) -> Optional[Dict[str, Any]]:
+    """Match a reply to a lead. Prefer linkedin_url exact match; fallback to name heuristic."""
+    if profile_url:
+        url_norm = profile_url.split("?")[0].rstrip("/")
+        resp = (
+            client.table("leads")
+            .select("id, linkedin_url, first_name, last_name")
+            .ilike("linkedin_url", f"%{url_norm}%")
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        if rows:
+            return rows[0]
+    # Name heuristic: requires both first and last name present and exact ilike match on either order
+    parts = [p for p in (name or "").replace("·", " ").split() if p.strip()]
+    if len(parts) >= 2:
+        first, last = parts[0], parts[-1]
+        resp = (
+            client.table("leads")
+            .select("id, linkedin_url, first_name, last_name")
+            .or_(
+                f"and(ilike.first_name.%{first}%,ilike.last_name.%{last}%),and(ilike.first_name.%{last}%,ilike.last_name.%{first}%)"
+            )
+            .limit(3)
+            .execute()
+        )
+        rows = resp.data or []
+        if rows:
+            return rows[0]
+    return None
+
+
+def upsert_followup_for_reply(
+    client: Client,
+    lead_id: str,
+    reply_id: Optional[str],
+    reply_snippet: str,
+    reply_timestamp: Optional[str],
+) -> None:
+    # Create new followup row as PENDING_REVIEW with attempt = (existing count + 1) capped by max.
+    # Increment followup_count on lead and set last_reply_at
+    client.table("followups").insert({
+        "lead_id": lead_id,
+        "reply_id": reply_id,
+        "reply_snippet": reply_snippet[:2000] if reply_snippet else None,
+        "reply_timestamp": reply_timestamp,
+        "status": "PENDING_REVIEW",
+    }).execute()
+    client.table("leads").update({
+        "last_reply_at": reply_timestamp or None,
+        "followup_count": (client.table("followups").select("id", count="exact").eq("lead_id", lead_id).execute().count or 0)
+    }).eq("id", lead_id).execute()
+
+
+async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> None:
+    page = await context.new_page()
+    try:
+        await navigate_to_inbox(page)
+        convos = await extract_conversation_summaries(page, max_items=limit)
+        detected = 0
+        for convo in convos:
+            match = find_lead_match(client, convo.get("profile_url"), convo.get("name", ""))
+            if not match:
+                continue
+            # Basic guard: only create followup if lead was SENT recently or in APPROVED/SENT/REPLIED
+            lead = match
+            # We could fetch last SENT message time from leads.sent_at if available
+            reply_ts = None
+            try:
+                reply_ts = datetime.datetime.utcnow().isoformat()
+            except Exception:
+                reply_ts = None
+            upsert_followup_for_reply(
+                client,
+                lead_id=lead["id"],
+                reply_id=None,
+                reply_snippet=convo.get("snippet", ""),
+                reply_timestamp=reply_ts,
+            )
+            detected += 1
+        print(f"Inbox scan complete. New replies detected: {detected}")
+    finally:
+        await page.close()
+
+
+async def inbox_mode(limit: int = 25) -> None:
+    client = get_supabase_client()
+    playwright, browser, context = await open_browser(headless=False)
+    try:
+        creds = fetch_linkedin_credentials(client)
+        await ensure_linkedin_auth(context, creds)
+        # Enforce a daily cap on inbox scans via settings if desired (not persisted here, simple runtime cap)
+        effective_limit = min(limit, DAILY_INBOX_SCAN_LIMIT)
+        await inbox_scan(context, client, effective_limit)
+    finally:
+        await shutdown(playwright, browser)

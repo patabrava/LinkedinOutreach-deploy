@@ -68,6 +68,8 @@ export type LeadListRow = {
   last_name: string | null;
   company_name: string | null;
   status: string | null;
+  followup_count?: number | null;
+  last_reply_at?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
   profile_data?: any;
@@ -100,7 +102,7 @@ export async function fetchLeadList(
   let query = client
     .from("leads")
     .select(
-      "id, linkedin_url, first_name, last_name, company_name, status, created_at, updated_at, profile_data, recent_activity",
+      "id, linkedin_url, first_name, last_name, company_name, status, followup_count, last_reply_at, created_at, updated_at, profile_data, recent_activity",
       { count: "exact" }
     )
     .order("created_at", { ascending: false });
@@ -139,6 +141,8 @@ export async function fetchLeadList(
     last_name: lead.last_name || null,
     company_name: lead.company_name || null,
     status: lead.status || "NEW",
+    followup_count: lead.followup_count ?? 0,
+    last_reply_at: lead.last_reply_at || null,
     created_at: lead.created_at,
     updated_at: lead.updated_at,
     profile_data: lead.profile_data || null,
@@ -149,6 +153,140 @@ export async function fetchLeadList(
   const totalPages = total ? Math.max(1, Math.ceil(total / pageSize)) : 1;
 
   return { leads, total: total || 0, page, pageSize, totalPages };
+}
+
+// Follow-ups data model
+export type FollowupRow = {
+  id: string;
+  lead_id: string;
+  status: "PENDING_REVIEW" | "APPROVED" | "SENT" | "SKIPPED";
+  reply_id?: string | null;
+  reply_snippet?: string | null;
+  reply_timestamp?: string | null;
+  draft_text?: string | null;
+  sent_text?: string | null;
+  sent_at?: string | null;
+  attempt: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+  lead?: {
+    id: string;
+    first_name: string | null;
+    last_name: string | null;
+    company_name: string | null;
+    linkedin_url: string;
+    last_reply_at?: string | null;
+    followup_count?: number | null;
+  };
+};
+
+export async function fetchFollowups(statuses: Array<FollowupRow["status"]> = ["PENDING_REVIEW", "APPROVED"], limit = 50) {
+  const client = supabaseAdmin();
+  let query = client
+    .from("followups")
+    .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, last_reply_at, followup_count)")
+    .in("status", statuses)
+    .order("updated_at", { ascending: false })
+    .limit(limit);
+
+  const { data, error } = await query;
+  if (error) {
+    console.error("fetchFollowups error", error);
+    return [] as FollowupRow[];
+  }
+  return (data || []) as FollowupRow[];
+}
+
+export async function approveFollowup(followupId: string, draftText: string) {
+  const client = supabaseAdmin();
+  // Set draft text and mark APPROVED
+  const { error } = await client
+    .from("followups")
+    .update({ status: "APPROVED", draft_text: draftText })
+    .eq("id", followupId);
+  if (error) {
+    console.error("approveFollowup error", error);
+    throw error;
+  }
+  // Optionally trigger sender in follow-up mode (fire-and-forget)
+  try {
+    const repoRoot = path.resolve(process.cwd(), "..", "..");
+    const senderDir = path.resolve(repoRoot, "workers", "sender");
+    const senderPath = path.join(senderDir, "sender.py");
+    const venvPython = path.join(senderDir, "venv", "bin", "python");
+    const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
+    const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
+    const execToUse = pythonExec;
+    const args = [senderPath, "--followup"];
+    const proc = spawn(execToUse, args, {
+      cwd: repoRoot,
+      stdio: "ignore",
+      detached: true,
+      env: { ...process.env },
+    });
+    proc.unref();
+  } catch (err) {
+    console.error("approveFollowup trigger sender error", err);
+  }
+  revalidatePath("/followups");
+}
+
+export async function skipFollowup(followupId: string) {
+  const client = supabaseAdmin();
+  const { error } = await client
+    .from("followups")
+    .update({ status: "SKIPPED" })
+    .eq("id", followupId);
+  if (error) {
+    console.error("skipFollowup error", error);
+    throw error;
+  }
+  revalidatePath("/followups");
+}
+
+export async function triggerInboxScan() {
+  // Fire-and-forget execution of scraper in inbox mode
+  try {
+    const repoRoot = path.resolve(process.cwd(), "..", "..");
+    const scraperDir = path.resolve(repoRoot, "workers", "scraper");
+    const scraperPath = path.join(scraperDir, "scraper.py");
+    const venvPython = path.join(scraperDir, "venv", "bin", "python");
+    const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
+    const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
+    const execToUse = pythonExec;
+    const args = [scraperPath, "--inbox", "--run"]; // reuse --run gate
+    const proc = spawn(execToUse, args, {
+      cwd: repoRoot,
+      stdio: "ignore",
+      detached: true,
+      env: { ...process.env },
+    });
+    proc.unref();
+  } catch (err) {
+    console.error("triggerInboxScan error", err);
+  }
+}
+
+export async function triggerFollowupSender() {
+  try {
+    const repoRoot = path.resolve(process.cwd(), "..", "..");
+    const senderDir = path.resolve(repoRoot, "workers", "sender");
+    const senderPath = path.join(senderDir, "sender.py");
+    const venvPython = path.join(senderDir, "venv", "bin", "python");
+    const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
+    const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
+    const execToUse = pythonExec;
+    const args = [senderPath, "--followup"]; // process approved followups
+    const proc = spawn(execToUse, args, {
+      cwd: repoRoot,
+      stdio: "ignore",
+      detached: true,
+      env: { ...process.env },
+    });
+    proc.unref();
+  } catch (err) {
+    console.error("triggerFollowupSender error", err);
+  }
 }
 
 export async function approveDraft(input: DraftInput) {
