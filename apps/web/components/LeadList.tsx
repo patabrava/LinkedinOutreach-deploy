@@ -6,6 +6,13 @@ import Link from "next/link";
 import type { LeadListRow } from "../app/actions";
 import { supabaseBrowserClient } from "../lib/supabaseClient";
 
+type LeadFilters = {
+  status?: string;
+  company?: string;
+  name?: string;
+  linkedin?: string;
+};
+
 type Props = {
   leads: LeadListRow[];
   total?: number;
@@ -16,6 +23,7 @@ type Props = {
   showPagination?: boolean;
   condensed?: boolean;
   maxRows?: number;
+  initialFilters?: LeadFilters;
 };
 
 const statusStyle: Record<string, { bg: string; color: string }> = {
@@ -58,7 +66,15 @@ export function LeadList({
   showPagination = false,
   condensed = false,
   maxRows,
+  initialFilters,
 }: Props) {
+  const [filters, setFilters] = useState<LeadFilters>({
+    status: initialFilters?.status || "",
+    company: initialFilters?.company || "",
+    name: initialFilters?.name || "",
+    linkedin: initialFilters?.linkedin || "",
+  });
+
   const mapLeadToRow = (lead: LeadListRow) => {
     const statusKey = (lead.status || "NEW").toUpperCase();
     const style = statusStyle[statusKey] || { bg: "rgba(255,255,255,0.08)", color: "#cbd5e1" };
@@ -86,11 +102,23 @@ export function LeadList({
   };
 
   const [rows, setRows] = useState(() => (Array.isArray(leads) ? leads.map(mapLeadToRow) : []));
+  const matchesFilters = (row: ReturnType<typeof mapLeadToRow>) => {
+    if (filters.status && row.status !== filters.status.toUpperCase()) return false;
+    if (filters.company && !row.company.toLowerCase().includes(filters.company.toLowerCase())) return false;
+    if (filters.linkedin && !row.linkedinUrl.toLowerCase().includes(filters.linkedin.toLowerCase())) return false;
+    if (filters.name) {
+      const target = filters.name.toLowerCase();
+      const fullName = row.name.toLowerCase();
+      if (!fullName.includes(target)) return false;
+    }
+    return true;
+  };
 
   // Keep local state in sync when server data changes
   useEffect(() => {
-    setRows(Array.isArray(leads) ? leads.map(mapLeadToRow) : []);
-  }, [leads]);
+    const mapped = Array.isArray(leads) ? leads.map(mapLeadToRow) : [];
+    setRows(mapped.filter(matchesFilters));
+  }, [leads, filters.status, filters.company, filters.linkedin, filters.name]);
 
   // Subscribe to realtime lead updates so status bar and enrichment details stay fresh
   useEffect(() => {
@@ -106,6 +134,10 @@ export function LeadList({
 
           setRows((current) => {
             const incoming = mapLeadToRow(updated);
+            if (!matchesFilters(incoming)) {
+              // Remove rows that no longer match filters
+              return current.filter((r) => r.id !== incoming.id);
+            }
             const existingIdx = current.findIndex((row) => row.id === incoming.id);
             if (existingIdx === -1) {
               // Only add new rows to the top if we are showing the newest slice

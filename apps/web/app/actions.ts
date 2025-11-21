@@ -82,20 +82,50 @@ export type LeadListResult = {
   totalPages: number;
 };
 
-export async function fetchLeadList(page = 1, pageSize = 50): Promise<LeadListResult> {
+export type LeadFilters = {
+  status?: string;
+  company?: string;
+  name?: string;
+  linkedin?: string;
+};
+
+export async function fetchLeadList(
+  page = 1,
+  pageSize = 50,
+  filters?: LeadFilters
+): Promise<LeadListResult> {
   const client = supabaseAdmin();
   const from = (page - 1) * pageSize;
   const to = from + pageSize - 1;
-  const { data, error, count } = await client
+  let query = client
     .from("leads")
     .select(
       "id, linkedin_url, first_name, last_name, company_name, status, created_at, updated_at, profile_data, recent_activity",
-      {
-        count: "exact",
-      }
+      { count: "exact" }
     )
-    .order("created_at", { ascending: false })
-    .range(from, to);
+    .order("created_at", { ascending: false });
+
+  // Apply optional filters
+  if (filters) {
+    const { status, company, name, linkedin } = filters;
+    if (status) {
+      query = query.eq("status", status);
+    }
+    if (company) {
+      query = query.ilike("company_name", `%${company}%`);
+    }
+    if (linkedin) {
+      query = query.ilike("linkedin_url", `%${linkedin}%`);
+    }
+    if (name) {
+      // Match either first_name or last_name
+      query = query.or(
+        `ilike.first_name.%${name}%,ilike.last_name.%${name}%`
+      );
+    }
+  }
+
+  const { data, error, count } = await query.range(from, to);
 
   if (error) {
     console.error("fetchLeadList error", error);

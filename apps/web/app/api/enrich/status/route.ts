@@ -47,9 +47,10 @@ export async function GET() {
       throw nextLeadError;
     }
 
+    // Compute progress strictly from the enrichment pipeline:
+    // remaining = NEW + PROCESSING, completed = ENRICHED.
     const remaining = (counts.NEW || 0) + (counts.PROCESSING || 0);
-    const completed =
-      (counts.ENRICHED || 0) + (counts.DRAFT_READY || 0) + (counts.APPROVED || 0) + (counts.REJECTED || 0);
+    const completed = counts.ENRICHED || 0;
 
     return NextResponse.json({
       ok: true,
