@@ -95,6 +95,8 @@ export function LeadList({
       linkedinUrl: lead.linkedin_url || "",
       status: statusKey,
       style,
+      followupCount: typeof lead.followup_count === "number" ? lead.followup_count : 0,
+      lastReplyAt: lead.last_reply_at || null,
       createdAt: lead.created_at,
       updatedAt: lead.updated_at,
       recentActivity,
@@ -201,6 +203,7 @@ export function LeadList({
                 <th>Lead</th>
                 <th>Company</th>
                 <th>Status</th>
+                <th>Follow-ups</th>
                 <th>Added</th>
                 <th>Updated</th>
               </tr>
@@ -230,6 +233,11 @@ export function LeadList({
                           {row.headline}
                         </span>
                       ) : null}
+                      {row.lastReplyAt ? (
+                        <span className="muted" style={{ fontSize: condensed ? 12 : 13 }}>
+                          Last reply: {formatDate(row.lastReplyAt)}
+                        </span>
+                      ) : null}
                       {row.recentActivity?.[0]?.text ? (
                         <span className="muted" style={{ fontSize: condensed ? 12 : 13 }}>
                           Recent: {row.recentActivity[0].text.slice(0, 140)}
@@ -246,6 +254,15 @@ export function LeadList({
                     >
                       {formatStatus(row.status)}
                     </span>
+                  </td>
+                  <td>
+                    {row.followupCount > 0 ? (
+                      <span className="status-chip" style={{ background: "rgba(59,130,246,0.15)", color: "#bfdbfe" }}>
+                        {row.followupCount}
+                      </span>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
                   </td>
                   <td>{formatDate(row.createdAt)}</td>
                   <td>{formatDate(row.updatedAt)}</td>
