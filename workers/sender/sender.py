@@ -17,6 +17,7 @@ from supabase import Client, create_client
 load_dotenv()
 
 AUTH_STATE_PATH = Path(__file__).parent / "auth.json"
+DAILY_SEND_DEFAULT = 20
 
 
 def get_supabase_client() -> Client:
@@ -98,6 +99,8 @@ def fetch_next_lead(client: Client) -> Optional[Dict[str, Any]]:
         client.table("leads")
         .select("id, linkedin_url, first_name, last_name, company_name")
         .eq("status", "APPROVED")
+        .order("updated_at", desc=True)
+        .limit(1)
         .limit(1)
         .execute()
     )
@@ -167,6 +170,33 @@ def mark_sent(client: Client, lead_id: str) -> None:
         "id", lead_id
     ).execute()
 
+async def send_connection_request(page: Page) -> bool:
+    """Try to connect if not already connected. Returns True if a request was attempted."""
+    connect = page.locator("button:has-text('Connect'), a:has-text('Connect')")
+    if await connect.count() == 0:
+        return False
+    try:
+        await connect.first.click(timeout=5_000)
+        await random_pause()
+    except Exception:
+        return False
+
+    # If modal opens, click "Send without a note" or "Send".
+    for selector in [
+        "button:has-text('Send without a note')",
+        "button:has-text('Send now')",
+        "button:has-text('Send')",
+    ]:
+        btn = page.locator(selector)
+        if await btn.count() > 0:
+            try:
+                await btn.first.click(timeout=5_000)
+                await random_pause()
+                return True
+            except Exception:
+                continue
+    return True
+
 
 async def process_one(context: BrowserContext, client: Client, lead: Dict[str, Any]) -> None:
     draft = fetch_draft(client, lead["id"])
@@ -188,21 +218,34 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
 async def main() -> None:
     require_auth_state()
     client = get_supabase_client()
-    daily_limit = int(os.getenv("DAILY_SEND_LIMIT", "20"))
-    if sent_today(client, daily_limit):
+    daily_limit = int(os.getenv("DAILY_SEND_LIMIT", str(DAILY_SEND_DEFAULT)))
+    already_sent = sent_today(client, daily_limit)
+    if already_sent >= daily_limit:
         print("Daily send limit reached; exiting.")
         return
 
-    lead = fetch_next_lead(client)
-    if not lead:
+    leads_to_send = []
+    remaining = daily_limit - already_sent
+    while len(leads_to_send) < remaining:
+        nxt = fetch_next_lead(client)
+        if not nxt:
+            break
+        leads_to_send.append(nxt)
+
+    if not leads_to_send:
         print("No APPROVED leads to send.")
         return
 
     playwright, browser, context = await open_browser(headless=False)
     try:
-        await process_one(context, client, lead)
-    except Exception as exc:
-        print(f"Failed to send message: {exc}", file=sys.stderr)
+        for lead in leads_to_send:
+            try:
+                await process_one(context, client, lead)
+            except Exception as exc:
+                print(f"Failed to send message for {lead['id']}: {exc}", file=sys.stderr)
+                # keep status as APPROVED for retry; do not introduce invalid enum values
+                client.table("leads").update({"status": "APPROVED"}).eq("id", lead["id"]).execute()
+            await random_pause(2, 4)
     finally:
         await shutdown(playwright, browser)
 
