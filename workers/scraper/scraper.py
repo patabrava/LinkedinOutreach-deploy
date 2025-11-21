@@ -470,29 +470,95 @@ async def send_connection_request(page: Page, profile_url: str) -> bool:
 async def login_with_credentials(context: BrowserContext, creds: LinkedinCredentials) -> None:
     """Log into LinkedIn using saved credentials and persist auth.json."""
     page = await context.new_page()
-    await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=60_000)
-    await page.wait_for_timeout(2_000)
-    
-    # Check if already logged in (redirected to feed)
-    if "/feed" in page.url:
-        print("Already authenticated, skipping login.")
-        await save_storage_state(context, path=AUTH_STATE_PATH)
-        await page.close()
-        return
-    
-    # Proceed with login
     try:
-        await page.fill("input#username", creds.email, timeout=10_000)
-        await page.fill("input#password", creds.password, timeout=10_000)
-        await safe_click(page, "button[type=submit]")
-        await page.wait_for_timeout(3_000)
-        await page.wait_for_url("**/feed**", timeout=40_000)
-        await save_storage_state(context, path=AUTH_STATE_PATH)
-    except TimeoutError as e:
-        print(f"Login timeout. Current URL: {page.url}", file=sys.stderr)
-        # Save state anyway in case partially logged in
-        await save_storage_state(context, path=AUTH_STATE_PATH)
-        raise
+        # Always start by checking if we're already authenticated.
+        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=60_000)
+        await page.wait_for_timeout(1_000)
+        if "/feed" in page.url and "/login" not in page.url:
+            print("Already authenticated, skipping login.")
+            await save_storage_state(context, path=AUTH_STATE_PATH)
+            return
+
+        # Navigate explicitly to the login page.
+        await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=60_000)
+        await page.wait_for_timeout(1_000)
+
+        # Use role-based, localized selectors first as requested, with fallbacks.
+        # Primary (German localization)
+        email_locators = [
+            lambda: page.get_by_role("textbox", name="E-Mail-Adresse/Telefon"),
+            lambda: page.get_by_role("textbox", name="E-Mail-Adresse"),
+            lambda: page.get_by_role("textbox", name="Telefon"),
+        ]
+        password_locators = [
+            lambda: page.get_by_role("textbox", name="Passwort"),
+        ]
+        # Fallbacks (common English UI and legacy ids)
+        email_fallbacks = [
+            lambda: page.get_by_role("textbox", name="Email or Phone"),
+            lambda: page.get_by_role("textbox", name="Email or phone"),
+            lambda: page.get_by_role("textbox", name="Email"),
+            lambda: page.locator("input#username"),
+            lambda: page.locator("input[name='session_key']"),
+        ]
+        password_fallbacks = [
+            lambda: page.get_by_role("textbox", name="Password"),
+            lambda: page.locator("input#password"),
+            lambda: page.locator("input[name='session_password']"),
+        ]
+
+        async def fill_first(workers, value: str) -> bool:
+            for w in workers:
+                try:
+                    loc = w()
+                    if await loc.count() > 0:
+                        await loc.first.fill(value, timeout=10_000)
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        email_filled = await fill_first(email_locators, creds.email) or await fill_first(email_fallbacks, creds.email)
+        pwd_filled = await fill_first(password_locators, creds.password) or await fill_first(password_fallbacks, creds.password)
+
+        if not email_filled or not pwd_filled:
+            raise TimeoutError("Could not locate email or password fields on LinkedIn login page.")
+
+        # Try clicking a sign-in button using robust selectors.
+        sign_in_buttons = [
+            lambda: page.get_by_role("button", name="Anmelden"),
+            lambda: page.get_by_role("button", name="Sign in"),
+            lambda: page.locator("button[type=submit]"),
+            lambda: page.locator("button[name='submit']"),
+        ]
+        clicked = False
+        for b in sign_in_buttons:
+            try:
+                loc = b()
+                if await loc.count() > 0:
+                    await loc.first.click(timeout=8_000)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+
+        if not clicked:
+            # As a last resort, press Enter in the password field
+            try:
+                await page.keyboard.press("Enter")
+            except Exception:
+                pass
+
+        # Wait for successful navigation to feed (authenticated)
+        try:
+            await page.wait_for_url("**/feed**", timeout=45_000)
+        except TimeoutError:
+            # Sometimes LinkedIn shows intermediate checkpoint; consider still saving state
+            print(f"Login did not reach feed within timeout. Current URL: {page.url}", file=sys.stderr)
+            raise
+        finally:
+            # Persist whatever state we have in case it helps subsequent runs.
+            await save_storage_state(context, path=AUTH_STATE_PATH)
     finally:
         await page.close()
 

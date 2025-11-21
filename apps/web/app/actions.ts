@@ -1,5 +1,8 @@
 "use server";
 
+import { spawn } from "child_process";
+import path from "path";
+
 import { revalidatePath } from "next/cache";
 
 import { supabaseAdmin } from "../lib/supabaseAdmin";
@@ -145,6 +148,29 @@ export async function approveDraft(input: DraftInput) {
   if (leadErr) {
     console.error("approveDraft update lead error", leadErr);
     throw leadErr;
+  }
+
+  // Fire-and-forget: trigger the sender worker to send this lead right away.
+  try {
+    // Compute repo root (this file runs under apps/web). Go up two levels.
+    const repoRoot = path.resolve(process.cwd(), "..", "..");
+    const senderDir = path.resolve(repoRoot, "workers", "sender");
+    const senderPath = path.join(senderDir, "sender.py");
+    // Prefer sender venv python if present; else PYTHON_BIN; else python3
+    const venvPython = path.join(senderDir, "venv", "bin", "python");
+    const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
+    const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
+    const execToUse = pythonExec;
+    const args = [senderPath, "--lead-id", input.leadId];
+    const proc = spawn(execToUse, args, {
+      cwd: repoRoot,
+      stdio: "ignore",
+      detached: true,
+      env: { ...process.env },
+    });
+    proc.unref();
+  } catch (err) {
+    console.error("approveDraft trigger sender error", err);
   }
 
   revalidatePath("/");

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launch scraper, MCP agent, sender, and web UI together.
+# Launch workspace services (agent, sender, web). Scraper remains on-demand via UI.
 
 set -euo pipefail
 
@@ -74,6 +74,44 @@ trap cleanup INT TERM EXIT
 
 load_envs
 
+usage() {
+  cat <<'EOF'
+Usage: ./run_all.sh [--web] [--agent] [--sender] [--all]
+
+Defaults to launching only the web UI to reduce LinkedIn surface area. Add flags to
+opt-in other workers:
+  --web       Start the Next.js UI
+  --agent     Start the MCP agent (generates drafts from ENRICHED leads)
+  --sender    Start the sender (connect + send APPROVED drafts)
+  --all       Start all of the above
+EOF
+}
+
+START_WEB=0
+START_AGENT=0
+START_SENDER=0
+
+if [ $# -eq 0 ]; then
+  # Safer default: only start the web UI unless explicitly requested.
+  START_WEB=1
+else
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --web) START_WEB=1 ;;
+      --agent) START_AGENT=1 ;;
+      --sender) START_SENDER=1 ;;
+      --all) START_WEB=1; START_AGENT=1; START_SENDER=1 ;;
+      -h|--help) usage; exit 0 ;;
+      *)
+        echo "Unknown option: $1"
+        usage
+        exit 1
+        ;;
+    esac
+    shift
+  done
+fi
+
 run_service() {
   local name="$1"
   local cmd="$2"
@@ -99,17 +137,29 @@ run_service() {
 echo "[scraper] ⏭ Scraper runs on-demand via Start Enrichment button (not auto-started)"
 
 # MCP agent (turns ENRICHED leads into drafts)
-run_service "agent" "cd '$ROOT_DIR/mcp-server' && source venv/bin/activate && while true; do python -u run_agent.py; sleep 15; done"
-
-# Sender (types/sends APPROVED drafts)
-if [ -f "$ROOT_DIR/workers/sender/auth.json" ]; then
-  run_service "sender" "cd '$ROOT_DIR/workers/sender' && source venv/bin/activate && while true; do python -u sender.py; sleep 20; done"
+if [ "$START_AGENT" -eq 1 ]; then
+  run_service "agent" "cd '$ROOT_DIR/mcp-server' && source venv/bin/activate && while true; do python -u run_agent.py; sleep 15; done"
 else
-  echo "[sender] ⏭ Skipping start (missing workers/sender/auth.json)."
+  echo "[agent] ⏭ Skipping (enable with --agent or --all)."
+fi
+
+# Sender (connects + sends APPROVED drafts)
+if [ "$START_SENDER" -eq 1 ]; then
+  if [ -f "$ROOT_DIR/workers/sender/auth.json" ]; then
+    run_service "sender" "cd '$ROOT_DIR/workers/sender' && source venv/bin/activate && while true; do python -u sender.py; sleep 20; done"
+  else
+    echo "[sender] ⏭ Skipping start (missing workers/sender/auth.json)."
+  fi
+else
+  echo "[sender] ⏭ Skipping (enable with --sender or --all)."
 fi
 
 # Web UI (Mission Control dashboard)
-run_service "web" "cd '$ROOT_DIR' && npm run dev:web"
+if [ "$START_WEB" -eq 1 ]; then
+  run_service "web" "cd '$ROOT_DIR' && npm run dev:web"
+else
+  echo "[web] ⏭ Skipping (enable with --web or --all)."
+fi
 
 cat <<'EOF'
 📟 Services launched:
