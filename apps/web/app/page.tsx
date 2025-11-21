@@ -3,7 +3,11 @@ import { LeadList } from "../components/LeadList";
 import { fetchDraftFeed, fetchLeadList } from "./actions";
 
 export default async function MissionControlPage() {
-  const [drafts, leadResult] = await Promise.all([fetchDraftFeed(), fetchLeadList(1, 50)]);
+  // Only show enriched leads in the mission control table to reduce noise.
+  const [drafts, leadResult] = await Promise.all([
+    fetchDraftFeed(),
+    fetchLeadList(1, 50, { status: "ENRICHED" }),
+  ]);
 
   return (
     <div className="page">
@@ -27,7 +31,7 @@ export default async function MissionControlPage() {
         </div>
       </div>
 
-      <LeadList leads={leadResult.leads} condensed maxRows={8} />
+      <LeadList leads={leadResult.leads} condensed maxRows={8} initialFilters={{ status: "ENRICHED" }} />
 
       <DraftFeed drafts={drafts} />
     </div>
