@@ -1,3 +1,4 @@
+import { LoginLauncher } from "../../components/LoginLauncher";
 import { LinkedinCredentialsForm } from "../../components/LinkedinCredentialsForm";
 import { fetchLinkedinCredentials } from "../actions";
 
@@ -12,7 +13,10 @@ export default async function SettingsPage() {
         Provide LinkedIn credentials so the scraper can log in and cache auth.json automatically.
       </div>
 
-      <LinkedinCredentialsForm existing={creds} />
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 420px", gap: 18, alignItems: "flex-start" }}>
+        <LinkedinCredentialsForm existing={creds} />
+        <LoginLauncher existingCreds={creds} />
+      </div>
     </div>
   );
 }
