@@ -21,6 +21,17 @@ export async function GET() {
   
   try {
     const client = supabaseAdmin();
+    // Temporary environment sanity check (masked)
+    const envUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+    const envKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+    logger.debug(
+      "Supabase env check",
+      { correlationId },
+      {
+        urlPrefix: envUrl.slice(0, 32),
+        serviceRoleKeyPrefix: envKey.slice(0, 8),
+      }
+    );
     const counts = createInitialCounts();
 
     logger.debug("Fetching status counts for all lead statuses", { correlationId });
@@ -31,8 +42,9 @@ export async function GET() {
         
         const { count, error } = await client
           .from("leads")
-          .select("id", { count: "exact", head: true })
-          .eq("status", status);
+          .select("id", { count: "exact" })
+          .eq("status", status)
+          .limit(0);
 
         if (error) {
           logger.error(`Failed to count leads with status ${status}`, { correlationId }, error);
@@ -65,6 +77,13 @@ export async function GET() {
     // remaining = NEW + PROCESSING, completed = ENRICHED.
     const remaining = (counts.NEW || 0) + (counts.PROCESSING || 0);
     const completed = counts.ENRICHED || 0;
+
+    // Explicit ground-truth log of counts and computed values
+    logger.debug(
+      "Enrichment status snapshot",
+      { correlationId },
+      { counts, remaining, completed }
+    );
 
     const response = {
       ok: true,
