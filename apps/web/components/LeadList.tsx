@@ -26,12 +26,22 @@ type Props = {
   initialFilters?: LeadFilters;
 };
 
+type SortKey = "name" | "company" | "status" | "followupCount" | "createdAt" | "updatedAt";
+
 const statusStyle: Record<string, { bg: string; color: string }> = {
   NEW: { bg: "rgba(34, 211, 238, 0.18)", color: "#67e8f9" },
   ENRICHED: { bg: "rgba(168, 85, 247, 0.18)", color: "#e9d5ff" },
   DRAFT_READY: { bg: "rgba(132, 204, 22, 0.18)", color: "#d9f99d" },
   APPROVED: { bg: "rgba(52, 211, 153, 0.18)", color: "#a7f3d0" },
   REJECTED: { bg: "rgba(248, 113, 113, 0.18)", color: "#fecdd3" },
+};
+
+const statusOrder: Record<string, number> = {
+  NEW: 0,
+  ENRICHED: 1,
+  DRAFT_READY: 2,
+  APPROVED: 3,
+  REJECTED: 4,
 };
 
 const formatStatus = (status?: string | null) => (status || "NEW").replace(/_/g, " ");
@@ -74,6 +84,7 @@ export function LeadList({
     name: initialFilters?.name || "",
     linkedin: initialFilters?.linkedin || "",
   });
+  const [sort, setSort] = useState<{ key: SortKey; direction: "asc" | "desc" } | null>(null);
 
   const mapLeadToRow = (lead: LeadListRow) => {
     const statusKey = (lead.status || "NEW").toUpperCase();
@@ -114,6 +125,69 @@ export function LeadList({
       if (!fullName.includes(target)) return false;
     }
     return true;
+  };
+
+  const headerButtonStyle = {
+    background: "none",
+    border: "none",
+    color: "inherit",
+    padding: 0,
+    margin: 0,
+    font: "inherit",
+    cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+  };
+
+  const toggleSort = (key: SortKey) => {
+    setSort((current) => {
+      if (!current || current.key !== key) return { key, direction: "asc" };
+      if (current.direction === "asc") return { key, direction: "desc" };
+      return null;
+    });
+  };
+
+  const renderSortButton = (label: string, key: SortKey, ariaLabel?: string) => {
+    const isActive = sort?.key === key;
+    const icon = isActive ? (sort.direction === "asc" ? "↑" : "↓") : "↕";
+    return (
+      <button
+        type="button"
+        onClick={() => toggleSort(key)}
+        style={headerButtonStyle}
+        aria-label={`Sort by ${ariaLabel || label}${isActive ? ` (${sort.direction})` : ""}`}
+        aria-pressed={isActive}
+      >
+        {label}
+        <span aria-hidden style={{ fontSize: 11, opacity: isActive ? 1 : 0.5, lineHeight: 1 }}>
+          {icon}
+        </span>
+      </button>
+    );
+  };
+
+  const getSortValue = (row: ReturnType<typeof mapLeadToRow>, key: SortKey) => {
+    switch (key) {
+      case "name":
+        return (row.name || "").toLowerCase();
+      case "company":
+        return (row.company || "").toLowerCase();
+      case "status":
+        return statusOrder[row.status] ?? Number.MAX_SAFE_INTEGER;
+      case "followupCount":
+        return row.followupCount || 0;
+      case "createdAt": {
+        const ts = row.createdAt ? Date.parse(row.createdAt) : NaN;
+        return Number.isNaN(ts) ? 0 : ts;
+      }
+      case "updatedAt": {
+        const ts = row.updatedAt ? Date.parse(row.updatedAt) : NaN;
+        return Number.isNaN(ts) ? 0 : ts;
+      }
+      default:
+        return 0;
+    }
   };
 
   // Keep local state in sync when server data changes
@@ -161,9 +235,20 @@ export function LeadList({
   }, [maxRows]);
 
   const displayRows = useMemo(() => {
-    const limited = typeof maxRows === "number" && maxRows >= 0 ? rows.slice(0, maxRows) : rows;
-    return limited;
-  }, [rows, maxRows]);
+    const working = [...rows];
+    if (sort) {
+      working.sort((a, b) => {
+        const aVal = getSortValue(a, sort.key);
+        const bVal = getSortValue(b, sort.key);
+        if (typeof aVal === "string" && typeof bVal === "string") {
+          return sort.direction === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+        }
+        const diff = (aVal as number) - (bVal as number);
+        return sort.direction === "asc" ? diff : -diff;
+      });
+    }
+    return typeof maxRows === "number" && maxRows >= 0 ? working.slice(0, maxRows) : working;
+  }, [rows, sort, maxRows]);
 
   const shownCount = displayRows.length;
   const totalCount = rows.length;
@@ -200,12 +285,24 @@ export function LeadList({
           <table className="lead-table" style={condensed ? { fontSize: 13, lineHeight: 1.4 } : undefined}>
             <thead>
               <tr>
-                <th>Lead</th>
-                <th>Company</th>
-                <th>Status</th>
-                <th>Follow-ups</th>
-                <th>Added</th>
-                <th>Updated</th>
+                <th>
+                  {renderSortButton("Lead", "name", "lead name")}
+                </th>
+                <th>
+                  {renderSortButton("Company", "company")}
+                </th>
+                <th>
+                  {renderSortButton("Status", "status")}
+                </th>
+                <th>
+                  {renderSortButton("Follow-ups", "followupCount", "follow-ups")}
+                </th>
+                <th>
+                  {renderSortButton("Added", "createdAt", "added date")}
+                </th>
+                <th>
+                  {renderSortButton("Updated", "updatedAt", "updated date")}
+                </th>
               </tr>
             </thead>
             <tbody>

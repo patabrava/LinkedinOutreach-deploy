@@ -23,6 +23,8 @@ export async function POST(request: Request) {
     const venvPython = path.join(scraperDir, "venv", "bin", "python");
     const pythonCmd = fs.existsSync(venvPython) ? venvPython : "python3";
 
+    const pidFile = path.join(scraperDir, "enrichment.pid");
+
     const { limit } = (await request.json().catch(() => ({}))) as { limit?: number };
     const limitArg = typeof limit === "number" && limit > 0 ? ["--limit", String(limit)] : [];
 
@@ -32,10 +34,19 @@ export async function POST(request: Request) {
     const child = spawn(pythonCmd, args, {
       cwd: scraperDir,
       env: { ...process.env, CORRELATION_ID: correlationId },
-      stdio: "ignore",
+      stdio: "inherit",
       detached: true,
     });
     child.unref();
+
+    try {
+      fs.writeFileSync(pidFile, String(child.pid));
+    } catch (writeErr) {
+      logger.warn("Failed to persist scraper PID", { correlationId }, {
+        pidFile,
+        error: (writeErr as Error)?.message || String(writeErr),
+      });
+    }
 
     logger.info("Scraper process started successfully", { correlationId, pid: child.pid });
     logger.apiResponse("POST", "/api/enrich", 200, { correlationId });

@@ -235,7 +235,62 @@ async def open_message_surface(page: Page) -> str:
         except Exception as e:
             logger.debug(f"Message link path failed", error=e)
     
-    # PATH 2: Try More button -> Invite flow (for non-connections)
+    # PATH 2: Direct invite link inside profile container (Invite <Name> to ...)
+    invite_link = profile_container.get_by_role("link", name=re.compile(r"(Invite .+ to|Einladen .+ zu)", re.I))
+    invite_link_count = await invite_link.count()
+    logger.debug("Invite link check", data={"count": invite_link_count})
+    
+    if invite_link_count > 0:
+        logger.debug("Found invite link inside profile container")
+        try:
+            await invite_link.first.click(timeout=8_000)
+            await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
+            await random_pause()
+            
+            add_note_btn = page.get_by_role("button", name=re.compile(r"(Nachricht hinzufügen|Add a note|Notiz hinzufügen)", re.I))
+            add_note_count = await add_note_btn.count()
+            logger.debug("Add note button after invite link", data={"count": add_note_count})
+            
+            if add_note_count > 0:
+                await add_note_btn.first.click(timeout=6_000)
+                await page.wait_for_timeout(500)
+                logger.debug("Connect with note dialog opened via invite link")
+                return "connect_note"
+            logger.debug("Invite link path with direct connect")
+            return "connect"
+        except Exception as e:
+            logger.debug("Invite link path failed", error=e)
+    
+    # PATH 3: Direct Vernetzen / Als Kontakt button on profile card
+    direct_connect_btn = profile_container.get_by_role(
+        "button",
+        name=re.compile(r"(Vernetzen|Als Kontakt|als Kontakt)", re.I),
+    )
+    direct_connect_count = await direct_connect_btn.count()
+    logger.debug("Direct connect button check", data={"count": direct_connect_count})
+    
+    if direct_connect_count > 0:
+        logger.debug("Clicking direct connect button on profile")
+        try:
+            await direct_connect_btn.first.click(timeout=8_000)
+            await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
+            await random_pause()
+            
+            add_note_btn = page.get_by_role("button", name=re.compile(r"(Nachricht hinzufügen|Add a note|Notiz hinzufügen)", re.I))
+            add_note_count = await add_note_btn.count()
+            logger.debug("Add note button after direct connect", data={"count": add_note_count})
+            
+            if add_note_count > 0:
+                await add_note_btn.first.click(timeout=6_000)
+                await page.wait_for_timeout(500)
+                logger.debug("Connect with note dialog opened via direct connect button")
+                return "connect_note"
+            logger.debug("Direct connect without note")
+            return "connect"
+        except Exception as e:
+            logger.debug("Direct connect path failed", error=e)
+    
+    # PATH 4: Try More button -> Invite flow (fallback)
     # Scoped to profile container - allow partial match for "Mehr" or "More"
     more_button = profile_container.get_by_role("button", name=re.compile(r"(More|Mehr)", re.I))
     more_button_count = await more_button.count()
@@ -261,7 +316,7 @@ async def open_message_surface(page: Page) -> str:
                 await random_pause()
                 
                 # Click "Add a note" button
-                add_note_btn = page.get_by_role("button", name=re.compile(r"(Add a note|Notiz hinzufügen)", re.I))
+                add_note_btn = page.get_by_role("button", name=re.compile(r"(Nachricht hinzufügen|Add a note|Notiz hinzufügen)", re.I))
                 add_note_count = await add_note_btn.count()
                 logger.debug(f"Add a note button check", data={"count": add_note_count})
                 
@@ -283,34 +338,96 @@ async def open_message_surface(page: Page) -> str:
     raise RuntimeError("No messaging surface found. Check if profile is 3rd-degree or has restrictions.")
 
 
-async def send_message(page: Page, message: str, surface: str) -> None:
+async def send_message(page: Page, message: str, surface: str, draft: Optional[Dict[str, Any]] = None) -> None:
     """Send a message through the opened messaging surface.
     
     Args:
         page: Playwright page object
         message: Message text to send
         surface: Type of surface opened ("message" or "connect_note")
+        draft: Optional draft data to extract opener for connection notes
     """
     
     if surface == "connect_note":
         # Add-a-note modal: Use the specific textbox selector
         logger.debug("Sending connection request with note")
         
-        # LinkedIn limits note to 200 characters
+        # LinkedIn limits note to 300 characters
         safe_message = (message or "").strip()
-        if len(safe_message) > 200:
-            logger.warn(f"Message too long ({len(safe_message)} chars), truncating to 200")
-            safe_message = safe_message[:200]
         
-        # Use the exact selector provided by user
-        note_box = page.get_by_role("textbox", name=re.compile(r"Please limit personal note to", re.I))
-        note_box_count = await note_box.count()
+        if len(safe_message) > 300:
+            logger.warn(f"Message too long ({len(safe_message)} chars), truncating to 300")
+            # Intelligently truncate at sentence/word boundary
+            safe_message = safe_message[:297] + "..."
+        else:
+            logger.debug(f"Message fits in connection note limit ({len(safe_message)}/300 chars)")
+        
+        # Use the exact selector provided by user (support English & German labels)
+        note_box_selectors = [
+            lambda: page.get_by_role("textbox", name=re.compile(r"Please limit personal note to", re.I)),
+            lambda: page.get_by_role("textbox", name=re.compile(r"Ihre persönliche Nachricht", re.I)),
+            lambda: page.get_by_role("textbox", name=re.compile(r"Nachricht hinzufügen", re.I)),
+            lambda: page.locator("textarea[name='message']"),
+            lambda: page.locator("textarea[id='custom-message']"),
+            lambda: page.locator("div[role='dialog'] textarea"),
+        ]
+        note_box = None
+        note_box_count = 0
+        for builder in note_box_selectors:
+            try:
+                candidate = builder()
+                count = await candidate.count()
+                if count > 0:
+                    note_box = candidate
+                    note_box_count = count
+                    break
+            except Exception:
+                continue
         logger.debug(f"Note textbox check", data={"count": note_box_count})
         
-        if note_box_count > 0:
-            logger.debug(f"Filling note textbox with {len(safe_message)} characters")
-            await note_box.first.fill(safe_message)
+        if note_box and note_box_count > 0:
+            logger.debug(f"Typing note textbox with {len(safe_message)} characters")
+            target = note_box.first
+            await target.click()
+            # Clear any pre-filled text in a human-like way
+            try:
+                await page.keyboard.press("Meta+A")  # mac shortcut
+                await page.keyboard.press("Backspace")
+            except Exception:
+                try:
+                    await page.keyboard.press("Control+A")
+                    await page.keyboard.press("Backspace")
+                except Exception:
+                    pass
+            try:
+                await target.evaluate("el => { if ('value' in el) el.value=''; if (el.isContentEditable) el.textContent=''; }")
+            except Exception:
+                pass
+            await human_type(page, safe_message)
             await random_pause(0.5, 1.0)
+            
+            # CRITICAL: Verify the full message was typed before clicking send
+            # Wait for DOM to stabilize and verify text length
+            await page.wait_for_timeout(500)
+            
+            # Verify the text was actually entered
+            for verification_attempt in range(10):
+                try:
+                    actual_text = await target.evaluate("el => el.value || el.textContent || ''") or ""
+                    actual_length = len(actual_text.strip())
+                    expected_length = len(safe_message)
+                    
+                    if actual_length >= expected_length - 2:  # Allow 1-2 char margin for encoding
+                        logger.debug(f"Text verification passed", data={"expected": expected_length, "actual": actual_length})
+                        break
+                    else:
+                        logger.debug(f"Text still being entered", data={"expected": expected_length, "actual": actual_length, "attempt": verification_attempt})
+                        await page.wait_for_timeout(200)
+                except Exception as e:
+                    logger.warn(f"Text verification attempt {verification_attempt} failed", error=e)
+                    await page.wait_for_timeout(200)
+            else:
+                logger.warn("Could not verify full text was entered, proceeding anyway")
         else:
             logger.error("Note textbox not found in connect dialog")
             raise RuntimeError("Could not find note textbox in connection request dialog")
@@ -327,11 +444,15 @@ async def send_message(page: Page, message: str, surface: str) -> None:
             await send_btn.wait_for(state="visible", timeout=10_000)
             logger.debug("Send button found, waiting for it to be enabled")
             
+            # Wait for button to be enabled AND give extra time for any final DOM updates
             for attempt in range(30):
                 if await send_btn.is_enabled():
                     logger.debug(f"Send button enabled after {attempt} attempts")
                     break
                 await page.wait_for_timeout(300)
+            
+            # Additional safety pause before clicking to ensure typing is truly complete
+            await page.wait_for_timeout(800)
             
             await send_btn.click()
             logger.debug("Send button clicked")
@@ -372,10 +493,37 @@ async def send_message(page: Page, message: str, surface: str) -> None:
     await human_type(page, message)
     await random_pause()
     
+    # CRITICAL: Verify the full message was typed before clicking send
+    # Wait for DOM to stabilize and verify text length
+    await page.wait_for_timeout(500)
+    
+    # Verify the text was actually entered
+    for verification_attempt in range(10):
+        try:
+            actual_text = await editor.evaluate("el => el.value || el.textContent || el.innerText || ''") or ""
+            actual_length = len(actual_text.strip())
+            expected_length = len(message.strip())
+            
+            if actual_length >= expected_length - 2:  # Allow 1-2 char margin for encoding
+                logger.debug(f"Direct message text verification passed", data={"expected": expected_length, "actual": actual_length})
+                break
+            else:
+                logger.debug(f"Direct message text still being entered", data={"expected": expected_length, "actual": actual_length, "attempt": verification_attempt})
+                await page.wait_for_timeout(200)
+        except Exception as e:
+            logger.warn(f"Direct message text verification attempt {verification_attempt} failed", error=e)
+            await page.wait_for_timeout(200)
+    else:
+        logger.warn("Could not verify full direct message text was entered, proceeding anyway")
+    
     # Find and click Send button
     send_btn = page.locator("button:has-text('Send'), button:has-text('Senden'), button[aria-label*='Send']").first
     try:
         await send_btn.wait_for(state="visible", timeout=10_000)
+        
+        # Additional safety pause before clicking to ensure typing is truly complete
+        await page.wait_for_timeout(800)
+        
         await send_btn.click()
         logger.debug("Direct message sent")
         await random_pause()
@@ -496,7 +644,7 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
         raise
     
     try:
-        await send_message(page, message, surface)
+        await send_message(page, message, surface, draft)
     except Exception as e:
         logger.error(f"Failed to send message through surface", {"leadId": lead_id}, error=e)
         raise

@@ -11,12 +11,13 @@ TON & STIL:
 – Kein Sales-Talk, keine Floskeln
 – Persönlich und authentisch
 – Maximal 4-5 Sätze insgesamt
+– HARTE VORGABE: Gesamte Nachricht (Opener + Body + CTA) MUSS <= 300 Zeichen bleiben – falls nötig radikal kürzen
 
 STRUKTUR:
 1. OPENER (max. 15 Wörter):
    - Bei Post <30 Tage: Kurzer Bezug zum Post
    - Sonst: Bezug zu Profil/Headline
-   - Beispiel: "Hey [Name], kurze Bitte mit Netzwerk-Fokus, nicht Sales:"
+   - Beispiel: "Hey Sven, kurze Bitte mit Netzwerk Fokus"
 
 2. BODY (max. 40 Wörter):
    - Eine Zeile: Was du machst (kleine KI-Automationen für Immobilien)
@@ -25,19 +26,46 @@ STRUKTUR:
 
 3. CTA (max. 25 Wörter):
    - STANDARD (niederschwellig): Frage nach Empfehlung aus dem Netzwerk
-   - Beispiel: "Wen aus deinem Umfeld würdest du sofort empfehlen, wenn du jemanden kennst, der genau mit solchen manuellen Prozessen kämpft?"
+   - Beispiel: "Fällt dir spontan jemand aus deinem Umfeld ein, der noch stark mit manuellen Prozessen kämpft?"
    - Alternative: "Mir geht's um eine einzige gute Intro von dir."
    - NUR bei perfektem Match: Direkter Austausch ("kurzer 10-Min-Abgleich?")
 
-BEISPIELE FÜR IMMOBILIEN-BEZUG:
-– "voll funktionsfähiges Objekt-CRM in 5 Stunden gebaut, weil ich keine Lust mehr auf Excel-Chaos hatte"
-– "Exposé-Erstellung automatisiert – von 2 Stunden auf 10 Minuten"
+BEISPIELE FÜR IMMOBILIEN-BEZUG (wechsle ab für Variety):
+
+PROZESS-AUTOMATISIERUNG:
+– "Exposé-Erstellung automatisiert – von 2 Stunden auf 10 Minuten, inklusive Formatierung"
 – "Besichtigungskoordination läuft jetzt automatisch statt per E-Mail-Marathon"
-– "Lead-to-Lease-Prozess standardisiert, keine manuellen Status-Updates mehr"
+– "Mietvertrags-Erstellung komplett automatisiert – von Template bis fertiges PDF in 5 Minuten"
+– "Rechnungsstellung für 200+ Einheiten vollautomatisch, kein manuelles Copy-Paste mehr"
+
+DATA & CRM:
+– "voll funktionsfähiges Objekt-CRM in 5 Stunden gebaut, weil ich keine Lust mehr auf Excel-Chaos hatte"
+– "Lead-Scoring automatisiert – System priorisiert Kaufinteressenten nach Conversion-Wahrscheinlichkeit"
+– "Mieter-Kommunikation zentralisiert – WhatsApp, E-Mail, Portal in einem Dashboard"
+– "Portfolio-Reporting läuft Freitags automatisch, statt 4 Stunden Excel-Jonglage"
+
+MARKETING & CONTENT:
+– "Social-Media-Posts für alle Neuzugänge automatisch generiert und geplant"
+– "Objekt-Beschreibungen per KI in 3 Sprachen, spart 90% der Zeit"
+– "Virtuelle Rundgänge direkt aus Floor-Plans erstellt – ohne Agentur"
+– "Marktanalyse-Reports automatisch wöchentlich, statt manuell zusammenklicken"
+
+DOKUMENTE & COMPLIANCE:
+– "Energieausweise, Grundrisse, Nachweise automatisch in Objekt-Akte sortiert"
+– "Mieterhöhungs-Prozess standardisiert – von Kalkulation bis Anschreiben in 15 Minuten"
+– "Betriebskosten-Abrechnung für 150 Einheiten in 2 Stunden statt 3 Tagen"
+– "DSGVO-konforme Dokumenten-Archivierung ohne manuelle Sortierung"
+
+TEAM & KOORDINATION:
+– "Instandhaltungs-Tickets automatisch an Handwerker verteilt, mit Tracking"
+– "Onboarding neuer Objekte läuft als Workflow – Checkliste, Fotos, Daten in einem System"
+– "Besichtigungs-Feedback direkt ins CRM, Team sieht Echtzeit-Status"
 
 WICHTIG:
-– Keine Platzhalter, keine generischen Texte
+– Keine Platzhalter (z. B. [Name], {Name}) – immer echten Vornamen verwenden
+– Wenn kein Name verfügbar ist: mit "Hey," starten (ohne Platzhalter)
 – Authentisch und menschlich
 – Immobilien-Vokabular nutzen (Objekt, Portfolio, Vermarktung, Bestand, Transaktion)
 – Immer auf konkretes Problem/Lösung fokussieren
 – Standard-CTA: Nach Netzwerk-Intro fragen, nicht nach Meeting
+ – HARTE KONTROLLE: Prüfe am Ende, dass die Nachricht <= 300 Zeichen bleibt – sonst kürzen
