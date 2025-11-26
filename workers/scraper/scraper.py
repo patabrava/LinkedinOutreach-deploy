@@ -10,6 +10,7 @@ import os
 import random
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -19,7 +20,14 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 
 from auth import AUTH_STATE_PATH, is_logged_in, open_browser, save_storage_state, shutdown
 
+# Import shared logger
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from shared_logger import get_logger
+
 load_dotenv()
+
+# Initialize logger
+logger = get_logger("scraper")
 
 # Avoid tripping LinkedIn automation warnings by capping daily enrichments.
 DAILY_ENRICHMENT_CAP = 50
@@ -45,11 +53,14 @@ def get_supabase_client() -> Client:
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
+        logger.error("Missing Supabase configuration", data={"has_url": bool(url), "has_key": bool(key)})
         raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY.")
+    logger.debug("Supabase client initialized")
     return create_client(url, key)
 
 
 def fetch_new_leads(client: Client, limit: int = 10) -> List[Lead]:
+    logger.db_query("select", "leads", {"status": "NEW"}, {"limit": limit})
     resp = (
         client.table("leads")
         .select("id, linkedin_url, first_name, last_name, company_name")
@@ -58,12 +69,15 @@ def fetch_new_leads(client: Client, limit: int = 10) -> List[Lead]:
         .execute()
     )
     leads: List[Lead] = [Lead(**row) for row in resp.data or []]
+    logger.db_result("select", "leads", {"status": "NEW"}, len(leads))
+    logger.info(f"Fetched {len(leads)} NEW leads", data={"count": len(leads)})
     return leads
 
 
 def fetch_today_enrichment_count(client: Client) -> int:
     """Return count of leads marked ENRICHED since 00:00 UTC today."""
     start_of_day = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    logger.db_query("select-count", "leads", {"status": "ENRICHED"}, {"since": start_of_day})
     resp = (
         client.table("leads")
         .select("id", count="exact")
@@ -71,10 +85,14 @@ def fetch_today_enrichment_count(client: Client) -> int:
         .gte("updated_at", start_of_day)
         .execute()
     )
-    return resp.count or 0
+    count = resp.count or 0
+    logger.db_result("select-count", "leads", {"status": "ENRICHED"}, count)
+    logger.info(f"Enriched today: {count}", data={"count": count, "cap": DAILY_ENRICHMENT_CAP})
+    return count
 
 
 def fetch_linkedin_credentials(client: Client) -> Optional[LinkedinCredentials]:
+    logger.db_query("select", "settings", {"key": "linkedin_credentials"})
     resp = (
         client.table("settings")
         .select("value")
@@ -85,6 +103,9 @@ def fetch_linkedin_credentials(client: Client) -> Optional[LinkedinCredentials]:
     value = (resp.data or [{}])[0].get("value") or {}
     email = value.get("email") or value.get("username")
     password = value.get("password")
+    has_creds = bool(email and password)
+    logger.db_result("select", "settings", {"key": "linkedin_credentials"}, 1 if resp.data else 0)
+    logger.info(f"LinkedIn credentials: {'found' if has_creds else 'not found'}")
     if not email or not password:
         return None
     return LinkedinCredentials(email=email, password=password)
@@ -224,6 +245,7 @@ async def scrape_experience(page: Page, max_items: int = 3) -> List[Dict[str, st
 
 async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
     normalized = url.replace("http://", "https://")
+    logger.debug(f"Starting profile scrape", data={"url": normalized})
     page.set_default_timeout(20_000)
     page.set_default_navigation_timeout(60_000)
 
@@ -286,6 +308,14 @@ async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
         "url": normalized,
         "experience": experience,
     }
+    
+    logger.debug("Profile data extracted", data={
+        "hasName": bool(name),
+        "hasHeadline": bool(headline),
+        "hasAbout": bool(about),
+        "experienceCount": len(experience),
+    })
+    
     return profile_data
 
 
@@ -293,6 +323,7 @@ async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str,
     """Navigate to activity section, click on recent posts, and extract full text content."""
     base = profile_url.rstrip("/")
     activity_url = f"{base}/recent-activity/all/"
+    logger.debug("Starting activity scrape", data={"url": activity_url})
 
     await gentle_nav(page, activity_url)
     await page.wait_for_timeout(2_000)
@@ -418,6 +449,7 @@ async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str,
             except Exception:
                 continue
     
+    logger.debug(f"Activity scraping complete", data={"postsFound": len(results)})
     return results[:3]
 
 
@@ -590,6 +622,7 @@ def update_lead(
     profile_data: Dict[str, Any],
     activity: List[Dict[str, Any]],
 ) -> None:
+    logger.db_query("update", "leads", {"leadId": lead_id}, {"status": "ENRICHED", "activityCount": len(activity)})
     client.table("leads").update(
         {
             "profile_data": profile_data,
@@ -597,40 +630,73 @@ def update_lead(
             "status": "ENRICHED",
         }
     ).eq("id", lead_id).execute()
+    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
+    logger.info(f"Lead updated to ENRICHED", {"leadId": lead_id})
+
+
+def mark_enrich_failed(client: Client, lead_id: str, reason: Optional[str] = None) -> None:
+    """Mark a lead as ENRICH_FAILED to avoid being re-queued as NEW endlessly."""
+    logger.db_query("update", "leads", {"leadId": lead_id}, {"status": "ENRICH_FAILED", "reason": (reason or "")[:240]})
+    client.table("leads").update({"status": "ENRICH_FAILED"}).eq("id", lead_id).execute()
+    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
+    logger.warn("Lead marked ENRICH_FAILED", {"leadId": lead_id}, error=reason)
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 async def enrich_one(page: Page, client: Client, lead: Lead) -> None:
-    profile = await scrape_profile(page, lead.linkedin_url)
+    logger.scrape_start(lead.id, lead.linkedin_url)
+    
     try:
-        activity = await scrape_recent_activity(page, lead.linkedin_url)
+        profile = await scrape_profile(page, lead.linkedin_url)
+        try:
+            activity = await scrape_recent_activity(page, lead.linkedin_url)
+        except Exception as exc:
+            logger.warn(f"Activity scrape failed for {lead.id}", {"leadId": lead.id}, error=exc)
+            activity = []
+        # If we found no meaningful profile or activity, mark as ENRICH_FAILED
+        has_profile_signal = any(
+            bool((profile or {}).get(k)) for k in [
+                "name", "headline", "about", "current_company", "current_title"
+            ]
+        ) or len((profile or {}).get("experience", []) or []) > 0
+        has_activity = len(activity) > 0
+
+        if not has_profile_signal and not has_activity:
+            mark_enrich_failed(client, lead.id, reason="No profile or activity signals found")
+            logger.scrape_complete(lead.id, profile_data=profile)
+            return
+
+        update_lead(client, lead.id, profile, activity)
+        logger.scrape_complete(lead.id, profile_data=profile)
     except Exception as exc:
-        print(f"Activity scrape failed for {lead.id}: {exc}", file=sys.stderr)
-        activity = []
-    update_lead(client, lead.id, profile, activity)
+        logger.scrape_error(lead.id, error=exc)
+        # On enrichment error, mark as ENRICH_FAILED to avoid resetting to NEW loops
+        mark_enrich_failed(client, lead.id, reason=str(exc))
+        raise
 
 
 async def process_batch(context: BrowserContext, client: Client, leads: List[Lead]) -> None:
     for lead in leads:
-        print(f"Processing lead {lead.id} ({lead.linkedin_url})")
+        logger.info(f"Processing lead {lead.id}", {"leadId": lead.id}, {"url": lead.linkedin_url})
+        logger.db_query("update", "leads", {"leadId": lead.id}, {"status": "PROCESSING"})
         client.table("leads").update({"status": "PROCESSING"}).eq("id", lead.id).execute()
 
         page = await context.new_page()
         try:
             await enrich_one(page, client, lead)
-            print(f"Lead {lead.id} enriched.")
+            logger.info(f"Lead {lead.id} enriched successfully", {"leadId": lead.id})
             try:
                 sent = await send_connection_request(page, lead.linkedin_url)
                 if sent:
-                    print(f"Connection request sent to {lead.id}.")
+                    logger.info(f"Connection request sent to {lead.id}", {"leadId": lead.id})
             except Exception as exc:
-                print(f"Connection request failed for {lead.id}: {exc}", file=sys.stderr)
+                logger.warn(f"Connection request failed for {lead.id}", {"leadId": lead.id}, error=exc)
         except TimeoutError as exc:
-            print(f"Timeout enriching {lead.id}: {exc}", file=sys.stderr)
-            client.table("leads").update({"status": "NEW"}).eq("id", lead.id).execute()
+            logger.error(f"Timeout enriching {lead.id}", {"leadId": lead.id}, error=exc)
+            mark_enrich_failed(client, lead.id, reason=f"Timeout: {exc}")
         except Exception as exc:
-            print(f"Failed to enrich {lead.id}: {exc}", file=sys.stderr)
-            client.table("leads").update({"status": "NEW"}).eq("id", lead.id).execute()
+            logger.error(f"Failed to enrich {lead.id}", {"leadId": lead.id}, error=exc)
+            mark_enrich_failed(client, lead.id, reason=str(exc))
         finally:
             try:
                 await page.close()
@@ -641,31 +707,41 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
 
 
 async def main(limit: int = 10) -> None:
-    client = get_supabase_client()
-    creds = fetch_linkedin_credentials(client)
-    enriched_today = fetch_today_enrichment_count(client)
-    remaining_quota = max(0, DAILY_ENRICHMENT_CAP - enriched_today)
-
-    if remaining_quota <= 0:
-        print(f"Daily enrichment cap of {DAILY_ENRICHMENT_CAP} reached. Skipping run.")
-        return
-
-    effective_limit = min(limit, remaining_quota)
-    if effective_limit <= 0:
-        print("No quota left for today.")
-        return
-
-    leads = fetch_new_leads(client, limit=effective_limit)
-    if not leads:
-        print("No NEW leads to process.")
-        return
-
-    playwright, browser, context = await open_browser(headless=False)
+    logger.operation_start("enrichment", input_data={"limit": limit})
+    
     try:
-        await ensure_linkedin_auth(context, creds)
-        await process_batch(context, client, leads)
-    finally:
-        await shutdown(playwright, browser)
+        client = get_supabase_client()
+        creds = fetch_linkedin_credentials(client)
+        enriched_today = fetch_today_enrichment_count(client)
+        remaining_quota = max(0, DAILY_ENRICHMENT_CAP - enriched_today)
+
+        if remaining_quota <= 0:
+            logger.warn(f"Daily enrichment cap reached", data={"cap": DAILY_ENRICHMENT_CAP, "enrichedToday": enriched_today})
+            return
+
+        effective_limit = min(limit, remaining_quota)
+        if effective_limit <= 0:
+            logger.info("No quota left for today")
+            return
+
+        leads = fetch_new_leads(client, limit=effective_limit)
+        if not leads:
+            logger.info("No NEW leads to process")
+            return
+
+        playwright, browser, context = await open_browser(headless=False)
+        try:
+            logger.info("Browser opened, authenticating...")
+            await ensure_linkedin_auth(context, creds)
+            logger.info(f"Starting batch processing of {len(leads)} leads")
+            await process_batch(context, client, leads)
+            logger.operation_complete("enrichment", result={"processed": len(leads)})
+        finally:
+            await shutdown(playwright, browser)
+            logger.info("Browser closed")
+    except Exception as exc:
+        logger.operation_error("enrichment", error=exc, input_data={"limit": limit})
+        raise
 
 
 def parse_args() -> argparse.Namespace:

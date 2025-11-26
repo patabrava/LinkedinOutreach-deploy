@@ -15,7 +15,14 @@ from dotenv import load_dotenv
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 from supabase import Client, create_client
 
+# Import shared logger
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from shared_logger import get_logger
+
 load_dotenv()
+
+# Initialize logger
+logger = get_logger("sender")
 
 # Reuse the scraper's persisted auth state to avoid drift between workers.
 AUTH_STATE_PATH = (Path(__file__).parent.parent / "scraper" / "auth.json").resolve()
@@ -26,7 +33,9 @@ def get_supabase_client() -> Client:
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
+        logger.error("Missing Supabase configuration", data={"has_url": bool(url), "has_key": bool(key)})
         raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY.")
+    logger.debug("Supabase client initialized")
     return create_client(url, key)
 
 
@@ -86,6 +95,7 @@ def today_utc_iso() -> str:
 
 def sent_today_count(client: Client) -> int:
     start_iso = today_utc_iso()
+    logger.db_query("select-count", "leads", {"status": "SENT"}, {"since": start_iso})
     resp = (
         client.table("leads")
         .select("id", count="exact")
@@ -93,10 +103,14 @@ def sent_today_count(client: Client) -> int:
         .gte("sent_at", start_iso)
         .execute()
     )
-    return getattr(resp, "count", None) or 0
+    count = getattr(resp, "count", None) or 0
+    logger.db_result("select-count", "leads", {"status": "SENT"}, count)
+    logger.info(f"Sent today: {count}", data={"count": count})
+    return count
 
 
 def fetch_next_lead(client: Client) -> Optional[Dict[str, Any]]:
+    logger.db_query("select", "leads", {"status": "APPROVED"})
     resp = (
         client.table("leads")
         .select("id, linkedin_url, first_name, last_name, company_name")
@@ -107,7 +121,11 @@ def fetch_next_lead(client: Client) -> Optional[Dict[str, Any]]:
         .execute()
     )
     rows = resp.data or []
-    return rows[0] if rows else None
+    lead = rows[0] if rows else None
+    logger.db_result("select", "leads", {"status": "APPROVED"}, 1 if lead else 0)
+    if lead:
+        logger.info(f"Fetched next APPROVED lead", {"leadId": lead["id"]})
+    return lead
 
 
 def fetch_lead_by_id(client: Client, lead_id: str) -> Optional[Dict[str, Any]]:
@@ -123,6 +141,7 @@ def fetch_lead_by_id(client: Client, lead_id: str) -> Optional[Dict[str, Any]]:
 
 
 def fetch_draft(client: Client, lead_id: str) -> Optional[Dict[str, Any]]:
+    logger.db_query("select", "drafts", {"leadId": lead_id})
     resp = (
         client.table("drafts")
         .select("*")
@@ -132,7 +151,9 @@ def fetch_draft(client: Client, lead_id: str) -> Optional[Dict[str, Any]]:
         .execute()
     )
     rows = resp.data or []
-    return rows[0] if rows else None
+    draft = rows[0] if rows else None
+    logger.db_result("select", "drafts", {"leadId": lead_id}, 1 if draft else 0)
+    return draft
 
 
 def build_message(draft: Dict[str, Any]) -> str:
@@ -141,9 +162,12 @@ def build_message(draft: Dict[str, Any]) -> str:
     cta = draft.get("cta_text") or ""
     final = draft.get("final_message")
     if final:
+        logger.debug("Using final_message from draft", data={"length": len(final)})
         return final
     parts = [opener.strip(), body.strip(), cta.strip()]
-    return "\n\n".join([p for p in parts if p])
+    message = "\n\n".join([p for p in parts if p])
+    logger.debug("Built message from parts", data={"length": len(message)})
+    return message
 
 
 async def open_message_surface(page: Page) -> str:
@@ -319,9 +343,12 @@ async def send_message(page: Page, message: str, surface: str) -> None:
 
 
 def mark_sent(client: Client, lead_id: str) -> None:
+    logger.db_query("update", "leads", {"leadId": lead_id}, {"status": "SENT"})
     client.table("leads").update({"status": "SENT", "sent_at": datetime.utcnow().isoformat()}).eq(
         "id", lead_id
     ).execute()
+    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
+    logger.info(f"Lead marked as SENT", {"leadId": lead_id})
 
 async def send_connection_request(page: Page) -> bool:
     """Try to connect if not already connected. Returns True if a request was attempted."""
@@ -352,14 +379,21 @@ async def send_connection_request(page: Page) -> bool:
 
 
 async def process_one(context: BrowserContext, client: Client, lead: Dict[str, Any]) -> None:
-    draft = fetch_draft(client, lead["id"])
+    lead_id = lead["id"]
+    logger.message_send_start(lead_id, {"url": lead.get("linkedin_url")})
+    
+    draft = fetch_draft(client, lead_id)
     if not draft:
+        logger.error("Lead has no draft to send", {"leadId": lead_id})
         raise RuntimeError("Lead has no draft to send.")
 
     message = build_message(draft)
+    logger.message_send_start(lead_id, message_preview=message)
+    
     page = await context.new_page()
     # Normalize to https to reduce redirects
     url = str(lead["linkedin_url"]).replace("http://", "https://")
+    logger.debug(f"Navigating to profile", {"leadId": lead_id}, {"url": url})
 
     async def wait_if_checkpoint() -> None:
         # Detect common CAPTCHA/checkpoint surfaces and wait for manual resolution
@@ -406,14 +440,19 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
     await random_pause()
 
     surface = await open_message_surface(page)
+    logger.debug(f"Message surface opened", {"leadId": lead_id}, {"surface": surface})
+    
     await send_message(page, message, surface)
-    mark_sent(client, lead["id"])
+    mark_sent(client, lead_id)
     await page.close()
-    print(f"Sent message for lead {lead['id']}")
+    
+    logger.message_send_complete(lead_id)
+    logger.info(f"Message sent successfully", {"leadId": lead_id})
 
 
 # ------------------------- FOLLOW-UP FLOW -------------------------
 def fetch_next_followup(client: Client) -> Optional[Dict[str, Any]]:
+    logger.db_query("select", "followups", {"status": "APPROVED"})
     resp = (
         client.table("followups")
         .select("*, lead:leads(id, linkedin_url)")
@@ -423,7 +462,11 @@ def fetch_next_followup(client: Client) -> Optional[Dict[str, Any]]:
         .execute()
     )
     rows = resp.data or []
-    return rows[0] if rows else None
+    followup = rows[0] if rows else None
+    logger.db_result("select", "followups", {"status": "APPROVED"}, 1 if followup else 0)
+    if followup:
+        logger.info(f"Fetched next APPROVED followup", {"followupId": followup["id"]})
+    return followup
 
 
 def build_followup_message(fu: Dict[str, Any]) -> str:
@@ -434,29 +477,45 @@ def build_followup_message(fu: Dict[str, Any]) -> str:
 
 def mark_followup_sent(client: Client, followup_id: str, message: str) -> None:
     now_iso = datetime.utcnow().isoformat()
+    logger.db_query("update", "followups", {"followupId": followup_id}, {"status": "SENT"})
     client.table("followups").update(
         {"status": "SENT", "sent_text": message, "sent_at": now_iso}
     ).eq("id", followup_id).execute()
+    logger.db_result("update", "followups", {"followupId": followup_id}, 1)
+    logger.info(f"Followup marked as SENT", {"followupId": followup_id})
 
 
 async def process_followup_one(context: BrowserContext, client: Client, followup: Dict[str, Any]) -> None:
+    followup_id = followup["id"]
     lead = (followup.get("lead") or {})
+    lead_id = lead.get("id")
     linkedin_url = str(lead.get("linkedin_url") or "").replace("http://", "https://")
+    
+    logger.info(f"Processing followup", {"followupId": followup_id, "leadId": lead_id})
+    
     if not linkedin_url:
+        logger.error("Followup has no linked lead URL", {"followupId": followup_id})
         raise RuntimeError("Followup has no linked lead URL")
 
     message = build_followup_message(followup)
     if not message:
+        logger.error("Followup has no draft_text", {"followupId": followup_id})
         raise RuntimeError("Followup has no draft_text to send")
 
+    logger.message_send_start(lead_id or "unknown", {"followupId": followup_id}, message)
+    
     page = await context.new_page()
     await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
     await page.wait_for_timeout(1_000)
     surface = await open_message_surface(page)
+    logger.debug(f"Message surface opened for followup", {"followupId": followup_id}, {"surface": surface})
+    
     await send_message(page, message, surface)
     await page.close()
-    mark_followup_sent(client, followup["id"], message)
-    print(f"Sent follow-up {followup['id']} for lead {lead.get('id')}")
+    mark_followup_sent(client, followup_id, message)
+    
+    logger.message_send_complete(lead_id or "unknown", {"followupId": followup_id})
+    logger.info(f"Followup sent successfully", {"followupId": followup_id, "leadId": lead_id})
 
 
 def fetch_linkedin_credentials(client: Client) -> Optional[Dict[str, str]]:
@@ -590,12 +649,17 @@ async def main() -> None:
     parser.add_argument("--followup", action="store_true", help="Process APPROVED followups instead of initial outreach.")
     args = parser.parse_args()
 
-    client = get_supabase_client()
-    daily_limit = int(os.getenv("DAILY_SEND_LIMIT", str(DAILY_SEND_DEFAULT)))
-    already_sent = sent_today_count(client)
-    if already_sent >= daily_limit and not args.followup:
-        print("Daily send limit reached; exiting.")
-        return
+    mode = "followup" if args.followup else "outreach"
+    logger.operation_start(f"sender-{mode}", input_data={"lead_id": args.lead_id, "mode": mode})
+
+    try:
+        client = get_supabase_client()
+        daily_limit = int(os.getenv("DAILY_SEND_LIMIT", str(DAILY_SEND_DEFAULT)))
+        already_sent = sent_today_count(client)
+        
+        if already_sent >= daily_limit and not args.followup:
+            logger.warn("Daily send limit reached", data={"limit": daily_limit, "sent": already_sent})
+            return
 
     leads_to_send = []
     remaining = max(0, daily_limit - already_sent)
@@ -609,19 +673,26 @@ async def main() -> None:
                 break
             items.append(fu)
         if not items:
-            print("No APPROVED followups to send.")
+            logger.info("No APPROVED followups to send")
             return
+            
+        logger.info(f"Processing {len(items)} followups")
         playwright, browser, context = await open_browser(headless=False)
         try:
+            logger.info("Browser opened, authenticating...")
             await ensure_linkedin_auth(context, client)
+            
             for fu in items:
                 try:
                     await process_followup_one(context, client, fu)
                 except Exception as exc:
-                    print(f"Failed to send follow-up {fu.get('id')}: {exc}", file=sys.stderr)
+                    logger.error(f"Failed to send followup", {"followupId": fu.get('id')}, error=exc)
                 await random_pause(2, 4)
+            
+            logger.operation_complete("sender-followup", result={"sent": len(items)})
         finally:
             await shutdown(playwright, browser)
+            logger.info("Browser closed")
         return
 
     if args.lead_id:
@@ -638,23 +709,34 @@ async def main() -> None:
             leads_to_send.append(nxt)
 
     if not leads_to_send:
-        print("No APPROVED leads to send.")
+        logger.info("No APPROVED leads to send")
         return
 
+    logger.info(f"Processing {len(leads_to_send)} leads")
     playwright, browser, context = await open_browser(headless=False)
     try:
-        # Ensure we are logged in before attempting to message anyone.
+        logger.info("Browser opened, authenticating...")
         await ensure_linkedin_auth(context, client)
+        
+        success_count = 0
         for lead in leads_to_send:
+            lead_id = lead["id"]
             try:
                 await process_one(context, client, lead)
+                success_count += 1
             except Exception as exc:
-                print(f"Failed to send message for {lead['id']}: {exc}", file=sys.stderr)
+                logger.error(f"Failed to send message", {"leadId": lead_id}, error=exc)
                 # keep status as APPROVED for retry
-                client.table("leads").update({"status": "APPROVED"}).eq("id", lead["id"]).execute()
+                client.table("leads").update({"status": "APPROVED"}).eq("id", lead_id).execute()
             await random_pause(2, 4)
+        
+        logger.operation_complete("sender-outreach", result={"sent": success_count, "total": len(leads_to_send)})
     finally:
         await shutdown(playwright, browser)
+        logger.info("Browser closed")
+    except Exception as exc:
+        logger.operation_error(f"sender-{mode}", error=exc)
+        raise
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
@@ -12,7 +13,14 @@ from openai import OpenAI
 
 from tools import classify_lead, get_enriched_leads, save_draft, select_case_study, supabase_client
 
+# Import shared logger
+sys.path.insert(0, str(Path(__file__).parent.parent / "workers"))
+from shared_logger import get_logger
+
 load_dotenv()
+
+# Initialize logger
+logger = get_logger("mcp-agent")
 
 PROMPT = Path(__file__).parent.joinpath("prompt.txt").read_text()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -55,59 +63,89 @@ def build_prompt(lead: Dict[str, Any], case_study: str, company_type: str) -> st
 
 
 def main() -> None:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("Missing OPENAI_API_KEY.")
+    logger.operation_start("draft-generation")
+    
+    try:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            logger.error("Missing OPENAI_API_KEY")
+            raise RuntimeError("Missing OPENAI_API_KEY.")
 
-    client = supabase_client()
-    openai = OpenAI(api_key=api_key)
+        client = supabase_client()
+        openai = OpenAI(api_key=api_key)
 
-    leads = get_enriched_leads(client)
-    if not leads:
-        print("No ENRICHED leads found.")
-        return
+        leads = get_enriched_leads(client)
+        if not leads:
+            logger.info("No ENRICHED leads found")
+            return
+        
+        logger.info(f"Processing {len(leads)} ENRICHED leads", data={"count": len(leads)})
 
-    for lead in leads:
-        profile = lead.get("profile_data") or {}
-        company_type = guess_company_type(profile)
-        ai_tags = classify_lead(client, lead["id"], profile.get("industry", "Unknown"), company_type)
-        case_study = choose_case_study(ai_tags)
-        select_case_study(client, lead["id"], case_study)
+        for lead in leads:
+            lead_id = lead["id"]
+            logger.info(f"Generating draft for lead", {"leadId": lead_id})
+            profile = lead.get("profile_data") or {}
+            company_type = guess_company_type(profile)
+            
+            logger.debug("Classifying lead", {"leadId": lead_id}, {"companyType": company_type})
+            ai_tags = classify_lead(client, lead_id, profile.get("industry", "Unknown"), company_type)
+            
+            case_study = choose_case_study(ai_tags)
+            logger.debug("Selected case study", {"leadId": lead_id}, {"caseStudy": case_study})
+            select_case_study(client, lead_id, case_study)
 
-        prompt = build_prompt(lead, case_study, company_type)
-        completion = openai.chat.completions.create(
-            model=OPENAI_MODEL,
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Du bist eine deutschsprachige LinkedIn-Textexpertin mit Schwerpunkt Immobilien. "
-                        "Schreibe prägnante, warme und branchenspezifische Outreach-Nachrichten auf Deutsch."
-                    ),
-                },
-                {"role": "system", "content": PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-        )
-        content = completion.choices[0].message.content or "{}"
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError:
-            print(f"Bad model output for lead {lead['id']}: {content}")
-            continue
+            prompt = build_prompt(lead, case_study, company_type)
+            
+            logger.ai_request(OPENAI_MODEL, {"leadId": lead_id}, prompt[:200])
+            
+            completion = openai.chat.completions.create(
+                model=OPENAI_MODEL,
+                response_format={"type": "json_object"},
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Du bist eine deutschsprachige LinkedIn-Textexpertin mit Schwerpunkt Immobilien. "
+                            "Schreibe prägnante, warme und branchenspezifische Outreach-Nachrichten auf Deutsch."
+                        ),
+                    },
+                    {"role": "system", "content": PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            
+            tokens = completion.usage.total_tokens if completion.usage else None
+            logger.ai_response(OPENAI_MODEL, {"leadId": lead_id}, tokens)
+            
+            content = completion.choices[0].message.content or "{}"
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError:
+                logger.error(f"Bad JSON from AI model", {"leadId": lead_id}, data={"content": content[:200]})
+                continue
 
-        opener = data.get("opener", "")
-        body = data.get("body", "")
-        cta = data.get("cta", "")
-        full_message = data.get("full_message") or "\n\n".join(
-            [part for part in [opener, body, cta] if part]
-        )
-        body_type = data.get("body_type", "")
-        cta_type = data.get("cta_type", "")
+            opener = data.get("opener", "")
+            body = data.get("body", "")
+            cta = data.get("cta", "")
+            full_message = data.get("full_message") or "\n\n".join(
+                [part for part in [opener, body, cta] if part]
+            )
+            body_type = data.get("body_type", "")
+            cta_type = data.get("cta_type", "")
 
-        save_draft(client, lead["id"], opener, body, cta, full_message, body_type, cta_type)
-        print(f"Saved draft for lead {lead['id']}")
+            logger.debug("Draft generated", {"leadId": lead_id}, {
+                "messageLength": len(full_message),
+                "bodyType": body_type,
+                "ctaType": cta_type,
+            })
+            
+            save_draft(client, lead_id, opener, body, cta, full_message, body_type, cta_type)
+            logger.info(f"Draft saved for lead", {"leadId": lead_id})
+        
+        logger.operation_complete("draft-generation", result={"processed": len(leads)})
+    except Exception as exc:
+        logger.operation_error("draft-generation", error=exc)
+        raise
 
 
 if __name__ == "__main__":
