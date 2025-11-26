@@ -212,12 +212,17 @@ class Logger {
    * Log database result
    */
   dbResult(operation: string, table: string, context: LogContext = {}, result?: any): void {
-    const count = Array.isArray(result) ? result.length : (result ? 1 : 0);
-    this.debug(`DB Result: ${operation} on ${table} (${count} rows)`, {
+    // If a numeric count is provided, log it as-is. Otherwise infer from payload.
+    const rowCount = typeof result === "number"
+      ? result
+      : Array.isArray(result)
+        ? result.length
+        : (result ? 1 : 0);
+    this.debug(`DB Result: ${operation} on ${table} (${rowCount} rows)`, {
       ...context,
       operation,
       table,
-      rowCount: count,
+      rowCount,
     });
   }
 

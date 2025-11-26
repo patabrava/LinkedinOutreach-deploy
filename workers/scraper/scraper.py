@@ -320,7 +320,7 @@ async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
 
 
 async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str, Any]]:
-    """Navigate to activity section, click on recent posts, and extract full text content."""
+    """Navigate to activity section and extract recent posts from the carousel."""
     base = profile_url.rstrip("/")
     activity_url = f"{base}/recent-activity/all/"
     logger.debug("Starting activity scrape", data={"url": activity_url})
@@ -330,127 +330,106 @@ async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str,
     await slow_scroll(page, steps=3)
 
     results: List[Dict[str, Any]] = []
-    
-    # Look for post links in the activity feed
-    # These are typically anchor tags that link to individual posts
-    post_link_selectors = [
-        "div[data-view-name='feed-commentary'] a[href*='/posts/']",
-        "div[role='listitem'] a[href*='/posts/']",
-        "article a[href*='/posts/']",
-        "div.feed-shared-update-v2 a[href*='/posts/']",
-    ]
-    
-    post_links = []
-    for selector in post_link_selectors:
-        links = page.locator(selector)
-        count = await links.count()
-        if count > 0:
-            # Get the href attributes of the first 3 posts
-            for idx in range(min(count, 3)):
-                try:
-                    href = await links.nth(idx).get_attribute("href", timeout=3_000)
-                    if href and "/posts/" in href:
-                        # Make it an absolute URL if it's relative
-                        if href.startswith("/"):
-                            href = f"https://www.linkedin.com{href}"
-                        if href not in post_links:
-                            post_links.append(href)
-                except Exception:
+
+    # Primary path: LinkedIn renders the activity as a carousel
+    try:
+        carousel = page.get_by_test_id("carousel")
+        if await carousel.count() == 0:
+            logger.debug("No carousel found on activity page")
+            logger.debug("Activity scraping complete", data={"postsFound": 0})
+            return results
+
+        # Links inside the carousel carry an accessible name that is the preview text
+        activity_links = carousel.get_by_role("link")
+        link_count = await activity_links.count()
+        logger.debug(f"Found {link_count} activity links in carousel")
+
+        max_activities = min(link_count, 5)
+        for idx in range(max_activities):
+            try:
+                link = activity_links.nth(idx)
+
+                # Extract preview text from aria-label; fallback to inner text
+                link_name = await link.get_attribute("aria-label", timeout=3_000)
+                if not link_name:
+                    try:
+                        link_name = safe_text(await link.inner_text(timeout=3_000))
+                    except Exception:
+                        link_name = ""
+
+                href = await link.get_attribute("href", timeout=3_000)
+                post_url = href or ""
+                if post_url.startswith("/"):
+                    post_url = f"https://www.linkedin.com{post_url}"
+
+                if not link_name or len(link_name.strip()) < 10:
                     continue
-            break
-    
-    # If we found post links, visit each one and extract content
-    if post_links:
-        for post_url in post_links[:3]:  # Limit to 3 most recent posts
-            try:
-                print(f"  Extracting activity post: {post_url}")
-                await gentle_nav(page, post_url)
-                await page.wait_for_timeout(1_500)
-                
-                # Extract post content from the detail view
-                content = ""
-                content_selectors = [
-                    "span[data-testid='expandable-text-box']",
-                    "div.feed-shared-update-v2__description span[dir='ltr']",
-                    "div.feed-shared-text span[dir='ltr']",
-                    "div[class*='feed-shared-inline-show-more-text'] span",
-                ]
-                
-                for selector in content_selectors:
-                    text = await safe_inner_text(page, selector, timeout=5_000)
-                    if text and len(text) > 20:  # Ensure we got meaningful content
-                        content = text
-                        break
-                
-                # If still no content, try getting all text from the main post area
-                if not content:
-                    main_post = page.locator("div.feed-shared-update-v2, article, div[data-view-name='feed-commentary']")
-                    if await main_post.count() > 0:
-                        content = safe_text(await main_post.first.inner_text(timeout=6_000))
-                
-                # Extract date/time
-                date_text = ""
-                date_selectors = [
-                    "span.feed-shared-actor__sub-description span[aria-hidden='true']",
-                    "a.app-aware-link span[aria-hidden='true']:has-text('ago')",
-                    "span:has-text('ago')",
-                ]
-                for selector in date_selectors:
-                    date_text = await safe_text_content(page, selector, timeout=3_000)
-                    if date_text and ("ago" in date_text or "d" in date_text or "w" in date_text):
-                        break
-                
-                # Extract engagement (likes, comments)
-                likes_text = ""
-                likes_selectors = [
-                    "button[aria-label*='reactions'] span[aria-hidden='true']",
-                    "span.social-details-social-counts__reactions-count",
-                    "button:has-text('reactions') span",
-                ]
-                for selector in likes_selectors:
-                    likes_text = await safe_text_content(page, selector, timeout=3_000)
-                    if likes_text:
-                        break
-                
-                # Only add if we got meaningful content
-                if content and len(content.strip()) > 20:
-                    results.append({
-                        "text": content.strip(),
-                        "date": date_text.strip(),
-                        "likes": likes_text.strip(),
-                        "url": post_url
-                    })
-                    print(f"  ✓ Extracted {len(content)} characters from post")
-                
+
+                # Start with preview data (fast path)
+                activity_data: Dict[str, Any] = {
+                    "text": link_name.strip(),
+                    "url": post_url,
+                    "date": "",
+                    "likes": "",
+                }
+
+                # If the URL looks like a post, attempt to open for richer extraction
+                # Only when preview seems incomplete
+                if post_url and "/posts/" in post_url and ("..." in link_name or len(link_name) < 50):
+                    try:
+                        await gentle_nav(page, post_url)
+                        await page.wait_for_timeout(1_500)
+
+                        # Pull full text content
+                        content = ""
+                        for selector in [
+                            "span[data-testid='expandable-text-box']",
+                            "div.feed-shared-update-v2__description span[dir='ltr']",
+                            "div.feed-shared-text span[dir='ltr']",
+                        ]:
+                            text = await safe_inner_text(page, selector, timeout=5_000)
+                            if text and len(text) > 20:
+                                content = text
+                                break
+
+                        # Engagement details (best-effort)
+                        date_text = await safe_text_content(
+                            page,
+                            "span.feed-shared-actor__sub-description span[aria-hidden='true']",
+                            timeout=3_000,
+                        )
+                        likes_text = await safe_text_content(
+                            page,
+                            "button[aria-label*='reactions'] span[aria-hidden='true']",
+                            timeout=3_000,
+                        )
+
+                        if content and len(content.strip()) > 20:
+                            activity_data.update({
+                                "text": content.strip(),
+                                "date": (date_text or "").strip(),
+                                "likes": (likes_text or "").strip(),
+                            })
+
+                    except Exception as exc:
+                        logger.warn("Failed to extract full post content", error=exc)
+                    finally:
+                        # Navigate back to the activity page to continue processing
+                        await gentle_nav(page, activity_url)
+                        await page.wait_for_timeout(600)
+
+                results.append(activity_data)
+                await page.wait_for_timeout(random.randint(300, 700))
+
             except Exception as exc:
-                print(f"  Failed to extract post {post_url}: {exc}")
+                logger.debug(f"Failed to process activity link {idx}", error=exc)
                 continue
-            
-            # Small delay between posts
-            await page.wait_for_timeout(random.randint(800, 1500))
-    
-    # Fallback: if no post links found, try to extract from feed view (less reliable)
-    if not results:
-        print("  No post links found, falling back to feed view extraction")
-        cards = page.locator("div[data-view-name='feed-commentary'], div[role='listitem']")
-        count = min(await cards.count(), 3)
-        
-        for idx in range(count):
-            card = cards.nth(idx)
-            try:
-                text_nodes = card.locator("span[data-testid='expandable-text-box']")
-                if await text_nodes.count() > 0:
-                    content = safe_text(await text_nodes.first.inner_text(timeout=5_000))
-                else:
-                    content = safe_text(await card.inner_text(timeout=5_000))
-                
-                if content and len(content.strip()) > 20:
-                    results.append({"text": content.strip(), "date": "", "likes": ""})
-            except Exception:
-                continue
-    
+
+    except Exception as exc:
+        logger.warn("Failed to scrape activity carousel", error=exc)
+
     logger.debug(f"Activity scraping complete", data={"postsFound": len(results)})
-    return results[:3]
+    return results[:5]
 
 
 async def send_connection_request(page: Page, profile_url: str) -> bool:
