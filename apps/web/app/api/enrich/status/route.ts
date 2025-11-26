@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { logger } from "../../../../lib/logger";
 import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 
 const STATUSES = ["NEW", "PROCESSING", "ENRICHED", "DRAFT_READY", "APPROVED", "REJECTED"] as const;
@@ -16,25 +17,35 @@ const createInitialCounts = (): StatusCounts => {
 };
 
 export async function GET() {
+  const correlationId = logger.apiRequest("GET", "/api/enrich/status");
+  
   try {
     const client = supabaseAdmin();
     const counts = createInitialCounts();
 
+    logger.debug("Fetching status counts for all lead statuses", { correlationId });
+
     await Promise.all(
       STATUSES.map(async (status) => {
+        logger.dbQuery("select-count", "leads", { correlationId, status });
+        
         const { count, error } = await client
           .from("leads")
           .select("id", { count: "exact", head: true })
           .eq("status", status);
 
         if (error) {
+          logger.error(`Failed to count leads with status ${status}`, { correlationId }, error);
           throw error;
         }
 
         counts[status] = count ?? 0;
+        logger.dbResult("select-count", "leads", { correlationId, status }, count);
       })
     );
 
+    logger.dbQuery("select", "leads", { correlationId }, { filter: "NEW or PROCESSING" });
+    
     const { data: nextLead, error: nextLeadError } = await client
       .from("leads")
       .select("id, linkedin_url, first_name, last_name, company_name")
@@ -44,23 +55,33 @@ export async function GET() {
       .maybeSingle();
 
     if (nextLeadError) {
+      logger.error("Failed to fetch next lead", { correlationId }, nextLeadError);
       throw nextLeadError;
     }
+
+    logger.dbResult("select", "leads", { correlationId }, nextLead);
 
     // Compute progress strictly from the enrichment pipeline:
     // remaining = NEW + PROCESSING, completed = ENRICHED.
     const remaining = (counts.NEW || 0) + (counts.PROCESSING || 0);
     const completed = counts.ENRICHED || 0;
 
-    return NextResponse.json({
+    const response = {
       ok: true,
       counts,
       remaining,
       completed,
       nextLead: nextLead || null,
-    });
+    };
+
+    logger.info("Status fetched successfully", { correlationId }, { remaining, completed, nextLeadId: nextLead?.id });
+    logger.apiResponse("GET", "/api/enrich/status", 200, { correlationId });
+
+    return NextResponse.json(response);
   } catch (error: any) {
-    console.error("/api/enrich/status error", error);
+    logger.error("Failed to fetch enrichment status", { correlationId }, error);
+    logger.apiResponse("GET", "/api/enrich/status", 500, { correlationId });
+    
     return NextResponse.json(
       {
         ok: false,

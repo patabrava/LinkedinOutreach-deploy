@@ -16,6 +16,13 @@ const formatDate = (iso?: string | null) => {
   return date.toLocaleString();
 };
 
+const statusStyle: Record<string, { bg: string; color: string }> = {
+  PENDING_REVIEW: { bg: "rgba(245, 158, 11, 0.16)", color: "#fcd34d" },
+  APPROVED: { bg: "rgba(52, 211, 153, 0.18)", color: "#a7f3d0" },
+  SENT: { bg: "rgba(79, 70, 229, 0.18)", color: "#c7d2fe" },
+  SKIPPED: { bg: "rgba(148, 163, 184, 0.16)", color: "#cbd5e1" },
+};
+
 export default function FollowupsList({ initial }: Props) {
   const [rows, setRows] = useState<FollowupRow[]>(() => initial || []);
   const [draftEdits, setDraftEdits] = useState<Record<string, string>>({});
@@ -54,6 +61,15 @@ export default function FollowupsList({ initial }: Props) {
     };
   }, []);
 
+  const sortedRows = useMemo(
+    () =>
+      [...rows].sort((a, b) => {
+        const at = new Date(a.reply_timestamp || a.created_at || "").getTime();
+        const bt = new Date(b.reply_timestamp || b.created_at || "").getTime();
+        return bt - at;
+      }),
+    [rows]
+  );
   const pending = useMemo(() => rows.filter((r) => r.status === "PENDING_REVIEW"), [rows]);
   const approved = useMemo(() => rows.filter((r) => r.status === "APPROVED"), [rows]);
 
@@ -84,7 +100,7 @@ export default function FollowupsList({ initial }: Props) {
         <div>
           <div className="pill">Follow-ups</div>
           <h3 style={{ margin: "10px 0 6px 0" }}>Replies needing review</h3>
-          <div className="muted">Draft, approve, and send follow-ups.</div>
+          <div className="muted">Draft, approve, and send the next touchpoint.</div>
         </div>
         <div className="muted">
           Pending: {pending.length} • Approved: {approved.length}
@@ -92,63 +108,85 @@ export default function FollowupsList({ initial }: Props) {
       </div>
 
       {rows.length === 0 ? (
-        <div className="muted" style={{ marginTop: 12 }}>No follow-ups yet.</div>
+        <div className="muted" style={{ marginTop: 12 }}>
+          No follow-ups yet.
+        </div>
       ) : (
-        <div className="table-wrapper" style={{ marginTop: 12 }}>
-          <table className="lead-table">
+        <div
+          className="table-wrapper"
+          style={{
+            marginTop: 12,
+            maxHeight: 520,
+            overflowY: "auto",
+            borderRadius: 12,
+          }}
+        >
+          <table className="lead-table" style={{ minWidth: 900 }}>
             <thead>
               <tr>
                 <th>Lead</th>
                 <th>Reply</th>
                 <th>Status</th>
                 <th>Draft</th>
-                <th>Actions</th>
+                <th style={{ width: 160 }}>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => {
+              {sortedRows.map((row) => {
                 const lead = row.lead || ({} as any);
                 const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ") || "Unknown";
                 const company = lead.company_name || "";
                 const link = lead.linkedin_url || "";
                 const draft = draftEdits[row.id] ?? row.draft_text ?? row.reply_snippet ?? "";
+                const statusKey = (row.status || "").toUpperCase();
+                const style = statusStyle[statusKey] || { bg: "rgba(255,255,255,0.1)", color: "#cbd5e1" };
+
                 return (
                   <tr key={row.id}>
                     <td>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 200 }}>
                         <strong>{name}</strong>
-                        <span className="muted">{company}</span>
+                        <span className="muted">{company || "Company N/A"}</span>
                         {link ? (
-                          <a className="muted" href={link} target="_blank" rel="noreferrer">{link}</a>
+                          <a className="muted" href={link} target="_blank" rel="noreferrer">
+                            {link}
+                          </a>
                         ) : null}
                       </div>
                     </td>
                     <td>
-                      <div style={{ maxWidth: 380 }}>
-                        <div className="muted" style={{ marginBottom: 4 }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: 380 }}>
+                        <div className="pill" style={{ background: "rgba(255,255,255,0.06)", color: "#cbd5e1", width: "fit-content" }}>
                           {formatDate(row.reply_timestamp)}
                         </div>
-                        <div>{row.reply_snippet || "—"}</div>
+                        <div style={{ lineHeight: 1.5 }}>{row.reply_snippet || "—"}</div>
                       </div>
                     </td>
                     <td>
-                      <span className="status-chip" style={{ background: row.status === "PENDING_REVIEW" ? "rgba(245,158,11,0.15)" : row.status === "APPROVED" ? "rgba(52,211,153,0.18)" : "rgba(59,130,246,0.15)", color: "#cbd5e1" }}>
+                      <span
+                        className="status-chip"
+                        style={{ background: style.bg, color: style.color, minWidth: 110, textAlign: "center" }}
+                      >
                         {row.status.replace(/_/g, " ")}
                       </span>
+                      <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>
+                        Attempt {row.attempt || 1}
+                      </div>
                     </td>
                     <td>
                       <textarea
+                        className="textarea"
                         value={draft}
                         onChange={(e) => setDraftEdits((m) => ({ ...m, [row.id]: e.target.value }))}
                         placeholder="Edit follow-up draft..."
                         rows={4}
-                        style={{ width: 420 }}
+                        style={{ width: 380 }}
                       />
                     </td>
                     <td>
-                      <div style={{ display: "flex", gap: 8 }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                         <button className="btn" disabled={busy[row.id]} onClick={() => onApprove(row)}>
-                          Approve & Send
+                          {busy[row.id] ? "Sending..." : "Approve & Send"}
                         </button>
                         <button className="btn secondary" disabled={busy[row.id]} onClick={() => onSkip(row)}>
                           Skip

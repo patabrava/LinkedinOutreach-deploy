@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState, useTransition } from "react";
 
-import { approveDraft, fetchDraftFeed, regenerateDraft, rejectDraft } from "../app/actions";
+import { approveDraft, fetchDraftFeed, regenerateDraft, rejectDraft, triggerDraftGeneration } from "../app/actions";
 import { supabaseBrowserClient } from "../lib/supabaseClient";
 
 export type DraftWithLead = {
@@ -28,6 +28,8 @@ type Props = {
 export function DraftFeed({ drafts }: Props) {
   const [localDrafts, setLocalDrafts] = useState<DraftWithLead[]>([]);
   const [loading, setLoading] = useState(true);
+  const [genPending, setGenPending] = useState(false);
+  const [genMessage, setGenMessage] = useState<string | null>(null);
 
   // Fetch all DRAFT_READY leads with their drafts using server action
   const fetchDrafts = async () => {
@@ -82,28 +84,69 @@ export function DraftFeed({ drafts }: Props) {
     };
   }, []);
 
+  const handleGenerateDrafts = async () => {
+    setGenMessage(null);
+    setGenPending(true);
+    try {
+      await triggerDraftGeneration();
+      setGenMessage("Draft generation started. This may take a moment – drafts will appear here when ready.");
+    } catch (err: any) {
+      setGenMessage(err?.message || "Failed to start draft generation.");
+    } finally {
+      setGenPending(false);
+    }
+  };
+
   if (!localDrafts.length && !loading) {
     return (
       <div className="card" style={{ marginTop: 20 }}>
         <div className="pill">Draft Feed</div>
         <h3 style={{ margin: "10px 0 6px 0" }}>No drafts ready.</h3>
         <div className="muted">When the agent generates drafts, they will appear here.</div>
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <button className="btn" onClick={handleGenerateDrafts} disabled={genPending}>
+            {genPending ? "Starting…" : "Generate Drafts for ENRICHED Leads"}
+          </button>
+          {genMessage ? (
+            <span className="muted" style={{ marginLeft: 6 }}>{genMessage}</span>
+          ) : null}
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="grid">
-      {loading && !localDrafts.length ? (
-        <div className="card">
-          <div className="muted">Loading drafts...</div>
+    <>
+      <div className="card" style={{ marginTop: 20, marginBottom: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div className="pill">Draft Feed</div>
+            <h3 style={{ margin: "10px 0 6px 0" }}>Review and approve drafts</h3>
+            <div className="muted">Manually trigger draft generation for ENRICHED leads when you are ready.</div>
+          </div>
+          <div>
+            <button className="btn" onClick={handleGenerateDrafts} disabled={genPending}>
+              {genPending ? "Starting…" : "Generate Drafts"}
+            </button>
+          </div>
         </div>
-      ) : (
-        localDrafts.map((draft) => (
-          <DraftCard key={draft.draftId || draft.leadId} draft={draft} onAction={fetchDrafts} />
-        ))
-      )}
-    </div>
+        {genMessage ? (
+          <div className="muted" style={{ marginTop: 8 }}>{genMessage}</div>
+        ) : null}
+      </div>
+
+      <div className="grid">
+        {loading && !localDrafts.length ? (
+          <div className="card">
+            <div className="muted">Loading drafts...</div>
+          </div>
+        ) : (
+          localDrafts.map((draft) => (
+            <DraftCard key={draft.draftId || draft.leadId} draft={draft} onAction={fetchDrafts} />
+          ))
+        )}
+      </div>
+    </>
   );
 }
 
