@@ -127,9 +127,9 @@ class StructuredLogger:
         """Log info message"""
         self._log("INFO", message, context, data)
     
-    def warn(self, message: str, context: Optional[Dict[str, Any]] = None, data: Any = None) -> None:
+    def warn(self, message: str, context: Optional[Dict[str, Any]] = None, data: Any = None, error: Optional[Exception] = None) -> None:
         """Log warning message"""
-        self._log("WARN", message, context, data)
+        self._log("WARN", message, context, data, error)
     
     def error(self, message: str, context: Optional[Dict[str, Any]] = None, error: Optional[Exception] = None, data: Any = None) -> None:
         """Log error message"""

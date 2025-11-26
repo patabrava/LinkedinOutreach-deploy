@@ -24,7 +24,11 @@ from auth import AUTH_STATE_PATH, is_logged_in, open_browser, save_storage_state
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from shared_logger import get_logger
 
-load_dotenv()
+# Load .env from scraper directory explicitly
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path)
+print(f"[SCRAPER] Loading .env from: {env_path}", file=sys.stderr)
+print(f"[SCRAPER] .env exists: {env_path.exists()}", file=sys.stderr)
 
 # Initialize logger
 logger = get_logger("scraper")
@@ -52,10 +56,13 @@ class LinkedinCredentials:
 def get_supabase_client() -> Client:
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    print(f"[SCRAPER] SUPABASE_URL: {url[:32] if url else 'MISSING'}", file=sys.stderr)
+    print(f"[SCRAPER] SUPABASE_SERVICE_ROLE_KEY: {'SET' if key else 'MISSING'}", file=sys.stderr)
     if not url or not key:
         logger.error("Missing Supabase configuration", data={"has_url": bool(url), "has_key": bool(key)})
         raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY.")
     logger.debug("Supabase client initialized")
+    print(f"[SCRAPER] Supabase client created successfully", file=sys.stderr)
     return create_client(url, key)
 
 

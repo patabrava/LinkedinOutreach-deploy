@@ -6,7 +6,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -48,18 +48,77 @@ def build_prompt(lead: Dict[str, Any], case_study: str, company_type: str) -> st
     profile_json = json.dumps(lead.get("profile_data", {}), indent=2)
     activity_json = json.dumps(lead.get("recent_activity", []), indent=2)
 
+    first_name = (lead.get("first_name") or "").strip()
+    last_name = (lead.get("last_name") or "").strip()
+    full_name = " ".join([p for p in [first_name, last_name] if p]).strip()
+
     return (
         f"{PROMPT}\n\n"
         "You must respond in JSON with keys: opener, body, cta, full_message, body_type, cta_type, "
         "industry, company_type, case_study.\n"
-        f"Lead profile:\n{profile_json}\n\n"
-        f"Recent activity:\n{activity_json}\n\n"
+        f"Lead first_name: {first_name or '(unknown)'}\n"
+        f"Lead last_name: {last_name or '(unknown)'}\n"
+        f"Lead full_name: {full_name or '(unknown)'}\n\n"
+        f"Lead profile (JSON):\n{profile_json}\n\n"
+        f"Recent activity (JSON):\n{activity_json}\n\n"
         f"Selected case study: {case_study}\n"
         f"Company type: {company_type}\n"
+        "CRITICAL RULES: The opener must address the person by their first name if available (e.g., 'Hey Sven,'). "
+        "Never output placeholder tokens like [Name] or {Name}. If no name is available, start with 'Hey,'.\n"
         "Follow the logic chain: classify company type, select case study, decide opener (post if "
         "recent <30 days else profile), choose body type, choose CTA (low friction default), "
-        "and ensure word-count limits."
+        "and ensure word-count limits. Hard cap: opener + body + CTA combined must be <= 300 characters."
     )
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    if limit == 1:
+        return text[:1]
+
+    candidate = text[: limit - 1].rstrip()
+    space_idx = candidate.rfind(" ")
+    if space_idx > 0 and space_idx >= limit // 2:
+        candidate = candidate[:space_idx]
+    candidate = candidate.rstrip(" ,.;:-")
+    if not candidate:
+        candidate = text[: limit - 1]
+    return f"{candidate}…"
+
+
+def enforce_char_limit(opener: str, body: str, cta: str, limit: int = 300) -> Tuple[str, str, str, str]:
+    sections = [
+        ("opener", (opener or "").strip()),
+        ("body", (body or "").strip()),
+        ("cta", (cta or "").strip()),
+    ]
+    separator = "\n\n"
+    current = ""
+    results: Dict[str, str] = {"opener": "", "body": "", "cta": ""}
+
+    for name, text in sections:
+        if not text:
+            results[name] = ""
+            continue
+
+        addition = separator if current else ""
+        available = limit - len(current) - len(addition)
+        if available <= 0:
+            results[name] = ""
+            continue
+
+        if len(text) <= available:
+            truncated = text
+        else:
+            truncated = _truncate_text(text, available)
+
+        current = f"{current}{addition}{truncated}" if current else truncated
+        results[name] = truncated
+
+    return results["opener"], results["body"], results["cta"], current
 
 
 def main() -> None:
@@ -139,6 +198,34 @@ def main() -> None:
                 "ctaType": cta_type,
             })
             
+            # Safety net: ensure the opener greets with the lead's first name when available
+            def sanitize_opener(op: str, l: Dict[str, Any]) -> str:
+                safe = (op or "").strip()
+                # Replace common placeholder patterns
+                for ph in ["[Name]", "[name]", "{Name}", "{name}", "<Name>", "<name>"]:
+                    if ph in safe:
+                        safe = safe.replace(ph, (l.get("first_name") or "").strip())
+                first = (l.get("first_name") or "").strip()
+                if first:
+                    # If opener doesn't already mention the first name in the first few words, prefix it
+                    lowered = safe.lower()
+                    if first.lower() not in lowered[:40]:
+                        # Normalize to German "Hey" greeting
+                        safe = f"Hey {first}, " + safe
+                else:
+                    # No first name available: ensure we don't leave any placeholders
+                    safe = safe.replace("[", "").replace("]", "").replace("{", "").replace("}", "").replace("<", "").replace(">", "")
+                    if not safe.lower().startswith("hey"):
+                        safe = f"Hey, {safe}" if safe else "Hey,"
+                return safe.strip()
+
+            opener = sanitize_opener(opener, lead)
+            # If we rebuilt opener, recompute full_message to reflect sanitized opener
+            if not data.get("full_message"):
+                full_message = "\n\n".join([part for part in [opener, body, cta] if part])
+
+            opener, body, cta, full_message = enforce_char_limit(opener, body, cta)
+
             save_draft(client, lead_id, opener, body, cta, full_message, body_type, cta_type)
             logger.info(f"Draft saved for lead", {"leadId": lead_id})
         

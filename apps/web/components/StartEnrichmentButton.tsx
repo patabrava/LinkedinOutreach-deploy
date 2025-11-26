@@ -28,6 +28,7 @@ export function StartEnrichmentButton() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [statusLoading, setStatusLoading] = useState<boolean>(false);
   const [polling, setPolling] = useState<boolean>(false);
+  const [stopping, setStopping] = useState<boolean>(false);
 
   const refreshStatus = useCallback(async ({ silent = false } = {}) => {
     if (!silent) {
@@ -114,6 +115,7 @@ export function StartEnrichmentButton() {
 
   const start = async () => {
     setRunning(true);
+    setStopping(false);
     setMessage("");
     setError("");
     try {
@@ -136,20 +138,54 @@ export function StartEnrichmentButton() {
     }
   };
 
+  const stop = async () => {
+    setStopping(true);
+    setError("");
+    try {
+      const res = await fetch("/api/enrich/stop", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || "Failed to stop enrichment.");
+      }
+      setMessage(data?.message || "Enrichment stop requested.");
+      setPolling(false);
+      setRunning(false);
+      await refreshStatus({ silent: true });
+    } catch (e: any) {
+      setError(e?.message || "Unable to stop enrichment.");
+    } finally {
+      setStopping(false);
+    }
+  };
+
   return (
     <div style={{ width: "100%" }}>
-      <button
-        onClick={start}
-        disabled={running}
-        className="btn"
-        style={{
-          background: running ? "#374151" : "#10b981",
-          color: "white",
-          width: "100%",
-        }}
-      >
-        {running ? "Starting..." : "Start Enrichment"}
-      </button>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          onClick={start}
+          disabled={running}
+          className="btn"
+          style={{
+            background: running ? "#374151" : "#10b981",
+            color: "white",
+            flex: 1,
+          }}
+        >
+          {running ? "Starting..." : "Start Enrichment"}
+        </button>
+        <button
+          onClick={stop}
+          disabled={stopping}
+          className="btn"
+          style={{
+            background: stopping ? "#374151" : "#ef4444",
+            color: "white",
+            flex: 1,
+          }}
+        >
+          {stopping ? "Stopping..." : "Stop Enrichment"}
+        </button>
+      </div>
 
       {message ? (
         <div style={{ marginTop: 8, fontSize: 13, color: "#cbd5e1" }}>{message}</div>
