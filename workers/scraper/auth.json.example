@@ -1,0 +1,24 @@
+{
+  "cookies": [
+    {
+      "name": "li_at",
+      "value": "YOUR_LI_AT_TOKEN_HERE",
+      "domain": ".www.linkedin.com",
+      "path": "/",
+      "expires": 1234567890,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "JSESSIONID",
+      "value": "YOUR_JSESSIONID_HERE",
+      "domain": ".www.linkedin.com",
+      "path": "/",
+      "expires": 1234567890,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    }
+  ]
+}
