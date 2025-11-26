@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import { approveDraft, fetchDraftFeed, regenerateDraft, rejectDraft, triggerDraftGeneration } from "../app/actions";
 import { supabaseBrowserClient } from "../lib/supabaseClient";
@@ -25,29 +25,87 @@ type Props = {
   drafts: DraftWithLead[];
 };
 
+const POLL_INTERVAL_MS = 5000;
+const POLL_TIMEOUT_MS = 2 * 60 * 1000;
+
 export function DraftFeed({ drafts }: Props) {
   const [localDrafts, setLocalDrafts] = useState<DraftWithLead[]>([]);
+  const localDraftsRef = useRef<DraftWithLead[]>(drafts);
   const [loading, setLoading] = useState(true);
   const [genPending, setGenPending] = useState(false);
   const [genMessage, setGenMessage] = useState<string | null>(null);
+  const [isPolling, setIsPolling] = useState(false);
+  const pollingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastDraftCountRef = useRef<number>(drafts.length || 0);
+  const isPollingRef = useRef(false);
 
-  // Fetch all DRAFT_READY leads with their drafts using server action
-  const fetchDrafts = async () => {
-    setLoading(true);
+  const fetchDrafts = useCallback(async (showLoading = false) => {
+    if (showLoading) {
+      setLoading(true);
+    }
     try {
       const mapped = await fetchDraftFeed();
+      const previousCount = lastDraftCountRef.current;
+      lastDraftCountRef.current = mapped.length;
+      localDraftsRef.current = mapped;
       setLocalDrafts(mapped);
+
+      if (isPollingRef.current && mapped.length > previousCount) {
+        setGenMessage("New drafts are ready. Review them below.");
+        isPollingRef.current = false;
+        setIsPolling(false);
+      }
     } catch (err) {
       console.error("Failed to fetch drafts:", err);
+      if (isPollingRef.current) {
+        setGenMessage("Unable to refresh drafts automatically. Please try again.");
+      }
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   // Fetch existing drafts on mount
   useEffect(() => {
+    fetchDrafts(true);
+  }, [fetchDrafts]);
+
+  useEffect(() => {
+    localDraftsRef.current = localDrafts;
+  }, [localDrafts]);
+
+  useEffect(() => {
+    isPollingRef.current = isPolling;
+  }, [isPolling]);
+
+  useEffect(() => {
+    if (!isPolling) {
+      if (pollingTimeoutRef.current) {
+        clearTimeout(pollingTimeoutRef.current);
+        pollingTimeoutRef.current = null;
+      }
+      return;
+    }
+
     fetchDrafts();
-  }, []);
+    const interval = setInterval(() => fetchDrafts(), POLL_INTERVAL_MS);
+
+    pollingTimeoutRef.current = setTimeout(() => {
+      if (isPollingRef.current) {
+        setGenMessage((msg) => msg || "Stopped polling for new drafts. Refresh if you're expecting more.");
+        isPollingRef.current = false;
+        setIsPolling(false);
+      }
+    }, POLL_TIMEOUT_MS);
+
+    return () => {
+      clearInterval(interval);
+      if (pollingTimeoutRef.current) {
+        clearTimeout(pollingTimeoutRef.current);
+        pollingTimeoutRef.current = null;
+      }
+    };
+  }, [fetchDrafts, isPolling]);
 
   // Subscribe to real-time updates on leads table
   useEffect(() => {
@@ -82,6 +140,14 @@ export function DraftFeed({ drafts }: Props) {
     return () => {
       supabase.removeChannel(channel);
     };
+  }, [fetchDrafts]);
+
+  useEffect(() => {
+    return () => {
+      if (pollingTimeoutRef.current) {
+        clearTimeout(pollingTimeoutRef.current);
+      }
+    };
   }, []);
 
   const handleGenerateDrafts = async () => {
@@ -89,7 +155,9 @@ export function DraftFeed({ drafts }: Props) {
     setGenPending(true);
     try {
       await triggerDraftGeneration();
-      setGenMessage("Draft generation started. This may take a moment – drafts will appear here when ready.");
+      lastDraftCountRef.current = localDraftsRef.current.length;
+      setGenMessage("Draft generation started. Drafts will appear here automatically as they are ready.");
+      setIsPolling(true);
     } catch (err: any) {
       setGenMessage(err?.message || "Failed to start draft generation.");
     } finally {

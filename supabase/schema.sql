@@ -14,6 +14,7 @@ begin
       'NEW',
       'ENRICHED',
       'PROCESSING',
+      'ENRICH_FAILED',
       'DRAFT_READY',
       'APPROVED',
       'SENT',
