@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
-import { approveDraft, fetchDraftFeed, regenerateDraft, rejectDraft, triggerDraftGeneration } from "../app/actions";
+import { approveAndSendAllDrafts, approveDraft, fetchDraftFeed, regenerateDraft, rejectDraft, triggerDraftGeneration } from "../app/actions";
 import { supabaseBrowserClient } from "../lib/supabaseClient";
 
 export type DraftWithLead = {
@@ -19,6 +19,7 @@ export type DraftWithLead = {
   headline: string;
   company?: string;
   linkedinUrl: string;
+  regenerating?: boolean;
 };
 
 type Props = {
@@ -34,10 +35,14 @@ export function DraftFeed({ drafts }: Props) {
   const [loading, setLoading] = useState(true);
   const [genPending, setGenPending] = useState(false);
   const [genMessage, setGenMessage] = useState<string | null>(null);
+  const [bulkPending, setBulkPending] = useState(false);
+  const [bulkMessage, setBulkMessage] = useState<string | null>(null);
+  const [regenerating, setRegenerating] = useState<Set<string>>(new Set());
   const [isPolling, setIsPolling] = useState(false);
   const pollingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const lastDraftCountRef = useRef<number>(drafts.length || 0);
   const isPollingRef = useRef(false);
+  const regeneratingRef = useRef(regenerating);
 
   const fetchDrafts = useCallback(async (showLoading = false) => {
     if (showLoading) {
@@ -47,8 +52,32 @@ export function DraftFeed({ drafts }: Props) {
       const mapped = await fetchDraftFeed();
       const previousCount = lastDraftCountRef.current;
       lastDraftCountRef.current = mapped.length;
-      localDraftsRef.current = mapped;
-      setLocalDrafts(mapped);
+
+      const regenIds = new Set(regeneratingRef.current);
+      const mappedIds = new Set(mapped.map((d) => d.leadId));
+      // Any lead that returned in the mapped list is no longer regenerating
+      mapped.forEach((d) => regenIds.delete(d.leadId));
+      const prevMap = new Map(localDraftsRef.current.map((d) => [d.leadId, d]));
+
+      const placeholders: DraftWithLead[] = [];
+      regenIds.forEach((id) => {
+        if (!mappedIds.has(id)) {
+          const existing = prevMap.get(id);
+          if (existing) {
+            placeholders.push({ ...existing, regenerating: true });
+          }
+        }
+      });
+
+      const merged = [
+        ...mapped.map((d) => (regenIds.has(d.leadId) ? { ...d, regenerating: true } : d)),
+        ...placeholders,
+      ];
+
+      setRegenerating(regenIds);
+
+      localDraftsRef.current = merged;
+      setLocalDrafts(merged);
 
       if (isPollingRef.current && mapped.length > previousCount) {
         setGenMessage("New drafts are ready. Review them below.");
@@ -77,6 +106,10 @@ export function DraftFeed({ drafts }: Props) {
   useEffect(() => {
     isPollingRef.current = isPolling;
   }, [isPolling]);
+
+  useEffect(() => {
+    regeneratingRef.current = regenerating;
+  }, [regenerating]);
 
   useEffect(() => {
     if (!isPolling) {
@@ -153,15 +186,75 @@ export function DraftFeed({ drafts }: Props) {
   const handleGenerateDrafts = async () => {
     setGenMessage(null);
     setGenPending(true);
+    setIsPolling(true);
     try {
       await triggerDraftGeneration();
       lastDraftCountRef.current = localDraftsRef.current.length;
       setGenMessage("Draft generation started. Drafts will appear here automatically as they are ready.");
-      setIsPolling(true);
     } catch (err: any) {
       setGenMessage(err?.message || "Failed to start draft generation.");
+      setIsPolling(false);
     } finally {
       setGenPending(false);
+    }
+  };
+
+  const isGenerating = genPending || isPolling;
+  const disableBulkSend = bulkPending || isGenerating || !localDrafts.length;
+
+  const handleRegenerateStart = (leadId: string) => {
+    setGenMessage(null);
+    setBulkMessage(null);
+    setRegenerating((prev) => {
+      const next = new Set(prev);
+      next.add(leadId);
+      return next;
+    });
+    setLocalDrafts((prev) => {
+      const next = prev.map((d) => (d.leadId === leadId ? { ...d, regenerating: true } : d));
+      localDraftsRef.current = next;
+      return next;
+    });
+  };
+
+  const handleRegenerateError = (leadId: string) => {
+    setRegenerating((prev) => {
+      const next = new Set(prev);
+      next.delete(leadId);
+      return next;
+    });
+    setLocalDrafts((prev) => {
+      const next = prev.map((d) => (d.leadId === leadId ? { ...d, regenerating: false } : d));
+      localDraftsRef.current = next;
+      return next;
+    });
+  };
+
+  const handleBulkApproveSend = async () => {
+    if (!localDraftsRef.current.length) return;
+    setBulkMessage(null);
+    const count = localDraftsRef.current.length;
+    const confirmText = `Approve and send all ${count} draft${count === 1 ? "" : "s"} now?\nThis will immediately trigger outreach via LinkedIn.`;
+    if (typeof window !== "undefined" && !window.confirm(confirmText)) return;
+    setBulkPending(true);
+    try {
+      const result = await approveAndSendAllDrafts();
+      const sentNote = result.senderTriggered
+        ? "Sender worker started; outreach will go out up to the daily cap."
+        : "Sender worker not started (check logs).";
+      const msg =
+        result.approvedCount > 0
+          ? `Approved ${result.approvedCount}/${result.attempted} drafts. ${sentNote}`
+          : "No drafts were approved. They may have changed status.";
+      setBulkMessage(msg);
+      if (result.errors?.length) {
+        console.error("Bulk approve errors", result.errors);
+      }
+    } catch (err: any) {
+      setBulkMessage(err?.message || "Failed to approve and send drafts.");
+    } finally {
+      setBulkPending(false);
+      fetchDrafts(true);
     }
   };
 
@@ -172,11 +265,26 @@ export function DraftFeed({ drafts }: Props) {
         <h3 style={{ margin: "10px 0 6px 0" }}>No drafts ready.</h3>
         <div className="muted">When the agent generates drafts, they will appear here.</div>
         <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-          <button className="btn" onClick={handleGenerateDrafts} disabled={genPending}>
-            {genPending ? "Starting…" : "Generate Drafts for ENRICHED Leads"}
+          <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
+            {genPending ? "Starting…" : isPolling ? "Generating…" : "Generate Drafts for ENRICHED Leads"}
+          </button>
+          <button className="btn warn" onClick={handleBulkApproveSend} disabled={disableBulkSend}>
+            {bulkPending ? "Sending…" : "Approve & Send All"}
           </button>
           {genMessage ? (
-            <span className="muted" style={{ marginLeft: 6 }}>{genMessage}</span>
+            <span className="muted" style={{ marginLeft: 6 }} aria-live="polite">
+              {genMessage}
+            </span>
+          ) : null}
+          {bulkMessage ? (
+            <span className="muted" style={{ marginLeft: 6 }} aria-live="polite">
+              {bulkMessage}
+            </span>
+          ) : null}
+          {isGenerating && !genMessage ? (
+            <span className="muted" style={{ marginLeft: 6 }} aria-live="polite">
+              Drafts are being generated…
+            </span>
           ) : null}
         </div>
       </div>
@@ -192,14 +300,25 @@ export function DraftFeed({ drafts }: Props) {
             <h3 style={{ margin: "10px 0 6px 0" }}>Review and approve drafts</h3>
             <div className="muted">Manually trigger draft generation for ENRICHED leads when you are ready.</div>
           </div>
-          <div>
-            <button className="btn" onClick={handleGenerateDrafts} disabled={genPending}>
-              {genPending ? "Starting…" : "Generate Drafts"}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn warn" onClick={handleBulkApproveSend} disabled={disableBulkSend}>
+              {bulkPending ? "Sending…" : "Approve & Send All"}
+            </button>
+            <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
+              {genPending ? "Starting…" : isPolling ? "Generating…" : "Generate Drafts"}
             </button>
           </div>
         </div>
-        {genMessage ? (
-          <div className="muted" style={{ marginTop: 8 }}>{genMessage}</div>
+        {(genMessage || bulkMessage || isGenerating || bulkPending) ? (
+          <div className="muted" style={{ marginTop: 8 }} aria-live="polite">
+            {bulkPending
+              ? "Approving & sending all drafts…"
+              : bulkMessage
+              ? bulkMessage
+              : isGenerating
+              ? "Drafts are being generated… We will auto-refresh as they are ready."
+              : genMessage}
+          </div>
         ) : null}
       </div>
 
@@ -210,7 +329,13 @@ export function DraftFeed({ drafts }: Props) {
           </div>
         ) : (
           localDrafts.map((draft) => (
-            <DraftCard key={draft.draftId || draft.leadId} draft={draft} onAction={fetchDrafts} />
+            <DraftCard
+              key={draft.draftId || draft.leadId}
+              draft={draft}
+              onAction={fetchDrafts}
+              onRegenerateStart={handleRegenerateStart}
+              onRegenerateError={handleRegenerateError}
+            />
           ))
         )}
       </div>
@@ -218,7 +343,17 @@ export function DraftFeed({ drafts }: Props) {
   );
 }
 
-function DraftCard({ draft, onAction }: { draft: DraftWithLead; onAction?: () => void }) {
+function DraftCard({
+  draft,
+  onAction,
+  onRegenerateStart,
+  onRegenerateError,
+}: {
+  draft: DraftWithLead;
+  onAction?: () => void;
+  onRegenerateStart?: (leadId: string, draft: DraftWithLead) => void;
+  onRegenerateError?: (leadId: string) => void;
+}) {
   const [localDraft, setLocalDraft] = useState({
     opener: draft.opener,
     body: draft.body,
@@ -234,10 +369,15 @@ function DraftCard({ draft, onAction }: { draft: DraftWithLead; onAction?: () =>
   );
 
   const activity = draft.activity?.[0];
+  const locked = pending || !!draft.regenerating;
 
-  const run = (action: () => Promise<void>) => {
+  const run = (
+    action: () => Promise<void>,
+    hooks?: { onStart?: () => void; onError?: () => void; onFinally?: () => void }
+  ) => {
     startTransition(async () => {
       setMessage(null);
+      hooks?.onStart?.();
       try {
         await action();
         setMessage("Done");
@@ -247,6 +387,9 @@ function DraftCard({ draft, onAction }: { draft: DraftWithLead; onAction?: () =>
         }
       } catch (err: any) {
         setMessage(err?.message || "Action failed");
+        hooks?.onError?.();
+      } finally {
+        hooks?.onFinally?.();
       }
     });
   };
@@ -291,6 +434,7 @@ function DraftCard({ draft, onAction }: { draft: DraftWithLead; onAction?: () =>
       <textarea
         className="textarea"
         value={localDraft.opener}
+        disabled={draft.regenerating}
         onChange={(e) => setLocalDraft((d) => ({ ...d, opener: e.target.value }))}
       />
 
@@ -298,6 +442,7 @@ function DraftCard({ draft, onAction }: { draft: DraftWithLead; onAction?: () =>
       <textarea
         className="textarea"
         value={localDraft.body}
+        disabled={draft.regenerating}
         onChange={(e) => setLocalDraft((d) => ({ ...d, body: e.target.value }))}
       />
 
@@ -309,6 +454,7 @@ function DraftCard({ draft, onAction }: { draft: DraftWithLead; onAction?: () =>
           className="input"
           style={{ maxWidth: 240 }}
           value={localDraft.ctaType}
+          disabled={draft.regenerating}
           onChange={(e) => setLocalDraft((d) => ({ ...d, ctaType: e.target.value }))}
         >
           <option value="Low Friction">Low Friction</option>
@@ -319,6 +465,7 @@ function DraftCard({ draft, onAction }: { draft: DraftWithLead; onAction?: () =>
           className="input"
           placeholder="CTA text"
           value={localDraft.cta}
+          disabled={draft.regenerating}
           onChange={(e) => setLocalDraft((d) => ({ ...d, cta: e.target.value }))}
         />
       </div>
@@ -328,10 +475,16 @@ function DraftCard({ draft, onAction }: { draft: DraftWithLead; onAction?: () =>
       </div>
       <div className="preview">{preview || "Your preview will appear here."}</div>
 
+      {draft.regenerating ? (
+        <div className="muted" style={{ marginTop: 8 }}>
+          Regenerating draft… We will refresh this card when the new draft arrives.
+        </div>
+      ) : null}
+
       <div className="button-row">
         <button
           className="btn"
-          disabled={pending}
+          disabled={locked}
           onClick={() =>
             run(() =>
               approveDraft({
@@ -345,13 +498,25 @@ function DraftCard({ draft, onAction }: { draft: DraftWithLead; onAction?: () =>
             )
           }
         >
-          {pending ? "Saving..." : "Approve"}
+          {pending ? "Saving..." : draft.regenerating ? "Pending..." : "Approve"}
         </button>
-        <button className="btn secondary" disabled={pending} onClick={() => run(() => rejectDraft(draft.leadId))}>
-          {pending ? "..." : "Reject"}
+        <button className="btn secondary" disabled={locked} onClick={() => run(() => rejectDraft(draft.leadId))}>
+          {pending ? "..." : draft.regenerating ? "Pending..." : "Reject"}
         </button>
-        <button className="btn warn" disabled={pending} onClick={() => run(() => regenerateDraft(draft.leadId))}>
-          {pending ? "..." : "Regenerate"}
+        <button
+          className="btn warn"
+          disabled={locked}
+          onClick={() => {
+            onRegenerateStart?.(draft.leadId, draft);
+            run(
+              () => regenerateDraft(draft.leadId),
+              {
+                onError: () => onRegenerateError?.(draft.leadId),
+              }
+            );
+          }}
+        >
+          {pending || draft.regenerating ? "Regenerating..." : "Regenerate"}
         </button>
         {message ? (
           <span className="muted" style={{ marginLeft: 8 }}>
@@ -362,4 +527,3 @@ function DraftCard({ draft, onAction }: { draft: DraftWithLead; onAction?: () =>
     </section>
   );
 }
-

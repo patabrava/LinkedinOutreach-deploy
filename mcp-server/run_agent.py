@@ -89,7 +89,7 @@ def _truncate_text(text: str, limit: int) -> str:
     return f"{candidate}…"
 
 
-def enforce_char_limit(opener: str, body: str, cta: str, limit: int = 300) -> Tuple[str, str, str, str]:
+def enforce_char_limit(opener: str, body: str, cta: str, limit: int = 300, lead_id: str = "unknown") -> Tuple[str, str, str, str]:
     sections = [
         ("opener", (opener or "").strip()),
         ("body", (body or "").strip()),
@@ -98,6 +98,7 @@ def enforce_char_limit(opener: str, body: str, cta: str, limit: int = 300) -> Tu
     separator = "\n\n"
     current = ""
     results: Dict[str, str] = {"opener": "", "body": "", "cta": ""}
+    had_truncation = False
 
     for name, text in sections:
         if not text:
@@ -107,16 +108,27 @@ def enforce_char_limit(opener: str, body: str, cta: str, limit: int = 300) -> Tu
         addition = separator if current else ""
         available = limit - len(current) - len(addition)
         if available <= 0:
+            logger.warn(f"Section '{name}' dropped - no space remaining", {"leadId": lead_id}, {"currentLength": len(current)})
             results[name] = ""
+            had_truncation = True
             continue
 
         if len(text) <= available:
             truncated = text
         else:
+            logger.warn(f"Section '{name}' truncated", {"leadId": lead_id}, {"original": len(text), "available": available})
             truncated = _truncate_text(text, available)
+            had_truncation = True
 
         current = f"{current}{addition}{truncated}" if current else truncated
         results[name] = truncated
+
+    # Log if complete message fits or needed truncation
+    final_length = len(current)
+    if had_truncation:
+        logger.warn(f"Message required truncation", {"leadId": lead_id}, {"finalLength": final_length, "limit": limit})
+    else:
+        logger.debug(f"Message within limit", {"leadId": lead_id}, {"length": final_length, "limit": limit})
 
     return results["opener"], results["body"], results["cta"], current
 
@@ -224,7 +236,12 @@ def main() -> None:
             if not data.get("full_message"):
                 full_message = "\n\n".join([part for part in [opener, body, cta] if part])
 
-            opener, body, cta, full_message = enforce_char_limit(opener, body, cta)
+            # Check length before enforcement
+            pre_check = "\n\n".join([part for part in [opener, body, cta] if part])
+            if len(pre_check) > 300:
+                logger.warn(f"AI generated message exceeds 300 chars", {"leadId": lead_id}, {"length": len(pre_check)})
+            
+            opener, body, cta, full_message = enforce_char_limit(opener, body, cta, lead_id=lead_id)
 
             save_draft(client, lead_id, opener, body, cta, full_message, body_type, cta_type)
             logger.info(f"Draft saved for lead", {"leadId": lead_id})

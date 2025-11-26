@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 
 const NAV_ITEMS = [
@@ -17,8 +18,15 @@ export function NavBar() {
   return (
     <nav className="top-nav">
       <div className="nav-inner">
-        <Link href="/" className="brand">
-          <span className="brand-accent">●</span> Mission Control
+        <Link href="/" className="brand" aria-label="Digital Spine home">
+          <Image
+            src="/assets/_Digital_Spine_Logo_EZ_Farbe.png"
+            alt="Digital Spine logo"
+            width={2011}
+            height={1252}
+            className="brand-logo"
+            priority
+          />
         </Link>
         <div className="nav-links">
           {NAV_ITEMS.map((item) => {

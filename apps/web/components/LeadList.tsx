@@ -232,7 +232,7 @@ export function LeadList({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [maxRows]);
+  }, [maxRows, filters.status, filters.company, filters.linkedin, filters.name]);
 
   const displayRows = useMemo(() => {
     const working = [...rows];

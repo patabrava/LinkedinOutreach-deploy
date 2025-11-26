@@ -27,6 +27,31 @@ export type LinkedinCredentialState = {
   error?: string;
 };
 
+function startDraftAgent(correlationId?: string) {
+  try {
+    const repoRoot = path.resolve(process.cwd(), "..", "..");
+    const agentDir = path.resolve(repoRoot, "mcp-server");
+    const agentPath = path.join(agentDir, "run_agent.py");
+    const venvPython = path.join(agentDir, "venv", "bin", "python");
+    const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
+    const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
+    const execToUse = pythonExec;
+    const args = [agentPath];
+
+    logger.workerSpawn("draft-agent", args, correlationId ? { correlationId } : undefined);
+
+    const proc = spawn(execToUse, args, {
+      cwd: repoRoot,
+      stdio: "ignore",
+      detached: true,
+      env: { ...process.env, ...(correlationId ? { CORRELATION_ID: correlationId } : {}) },
+    });
+    proc.unref();
+  } catch (err) {
+    logger.error("startDraftAgent error", correlationId ? { correlationId } : {}, err as Error);
+  }
+}
+
 export async function fetchDraftFeed() {
   const correlationId = logger.actionStart("fetchDraftFeed");
   
@@ -318,26 +343,7 @@ export async function triggerInboxScan() {
  * and moves them to DRAFT_READY. It runs detached and returns immediately.
  */
 export async function triggerDraftGeneration() {
-  try {
-    const repoRoot = path.resolve(process.cwd(), "..", "..");
-    const agentDir = path.resolve(repoRoot, "mcp-server");
-    const agentPath = path.join(agentDir, "run_agent.py");
-    // Prefer agent venv python if present; else PYTHON_BIN; else python3
-    const venvPython = path.join(agentDir, "venv", "bin", "python");
-    const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
-    const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
-    const execToUse = pythonExec;
-    const args = [agentPath];
-    const proc = spawn(execToUse, args, {
-      cwd: repoRoot,
-      stdio: "ignore",
-      detached: true,
-      env: { ...process.env },
-    });
-    proc.unref();
-  } catch (err) {
-    console.error("triggerDraftGeneration error", err);
-  }
+  startDraftAgent();
 }
 
 export async function triggerFollowupSender() {
@@ -436,6 +442,132 @@ export async function approveDraft(input: DraftInput) {
   }
 }
 
+export async function approveAndSendAllDrafts() {
+  const correlationId = logger.actionStart("approveAndSendAllDrafts");
+
+  try {
+    const client = supabaseAdmin();
+    logger.dbQuery("select", "leads", { correlationId }, { status: "DRAFT_READY" });
+
+    const { data, error } = await client
+      .from("leads")
+      .select(
+        "id, drafts(id, opener, body_text, cta_text, cta_type, created_at)"
+      )
+      .eq("status", "DRAFT_READY");
+
+    if (error) {
+      logger.error("Failed to load drafts for bulk approval", { correlationId }, error);
+      throw error;
+    }
+
+    const leads = data || [];
+    const errors: string[] = [];
+    let approvedCount = 0;
+
+    type BulkDraft = {
+      id: number;
+      opener?: string | null;
+      body_text?: string | null;
+      cta_text?: string | null;
+      cta_type?: string | null;
+      created_at?: string | null;
+    };
+
+    for (const lead of leads) {
+      const drafts = Array.isArray((lead as any).drafts) ? ((lead as any).drafts as BulkDraft[]) : [];
+      if (!drafts.length) {
+        logger.warn("Lead has no drafts during bulk approval", { correlationId, leadId: lead.id });
+        continue;
+      }
+
+      // Use the latest draft by created_at (fallback to first)
+      const draft = drafts
+        .slice()
+        .sort(
+          (a: BulkDraft, b: BulkDraft) =>
+            new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+        )[0];
+
+      const finalMessage = buildFinalMessage(draft.opener || "", draft.body_text || "", draft.cta_text || "");
+
+      const { error: draftErr } = await client
+        .from("drafts")
+        .update({
+          final_message: finalMessage,
+          opener: draft.opener || "",
+          body_text: draft.body_text || "",
+          cta_text: draft.cta_text || "",
+          cta_type: draft.cta_type || "",
+        })
+        .eq("id", draft.id);
+
+      if (draftErr) {
+        const msg = `Draft update failed for lead ${lead.id}: ${draftErr.message || "unknown error"}`;
+        logger.error(
+          "Bulk draft update failed",
+          { correlationId, leadId: lead.id, draftId: draft.id?.toString() },
+          draftErr
+        );
+        errors.push(msg);
+        continue;
+      }
+
+      const { error: leadErr } = await client.from("leads").update({ status: "APPROVED" }).eq("id", lead.id);
+      if (leadErr) {
+        const msg = `Lead status update failed for ${lead.id}: ${leadErr.message || "unknown error"}`;
+        logger.error("Bulk lead update failed", { correlationId, leadId: lead.id }, leadErr);
+        errors.push(msg);
+        continue;
+      }
+
+      approvedCount += 1;
+      logger.dbResult("update", "leads", { correlationId, leadId: lead.id }, { status: "APPROVED" });
+    }
+
+    let senderTriggered = false;
+    if (approvedCount > 0) {
+      try {
+        const repoRoot = path.resolve(process.cwd(), "..", "..");
+        const senderDir = path.resolve(repoRoot, "workers", "sender");
+        const senderPath = path.join(senderDir, "sender.py");
+        const venvPython = path.join(senderDir, "venv", "bin", "python");
+        const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
+        const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
+        const execToUse = pythonExec;
+        const args = [senderPath];
+
+        logger.workerSpawn("sender", args, { correlationId, approvedCount });
+
+        const proc = spawn(execToUse, args, {
+          cwd: repoRoot,
+          stdio: ["ignore", "inherit", "inherit"],
+          detached: true,
+          env: { ...process.env, CORRELATION_ID: correlationId },
+        });
+        proc.unref();
+        senderTriggered = true;
+        logger.info("Sender worker triggered for bulk approval", { correlationId, pid: proc.pid });
+      } catch (spawnErr: any) {
+        logger.error("Failed to trigger sender worker after bulk approval", { correlationId }, spawnErr);
+      }
+    }
+
+    revalidatePath("/");
+    logger.actionComplete("approveAndSendAllDrafts", { correlationId }, { approvedCount, attempted: leads.length, senderTriggered });
+
+    return {
+      approvedCount,
+      attempted: leads.length,
+      errors,
+      senderTriggered,
+    };
+  } catch (error: any) {
+    logger.actionError("approveAndSendAllDrafts", { correlationId }, error);
+    throw error;
+  }
+}
+
 export async function rejectDraft(leadId: string) {
   const client = supabaseAdmin();
   const { error } = await client.from("leads").update({ status: "REJECTED" }).eq("id", leadId);
@@ -447,18 +579,22 @@ export async function rejectDraft(leadId: string) {
 }
 
 export async function regenerateDraft(leadId: string) {
+  const correlationId = logger.actionStart("regenerateDraft", { leadId });
   const client = supabaseAdmin();
   const { error: draftErr } = await client.from("drafts").delete().eq("lead_id", leadId);
   if (draftErr) {
-    console.error("regenerateDraft delete error", draftErr);
+    logger.error("regenerateDraft delete error", { correlationId, leadId }, draftErr);
     throw draftErr;
   }
   const { error: leadErr } = await client.from("leads").update({ status: "ENRICHED" }).eq("id", leadId);
   if (leadErr) {
-    console.error("regenerateDraft lead error", leadErr);
+    logger.error("regenerateDraft lead error", { correlationId, leadId }, leadErr);
     throw leadErr;
   }
+
+  startDraftAgent(correlationId);
   revalidatePath("/");
+  logger.actionComplete("regenerateDraft", { correlationId, leadId });
 }
 
 type LeadCsvRow = {
