@@ -50,8 +50,22 @@ def require_auth_state() -> None:
 async def open_browser(headless: bool = False) -> Tuple[Playwright, Browser, BrowserContext]:
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch(headless=headless)
-    storage_state = str(AUTH_STATE_PATH) if AUTH_STATE_PATH.exists() else None
-    context = await browser.new_context(storage_state=storage_state)
+    # Use a copy of the auth state to avoid file locking conflicts with scraper
+    storage_state = None
+    if AUTH_STATE_PATH.exists():
+        try:
+            import json
+            import tempfile
+            # Read auth state and create a temporary copy to avoid locking
+            with open(AUTH_STATE_PATH, 'r') as f:
+                auth_data = json.load(f)
+            # Create context with the auth data directly (no file lock)
+            context = await browser.new_context(storage_state=auth_data)
+            logger.debug("Browser context created with copied auth state")
+            return playwright, browser, context
+        except Exception as e:
+            logger.warn("Failed to load auth state, creating fresh context", error=e)
+    context = await browser.new_context()
     return playwright, browser, context
 
 
@@ -171,175 +185,203 @@ def build_message(draft: Dict[str, Any]) -> str:
 
 
 async def open_message_surface(page: Page) -> str:
+    """Open a messaging surface on a LinkedIn profile page.
+    
+    CRITICAL: All selectors must be scoped to lazy-column test ID to avoid
+    clicking buttons in the messaging inbox or other parts of the page.
+    """
     await wiggle_mouse(page)
-
-    async def ensure_visible(locator) -> bool:
+    
+    logger.debug("Starting open_message_surface")
+    
+    # Scope all interactions to the profile page's main content area
+    # Try lazy-column test ID first, with fallback to main profile section
+    profile_container = None
+    try:
+        profile_container = page.get_by_test_id("lazy-column")
+        await profile_container.wait_for(state="visible", timeout=5_000)
+        logger.debug("Profile container found via lazy-column test ID")
+    except Exception as e:
+        logger.warn("lazy-column test ID not found, trying fallback selectors", error=e)
+        # Fallback to main profile section
         try:
-            if await locator.count() == 0:
-                return False
-            first = locator.first
-            try:
-                await first.scroll_into_view_if_needed(timeout=3_000)
-            except Exception:
-                pass
-            await page.wait_for_timeout(150)
-            return True
-        except Exception:
-            return False
-
-    # Primary selectors
-    message_btn = page.locator("button:has-text('Message'), a:has-text('Message'), button[aria-label^='Message']").first
-    connect_btn = page.locator("button:has-text('Connect'), a:has-text('Connect'), button[aria-label^='Connect']").first
-    add_note_btn = page.locator("button:has-text('Add a note')").first
-    more_btn = page.locator("button[aria-label*='More'], button:has-text('More')").first
-
-    # Try clicking Message directly
-    if await ensure_visible(message_btn):
+            profile_container = page.locator("main.scaffold-layout__main, section.artdeco-card").first
+            await profile_container.wait_for(state="visible", timeout=5_000)
+            logger.debug("Profile container found via fallback selector")
+        except Exception as e2:
+            logger.error("No profile container found with any selector", error=e2)
+            # Last resort: use page itself (risky but better than failing)
+            profile_container = page
+            logger.warn("Using page-level selectors as last resort")
+    
+    # PATH 1: Try Message link (for existing connections)
+    # Scoped to profile container to avoid inbox Message buttons
+    message_link = profile_container.get_by_role("link", name=re.compile(r"(Message|Nachricht)", re.I))
+    message_link_count = await message_link.count()
+    logger.debug(f"Message link check", data={"count": message_link_count})
+    
+    if message_link_count > 0:
+        logger.debug("Found Message link - user is in network")
         try:
-            await message_btn.click(timeout=10_000)
-            # Wait for messaging overlay or compose area
+            await message_link.first.click(timeout=8_000)
+            # Wait for messaging overlay
             await page.wait_for_selector(
                 "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
                 timeout=10_000,
             )
             await random_pause()
+            logger.debug("Message link path successful")
             return "message"
-        except Exception:
-            pass
-
-    # Try overflow menu (More) path as specified by user
-    # 1) Click More actions
-    more_actions = page.get_by_role("button", name=re.compile("^(More actions|Mehr|More)$", re.I))
-    if await ensure_visible(more_actions):
+        except Exception as e:
+            logger.debug(f"Message link path failed", error=e)
+    
+    # PATH 2: Try More button -> Invite flow (for non-connections)
+    # Scoped to profile container - allow partial match for "Mehr" or "More"
+    more_button = profile_container.get_by_role("button", name=re.compile(r"(More|Mehr)", re.I))
+    more_button_count = await more_button.count()
+    logger.debug(f"More button check", data={"count": more_button_count})
+    
+    if more_button_count > 0:
+        logger.debug("Found More button - attempting invite flow")
         try:
-            await more_actions.first.click(timeout=8_000)
+            await more_button.first.click(timeout=8_000)
             await page.wait_for_timeout(300)
-            # 2) Click Connect/Invite (Invite <Name> to ...)
-            # LinkedIn often uses Invite <Name> to connect
-            invite_btn = page.get_by_role(
-                "button",
-                name=re.compile(r"^(Invite|Connect).*to", re.I),
-            )
-            if await invite_btn.count() == 0:
-                # Fallbacks: menuitem or generic Connect
-                invite_btn = page.get_by_role("menuitem", name=re.compile(r"^(Invite|Connect).*to|^Connect$", re.I))
-            if await invite_btn.count() > 0:
-                await invite_btn.first.click(timeout=8_000)
-                # 3) Ensure dialog appears
+            
+            # Look for Invite/Connect menuitem (can include name like "Invite Antonio-Jean")
+            invite_menuitem = page.get_by_role("menuitem", name=re.compile(r"(Invite|Einladen|Connect|Vernetzen)", re.I))
+            invite_count = await invite_menuitem.count()
+            logger.debug(f"Invite menuitem check", data={"count": invite_count})
+            
+            if invite_count > 0:
+                logger.debug("Clicking Invite menuitem")
+                await invite_menuitem.first.click(timeout=8_000)
+                
+                # Wait for connection dialog
                 await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
                 await random_pause()
-                # 4) Click Add a note
-                add_note = page.get_by_role("button", name=re.compile("^Add a note$", re.I))
-                if await add_note.count() > 0:
-                    await add_note.first.click(timeout=6_000)
-                    await page.wait_for_selector("div[role='dialog']", timeout=6_000)
-                    await random_pause()
+                
+                # Click "Add a note" button
+                add_note_btn = page.get_by_role("button", name=re.compile(r"(Add a note|Notiz hinzufügen)", re.I))
+                add_note_count = await add_note_btn.count()
+                logger.debug(f"Add a note button check", data={"count": add_note_count})
+                
+                if add_note_count > 0:
+                    logger.debug("Clicking Add a note button")
+                    await add_note_btn.first.click(timeout=6_000)
+                    await page.wait_for_timeout(500)
+                    logger.debug("Connect with note dialog opened")
                     return "connect_note"
-                return "connect"
-        except Exception:
-            pass
-
-    # As a fallback, try clicking Connect directly on the page
-    if await ensure_visible(connect_btn):
-        try:
-            await connect_btn.click(timeout=8_000)
-            await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
-            await random_pause()
-            add_note = page.get_by_role("button", name=re.compile("^Add a note$", re.I))
-            if await add_note.count() > 0:
-                await add_note.first.click(timeout=6_000)
-                await page.wait_for_selector("div[role='dialog']", timeout=6_000)
-                await random_pause()
-                return "connect_note"
-            return "connect"
-        except Exception:
-            pass
-
-    raise RuntimeError("No messaging surface found (maybe 3rd-degree without premium).")
+                else:
+                    logger.debug("No Add a note button - sending without note")
+                    return "connect"
+            else:
+                logger.warn("No Invite menuitem found in More dropdown")
+        except Exception as e:
+            logger.debug(f"More button path failed", error=e)
+    
+    logger.error("All messaging surface paths exhausted")
+    raise RuntimeError("No messaging surface found. Check if profile is 3rd-degree or has restrictions.")
 
 
 async def send_message(page: Page, message: str, surface: str) -> None:
-    # Prefer specific message composer containers; avoid recaptcha fields
-    # Choose candidates based on the surface we opened
+    """Send a message through the opened messaging surface.
+    
+    Args:
+        page: Playwright page object
+        message: Message text to send
+        surface: Type of surface opened ("message" or "connect_note")
+    """
+    
+    if surface == "connect_note":
+        # Add-a-note modal: Use the specific textbox selector
+        logger.debug("Sending connection request with note")
+        
+        # LinkedIn limits note to 200 characters
+        safe_message = (message or "").strip()
+        if len(safe_message) > 200:
+            logger.warn(f"Message too long ({len(safe_message)} chars), truncating to 200")
+            safe_message = safe_message[:200]
+        
+        # Use the exact selector provided by user
+        note_box = page.get_by_role("textbox", name=re.compile(r"Please limit personal note to", re.I))
+        note_box_count = await note_box.count()
+        logger.debug(f"Note textbox check", data={"count": note_box_count})
+        
+        if note_box_count > 0:
+            logger.debug(f"Filling note textbox with {len(safe_message)} characters")
+            await note_box.first.fill(safe_message)
+            await random_pause(0.5, 1.0)
+        else:
+            logger.error("Note textbox not found in connect dialog")
+            raise RuntimeError("Could not find note textbox in connection request dialog")
+        
+        # Find and click Send button in the dialog
+        dialog = page.locator("section[role='dialog'], div[role='dialog']").first
+        # Support both English and German
+        send_btn = dialog.locator(
+            "button:has-text('Send invitation'), button:has-text('Send'), button:has-text('Einladung senden'), button:has-text('Senden'), button[aria-label*='Send']"
+        ).first
+        
+        # Wait for button to be enabled
+        try:
+            await send_btn.wait_for(state="visible", timeout=10_000)
+            logger.debug("Send button found, waiting for it to be enabled")
+            
+            for attempt in range(30):
+                if await send_btn.is_enabled():
+                    logger.debug(f"Send button enabled after {attempt} attempts")
+                    break
+                await page.wait_for_timeout(300)
+            
+            await send_btn.click()
+            logger.debug("Send button clicked")
+            await random_pause()
+            return
+        except Exception as e:
+            logger.error("Failed to click Send button in connect dialog", error=e)
+            raise
+    
+    # Direct message composer path (for existing connections)
+    logger.debug("Sending direct message")
+    
+    # Find message input box
     editor_candidates = [
         "div.msg-form__contenteditable[contenteditable='true']",
-        "div[role='textbox'][contenteditable='true']:not([id^='g-recaptcha'])",
+        "div.msg-form__textarea",
         "section[role='dialog'] div[role='textbox'][contenteditable='true']",
         "div[aria-label*='Write a message'][contenteditable='true']",
-        "textarea:not([id^='g-recaptcha'])",
+        "div[role='textbox'][contenteditable='true']:not([id^='g-recaptcha'])",
     ]
-    if surface == "connect_note":
-        # Add-a-note modal uses a different textarea; prefer role-based
-        editor_candidates = [
-            # Precise role-based target as requested
-            "role=textbox[name=/Please limit personal note to/i]",
-            "textarea[name='message']",
-            "textarea[id='custom-message']",
-            "div[role='dialog'] textarea",
-        ] + editor_candidates
+    
     editor = None
     for sel in editor_candidates:
-        loc = page.locator(sel) if not sel.startswith("role=") else page.get_by_role("textbox", name=re.compile("Please limit personal note to", re.I))
         try:
-            await loc.first.wait_for(state="visible", timeout=6_000)
-            editor = loc.first
+            loc = page.locator(sel).first
+            await loc.wait_for(state="visible", timeout=3_000)
+            editor = loc
+            logger.debug(f"Found message editor using selector: {sel}")
             break
         except Exception:
             continue
+    
     if editor is None:
-        # fallback to any visible textbox that's not recaptcha
-        loc = page.locator("div[role='textbox']:not([id^='g-recaptcha'])").first
-        await loc.wait_for(state="visible", timeout=10_000)
-        editor = loc
-
+        logger.error("No message editor found")
+        raise RuntimeError("Could not find message input box")
+    
     await editor.click()
-    # In the Add-a-note modal, LinkedIn limits note length (typically 300 chars). Use a safe cap.
-    if surface == "connect_note":
-        safe_message = (message or "").strip()
-        # LinkedIn "Add a note" is restricted to 200 characters. Enforce strict cap.
-        if len(safe_message) > 200:
-            # Truncate to 200 characters exactly. Prefer hard cut to guarantee limit.
-            safe_message = safe_message[:200]
-        # Prefer role-based textbox per user's instruction
-        note_box = page.get_by_role("textbox", name=re.compile("Please limit personal note to", re.I))
-        if await note_box.count() > 0:
-            await note_box.first.fill(safe_message)
-        else:
-            await human_type(page, safe_message)
-        await random_pause()
-        # Target the dialog-local Send button and ensure it's enabled
-        dialog = page.locator("section[role='dialog'], div[role='dialog']").first
-        send_btn = dialog.locator(
-            "button:has-text('Send invitation'), button:has-text('Send'), button[aria-label='Send'], button[aria-label='Send invitation']"
-        ).first
-        await send_btn.wait_for(state="visible", timeout=10_000)
-        # Wait until enabled (button can be disabled until text is entered)
-        for _ in range(30):
-            try:
-                if await send_btn.is_enabled():
-                    break
-            except Exception:
-                pass
-            # Nudge input events if not enabled yet
-            try:
-                if await note_box.count() > 0:
-                    await note_box.first.focus()
-                    await page.keyboard.type(" ")
-                    await page.keyboard.press("Backspace")
-            except Exception:
-                pass
-            await page.wait_for_timeout(300)
-        await send_btn.click()
-        await random_pause()
-        return
-
-    # Direct message composer path
     await human_type(page, message)
     await random_pause()
-    send_btn = page.locator("button:has-text('Send'), button[aria-label='Send now']").first
-    await send_btn.wait_for(state="visible", timeout=10_000)
-    await send_btn.click()
-    await random_pause()
+    
+    # Find and click Send button
+    send_btn = page.locator("button:has-text('Send'), button:has-text('Senden'), button[aria-label*='Send']").first
+    try:
+        await send_btn.wait_for(state="visible", timeout=10_000)
+        await send_btn.click()
+        logger.debug("Direct message sent")
+        await random_pause()
+    except Exception as e:
+        logger.error("Failed to click Send button for direct message", error=e)
+        raise
 
 
 def mark_sent(client: Client, lead_id: str) -> None:
@@ -439,10 +481,26 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
         pass
     await random_pause()
 
-    surface = await open_message_surface(page)
-    logger.debug(f"Message surface opened", {"leadId": lead_id}, {"surface": surface})
+    try:
+        surface = await open_message_surface(page)
+        logger.debug(f"Message surface opened", {"leadId": lead_id}, {"surface": surface})
+    except Exception as e:
+        logger.error(f"Failed to open message surface", {"leadId": lead_id}, error=e)
+        # Take a screenshot for debugging
+        try:
+            screenshot_path = f"/tmp/linkedin_error_{lead_id[:8]}.png"
+            await page.screenshot(path=screenshot_path)
+            logger.info(f"Screenshot saved to {screenshot_path}")
+        except Exception:
+            pass
+        raise
     
-    await send_message(page, message, surface)
+    try:
+        await send_message(page, message, surface)
+    except Exception as e:
+        logger.error(f"Failed to send message through surface", {"leadId": lead_id}, error=e)
+        raise
+    
     mark_sent(client, lead_id)
     await page.close()
     
@@ -661,79 +719,79 @@ async def main() -> None:
             logger.warn("Daily send limit reached", data={"limit": daily_limit, "sent": already_sent})
             return
 
-    leads_to_send = []
-    remaining = max(0, daily_limit - already_sent)
+        leads_to_send = []
+        remaining = max(0, daily_limit - already_sent)
 
-    if args.followup:
-        # Process a batch of approved followups; keep simple cap of remaining slots
-        items: list[Dict[str, Any]] = []
-        for _ in range(max(1, daily_limit - already_sent)):
-            fu = fetch_next_followup(client)
-            if not fu:
-                break
-            items.append(fu)
-        if not items:
-            logger.info("No APPROVED followups to send")
+        if args.followup:
+            # Process a batch of approved followups; keep simple cap of remaining slots
+            items: list[Dict[str, Any]] = []
+            for _ in range(max(1, daily_limit - already_sent)):
+                fu = fetch_next_followup(client)
+                if not fu:
+                    break
+                items.append(fu)
+            if not items:
+                logger.info("No APPROVED followups to send")
+                return
+                
+            logger.info(f"Processing {len(items)} followups")
+            playwright, browser, context = await open_browser(headless=False)
+            try:
+                logger.info("Browser opened, authenticating...")
+                await ensure_linkedin_auth(context, client)
+                
+                for fu in items:
+                    try:
+                        await process_followup_one(context, client, fu)
+                    except Exception as exc:
+                        logger.error(f"Failed to send followup", {"followupId": fu.get('id')}, error=exc)
+                    await random_pause(2, 4)
+                
+                logger.operation_complete("sender-followup", result={"sent": len(items)})
+            finally:
+                await shutdown(playwright, browser)
+                logger.info("Browser closed")
             return
-            
-        logger.info(f"Processing {len(items)} followups")
+
+        if args.lead_id:
+            lead = fetch_lead_by_id(client, args.lead_id)
+            if not lead:
+                print(f"No lead found with id {args.lead_id}")
+                return
+            leads_to_send.append(lead)
+        else:
+            while len(leads_to_send) < remaining:
+                nxt = fetch_next_lead(client)
+                if not nxt:
+                    break
+                leads_to_send.append(nxt)
+
+        if not leads_to_send:
+            logger.info("No APPROVED leads to send")
+            return
+
+        logger.info(f"Processing {len(leads_to_send)} leads")
         playwright, browser, context = await open_browser(headless=False)
         try:
             logger.info("Browser opened, authenticating...")
             await ensure_linkedin_auth(context, client)
             
-            for fu in items:
+            success_count = 0
+            for lead in leads_to_send:
+                lead_id = lead["id"]
                 try:
-                    await process_followup_one(context, client, fu)
+                    await process_one(context, client, lead)
+                    success_count += 1
                 except Exception as exc:
-                    logger.error(f"Failed to send followup", {"followupId": fu.get('id')}, error=exc)
+                    logger.error(f"Failed to send message", {"leadId": lead_id}, error=exc)
+                    # keep status as APPROVED for retry
+                    client.table("leads").update({"status": "APPROVED"}).eq("id", lead_id).execute()
                 await random_pause(2, 4)
             
-            logger.operation_complete("sender-followup", result={"sent": len(items)})
+            logger.operation_complete("sender-outreach", result={"sent": success_count, "total": len(leads_to_send)})
         finally:
             await shutdown(playwright, browser)
             logger.info("Browser closed")
-        return
-
-    if args.lead_id:
-        lead = fetch_lead_by_id(client, args.lead_id)
-        if not lead:
-            print(f"No lead found with id {args.lead_id}")
-            return
-        leads_to_send.append(lead)
-    else:
-        while len(leads_to_send) < remaining:
-            nxt = fetch_next_lead(client)
-            if not nxt:
-                break
-            leads_to_send.append(nxt)
-
-    if not leads_to_send:
-        logger.info("No APPROVED leads to send")
-        return
-
-    logger.info(f"Processing {len(leads_to_send)} leads")
-    playwright, browser, context = await open_browser(headless=False)
-    try:
-        logger.info("Browser opened, authenticating...")
-        await ensure_linkedin_auth(context, client)
-        
-        success_count = 0
-        for lead in leads_to_send:
-            lead_id = lead["id"]
-            try:
-                await process_one(context, client, lead)
-                success_count += 1
-            except Exception as exc:
-                logger.error(f"Failed to send message", {"leadId": lead_id}, error=exc)
-                # keep status as APPROVED for retry
-                client.table("leads").update({"status": "APPROVED"}).eq("id", lead_id).execute()
-            await random_pause(2, 4)
-        
-        logger.operation_complete("sender-outreach", result={"sent": success_count, "total": len(leads_to_send)})
-    finally:
-        await shutdown(playwright, browser)
-        logger.info("Browser closed")
     except Exception as exc:
         logger.operation_error(f"sender-{mode}", error=exc)
         raise

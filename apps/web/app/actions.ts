@@ -417,7 +417,7 @@ export async function approveDraft(input: DraftInput) {
       
       const proc = spawn(execToUse, args, {
         cwd: repoRoot,
-        stdio: "ignore",
+        stdio: ["ignore", "inherit", "inherit"], // inherit stdout/stderr for debugging
         detached: true,
         env: { ...process.env, CORRELATION_ID: correlationId },
       });
