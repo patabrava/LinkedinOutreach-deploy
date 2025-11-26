@@ -3,7 +3,11 @@ import { NextResponse } from "next/server";
 import { logger } from "../../../../lib/logger";
 import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 
-const STATUSES = ["NEW", "PROCESSING", "ENRICHED", "DRAFT_READY", "APPROVED", "REJECTED"] as const;
+// Force dynamic rendering - disable all caching
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
+const STATUSES = ["NEW", "PROCESSING", "ENRICHED", "ENRICH_FAILED", "DRAFT_READY", "APPROVED", "SENT", "REPLIED", "REJECTED"] as const;
 
 type StatusKey = (typeof STATUSES)[number];
 
@@ -74,9 +78,10 @@ export async function GET() {
     logger.dbResult("select", "leads", { correlationId }, nextLead);
 
     // Compute progress strictly from the enrichment pipeline:
-    // remaining = NEW + PROCESSING, completed = ENRICHED.
+    // remaining = NEW + PROCESSING
+    // completed = ENRICHED + ENRICH_FAILED (both are terminal states for enrichment)
     const remaining = (counts.NEW || 0) + (counts.PROCESSING || 0);
-    const completed = counts.ENRICHED || 0;
+    const completed = (counts.ENRICHED || 0) + (counts.ENRICH_FAILED || 0);
 
     // Explicit ground-truth log of counts and computed values
     logger.debug(

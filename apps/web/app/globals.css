@@ -233,16 +233,17 @@ a {
 }
 
 .brand {
-  font-weight: 800;
-  letter-spacing: -0.01em;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  padding: 4px 0;
+  line-height: 0;
 }
 
-.brand-accent {
-  color: var(--accent);
-  font-size: 18px;
+.brand-logo {
+  height: clamp(28px, 3vw, 38px);
+  width: auto;
+  display: block;
+  object-fit: contain;
 }
 
 .nav-links {
