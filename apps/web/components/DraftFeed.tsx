@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
-import { approveAndSendAllDrafts, approveDraft, fetchDraftFeed, regenerateDraft, rejectDraft, triggerDraftGeneration } from "../app/actions";
+import { approveAndSendAllDrafts, approveDraft, fetchDraftFeed, regenerateDraft, rejectDraft, triggerDraftGeneration, sendLeadNow, sendAllApproved } from "../app/actions";
 import { supabaseBrowserClient } from "../lib/supabaseClient";
 
 export type DraftWithLead = {
@@ -20,6 +20,8 @@ export type DraftWithLead = {
   company?: string;
   linkedinUrl: string;
   regenerating?: boolean;
+  status?: string;
+  sentAt?: string | null;
 };
 
 type Props = {
@@ -140,7 +142,7 @@ export function DraftFeed({ drafts }: Props) {
     };
   }, [fetchDrafts, isPolling]);
 
-  // Subscribe to real-time updates on leads table
+  // Subscribe to real-time updates on leads/drafts table
   useEffect(() => {
     const supabase = supabaseBrowserClient();
     const channel = supabase
@@ -152,6 +154,30 @@ export function DraftFeed({ drafts }: Props) {
           schema: "public",
           table: "leads",
           filter: "status=eq.DRAFT_READY",
+        },
+        () => {
+          fetchDrafts();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "leads",
+          filter: "status=eq.APPROVED",
+        },
+        () => {
+          fetchDrafts();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "leads",
+          filter: "status=eq.SENT",
         },
         () => {
           fetchDrafts();
@@ -201,6 +227,23 @@ export function DraftFeed({ drafts }: Props) {
 
   const isGenerating = genPending || isPolling;
   const disableBulkSend = bulkPending || isGenerating || !localDrafts.length;
+
+  const handleSendAllApproved = async () => {
+    setBulkMessage(null);
+    setBulkPending(true);
+    try {
+      const result = await sendAllApproved();
+      const msg = result?.senderTriggered
+        ? "Triggered sender for approved leads."
+        : "No approved leads to send.";
+      setBulkMessage(msg);
+    } catch (err: any) {
+      setBulkMessage(err?.message || "Failed to trigger sending for approved leads.");
+    } finally {
+      setBulkPending(false);
+      fetchDrafts(true);
+    }
+  };
 
   const handleRegenerateStart = (leadId: string) => {
     setGenMessage(null);
@@ -304,6 +347,9 @@ export function DraftFeed({ drafts }: Props) {
             <button className="btn warn" onClick={handleBulkApproveSend} disabled={disableBulkSend}>
               {bulkPending ? "Sending…" : "Approve & Send All"}
             </button>
+            <button className="btn secondary" onClick={handleSendAllApproved} disabled={bulkPending}>
+              {bulkPending ? "Triggering…" : "Send All Approved"}
+            </button>
             <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
               {genPending ? "Starting…" : isPolling ? "Generating…" : "Generate Drafts"}
             </button>
@@ -398,7 +444,7 @@ function DraftCard({
     <section className="card">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <div>
-          <div className="pill">Draft Ready</div>
+          <div className="pill">{draft.status === "APPROVED" ? "Approved (unsent)" : "Draft Ready"}</div>
           <h3 style={{ margin: "10px 0 4px 0" }}>{draft.name || "Unknown lead"}</h3>
           <div style={{ color: "#a5b4fc", marginBottom: 8 }}>{draft.headline}</div>
         </div>
@@ -484,7 +530,7 @@ function DraftCard({
       <div className="button-row">
         <button
           className="btn"
-          disabled={locked}
+          disabled={locked || draft.status === "APPROVED"}
           onClick={() =>
             run(() =>
               approveDraft({
@@ -503,6 +549,17 @@ function DraftCard({
         <button className="btn secondary" disabled={locked} onClick={() => run(() => rejectDraft(draft.leadId))}>
           {pending ? "..." : draft.regenerating ? "Pending..." : "Reject"}
         </button>
+        {draft.status === "APPROVED" ? (
+          <button
+            className="btn warn"
+            disabled={locked}
+            onClick={() =>
+              run(() => sendLeadNow(draft.leadId))
+            }
+          >
+            {pending ? "Sending..." : "Send Now"}
+          </button>
+        ) : (
         <button
           className="btn warn"
           disabled={locked}
@@ -518,6 +575,7 @@ function DraftCard({
         >
           {pending || draft.regenerating ? "Regenerating..." : "Regenerate"}
         </button>
+        )}
         {message ? (
           <span className="muted" style={{ marginLeft: 8 }}>
             {message}

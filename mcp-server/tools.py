@@ -78,7 +78,8 @@ def update_rotation_state(client: Client, category_index: int) -> None:
         "last_updated": datetime.now(timezone.utc).isoformat(),
     }
     client.table("settings").upsert(
-        {"key": "example_rotation", "value": value}
+        {"key": "example_rotation", "value": value},
+        on_conflict="key"
     ).execute()
 
 

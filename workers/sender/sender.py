@@ -917,7 +917,14 @@ async def main() -> None:
 
     try:
         client = get_supabase_client()
-        daily_limit = int(os.getenv("DAILY_SEND_LIMIT", str(DAILY_SEND_DEFAULT)))
+        # Compute daily limit with a hard minimum of 42 to avoid getting stuck at 20
+        env_limit = os.getenv("DAILY_SEND_LIMIT")
+        try:
+            parsed_limit = int(env_limit) if env_limit else DAILY_SEND_DEFAULT
+        except Exception:
+            parsed_limit = DAILY_SEND_DEFAULT
+        daily_limit = max(parsed_limit, 42)
+        logger.info("Daily send limit computed", data={"limit": daily_limit, "env": env_limit, "default": DAILY_SEND_DEFAULT})
         already_sent = sent_today_count(client)
         
         if already_sent >= daily_limit and not args.followup:

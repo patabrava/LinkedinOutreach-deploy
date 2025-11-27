@@ -58,14 +58,14 @@ export async function fetchDraftFeed() {
   try {
     const client = supabaseAdmin();
     
-    logger.dbQuery("select", "leads", { correlationId }, { status: "DRAFT_READY", limit: 25 });
+    logger.dbQuery("select", "leads", { correlationId }, { status: ["DRAFT_READY", "APPROVED"], limit: 50 });
     
     const { data, error } = await client
       .from("leads")
-      .select("id, linkedin_url, first_name, last_name, company_name, profile_data, recent_activity, drafts(*)")
-      .eq("status", "DRAFT_READY")
+      .select("id, linkedin_url, first_name, last_name, company_name, status, sent_at, profile_data, recent_activity, drafts(*)")
+      .in("status", ["DRAFT_READY", "APPROVED"]) // include approved-but-not-sent
       .order("updated_at", { ascending: false })
-      .limit(25);
+      .limit(50);
 
     if (error) {
       logger.error("Failed to fetch draft feed", { correlationId }, error);
@@ -73,9 +73,17 @@ export async function fetchDraftFeed() {
     }
     
     logger.dbResult("select", "leads", { correlationId }, data);
+    logger.debug("Raw leads data", { correlationId }, { count: data?.length, sample: data?.[0] });
     
-    const result = (data || []).flatMap((lead) =>
-      (lead.drafts || []).map((draft: any) => ({
+    const result = (data || []).flatMap((lead) => {
+      const drafts = lead.drafts || [];
+      logger.debug("Processing lead", { correlationId, leadId: lead.id }, { 
+        status: lead.status, 
+        draftCount: drafts.length,
+        hasDrafts: Array.isArray(drafts)
+      });
+      
+      return drafts.map((draft: any) => ({
         leadId: lead.id,
         draftId: draft.id,
         opener: draft.opener || "",
@@ -89,8 +97,10 @@ export async function fetchDraftFeed() {
         headline: lead.profile_data?.headline || "",
         company: lead.company_name || lead.profile_data?.current_company || "",
         linkedinUrl: lead.linkedin_url,
-      }))
-    );
+        status: lead.status || "DRAFT_READY",
+        sentAt: lead.sent_at || null,
+      }));
+    });
     
     logger.actionComplete("fetchDraftFeed", { correlationId }, { count: result.length });
     return result;
@@ -368,6 +378,68 @@ export async function triggerFollowupSender() {
   }
 }
 
+export async function sendLeadNow(leadId: string) {
+  const correlationId = logger.actionStart("sendLeadNow", { leadId });
+  try {
+    const repoRoot = path.resolve(process.cwd(), "..", "..");
+    const senderDir = path.resolve(repoRoot, "workers", "sender");
+    const senderPath = path.join(senderDir, "sender.py");
+    const venvPython = path.join(senderDir, "venv", "bin", "python");
+    const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
+    const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
+    const execToUse = pythonExec;
+    const args = [senderPath, "--lead-id", leadId];
+
+    logger.workerSpawn("sender", args, { correlationId, leadId });
+
+    const proc = spawn(execToUse, args, {
+      cwd: repoRoot,
+      stdio: ["ignore", "inherit", "inherit"],
+      detached: true,
+      env: { ...process.env, CORRELATION_ID: correlationId },
+    });
+    proc.unref();
+    logger.info("Sender worker triggered for single lead", { correlationId, leadId, pid: proc.pid });
+  } catch (err: any) {
+    logger.error("sendLeadNow error", { correlationId, leadId }, err);
+    throw err;
+  } finally {
+    revalidatePath("/");
+  }
+}
+
+export async function sendAllApproved() {
+  const correlationId = logger.actionStart("sendAllApproved");
+  let senderTriggered = false;
+  try {
+    const repoRoot = path.resolve(process.cwd(), "..", "..");
+    const senderDir = path.resolve(repoRoot, "workers", "sender");
+    const senderPath = path.join(senderDir, "sender.py");
+    const venvPython = path.join(senderDir, "venv", "bin", "python");
+    const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
+    const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
+    const execToUse = pythonExec;
+    const args = [senderPath];
+
+    logger.workerSpawn("sender", args, { correlationId, mode: "approved" });
+
+    const proc = spawn(execToUse, args, {
+      cwd: repoRoot,
+      stdio: ["ignore", "inherit", "inherit"],
+      detached: true,
+      env: { ...process.env, CORRELATION_ID: correlationId },
+    });
+    proc.unref();
+    senderTriggered = true;
+    logger.info("Sender worker triggered for all approved", { correlationId, pid: proc.pid });
+  } catch (err: any) {
+    logger.error("sendAllApproved error", { correlationId }, err);
+  } finally {
+    revalidatePath("/");
+  }
+  return { senderTriggered };
+}
+
 export async function approveDraft(input: DraftInput) {
   const correlationId = logger.actionStart("approveDraft", { leadId: input.leadId, draftId: input.draftId?.toString() }, input);
   
@@ -384,6 +456,7 @@ export async function approveDraft(input: DraftInput) {
       .select("id", { count: "exact", head: true })
       .eq("status", "SENT")
       .gte("sent_at", today.toISOString());
+    logger.info("Daily limit check", { correlationId, count: count || 0, dailyLimit });
     
     if ((count || 0) >= dailyLimit) {
       const error = new Error(`Daily send limit reached (${count}/${dailyLimit}). No more messages can be sent today.`);
