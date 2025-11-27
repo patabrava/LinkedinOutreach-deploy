@@ -11,7 +11,16 @@ from typing import Any, Dict, Tuple
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from tools import classify_lead, get_enriched_leads, save_draft, select_case_study, supabase_client
+from tools import (
+    classify_lead,
+    get_enriched_leads,
+    get_rotation_state,
+    save_draft,
+    select_case_study,
+    supabase_client,
+    update_rotation_state,
+)
+from example_pool import get_example_pool
 
 # Import shared logger
 sys.path.insert(0, str(Path(__file__).parent.parent / "workers"))
@@ -44,7 +53,8 @@ def choose_case_study(ai_tags: Dict[str, Any]) -> str:
     return "General"
 
 
-def build_prompt(lead: Dict[str, Any], case_study: str, company_type: str) -> str:
+def build_prompt(lead: Dict[str, Any], case_study: str, company_type: str, example: str, category: str) -> str:
+    """Build the prompt with a specific example injected."""
     profile_json = json.dumps(lead.get("profile_data", {}), indent=2)
     activity_json = json.dumps(lead.get("recent_activity", []), indent=2)
 
@@ -52,8 +62,11 @@ def build_prompt(lead: Dict[str, Any], case_study: str, company_type: str) -> st
     last_name = (lead.get("last_name") or "").strip()
     full_name = " ".join([p for p in [first_name, last_name] if p]).strip()
 
+    # Inject the selected example into the prompt
+    personalized_prompt = PROMPT.replace("{SELECTED_EXAMPLE}", example).replace("{EXAMPLE_CATEGORY}", category)
+
     return (
-        f"{PROMPT}\n\n"
+        f"{personalized_prompt}\n\n"
         "You must respond in JSON with keys: opener, body, cta, full_message, body_type, cta_type, "
         "industry, company_type, case_study.\n"
         f"Lead first_name: {first_name or '(unknown)'}\n"
@@ -152,6 +165,9 @@ def main() -> None:
         
         logger.info(f"Processing {len(leads)} ENRICHED leads", data={"count": len(leads)})
 
+        # Initialize example pool
+        example_pool = get_example_pool()
+        
         for lead in leads:
             lead_id = lead["id"]
             logger.info(f"Generating draft for lead", {"leadId": lead_id})
@@ -165,7 +181,20 @@ def main() -> None:
             logger.debug("Selected case study", {"leadId": lead_id}, {"caseStudy": case_study})
             select_case_study(client, lead_id, case_study)
 
-            prompt = build_prompt(lead, case_study, company_type)
+            # Get the next example using rotation
+            last_category_index = get_rotation_state(client)
+            category_name, example_text, new_category_index = example_pool.get_next_example(last_category_index)
+            
+            logger.info(f"Selected example from category", {"leadId": lead_id}, {
+                "category": category_name,
+                "categoryIndex": new_category_index,
+                "example": example_text[:50] + "..."
+            })
+            
+            # Update rotation state for next lead
+            update_rotation_state(client, new_category_index)
+
+            prompt = build_prompt(lead, case_study, company_type, example_text, category_name)
             
             logger.ai_request(OPENAI_MODEL, {"leadId": lead_id}, prompt[:200])
             

@@ -373,6 +373,23 @@ export async function approveDraft(input: DraftInput) {
   
   try {
     const client = supabaseAdmin();
+    
+    // Check daily send limit (enforce minimum of 42 even if env is set lower)
+    const parsedEnvLimit = parseInt(process.env.DAILY_SEND_LIMIT || "", 10);
+    const dailyLimit = Number.isFinite(parsedEnvLimit) && parsedEnvLimit > 0 ? Math.max(parsedEnvLimit, 42) : 42;
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    const { count } = await client
+      .from("leads")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "SENT")
+      .gte("sent_at", today.toISOString());
+    
+    if ((count || 0) >= dailyLimit) {
+      const error = new Error(`Daily send limit reached (${count}/${dailyLimit}). No more messages can be sent today.`);
+      logger.actionError("approveDraft", { correlationId, leadId: input.leadId }, error, input);
+      throw error;
+    }
     const finalMessage = buildFinalMessage(input.opener, input.body, input.cta);
 
     logger.dbQuery("update", "drafts", { correlationId, draftId: input.draftId?.toString() }, { finalMessage });

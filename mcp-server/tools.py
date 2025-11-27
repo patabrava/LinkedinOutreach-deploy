@@ -62,6 +62,26 @@ def select_case_study(client: Client, lead_id: str, case_study_name: str) -> Dic
     return ai_tags
 
 
+def get_rotation_state(client: Client) -> Optional[int]:
+    """Get the last used category index from settings."""
+    resp = client.table("settings").select("value").eq("key", "example_rotation").execute()
+    if resp.data and len(resp.data) > 0:
+        return resp.data[0].get("value", {}).get("last_category_index")
+    return None
+
+
+def update_rotation_state(client: Client, category_index: int) -> None:
+    """Update the last used category index in settings."""
+    from datetime import datetime, timezone
+    value = {
+        "last_category_index": category_index,
+        "last_updated": datetime.now(timezone.utc).isoformat(),
+    }
+    client.table("settings").upsert(
+        {"key": "example_rotation", "value": value}
+    ).execute()
+
+
 def save_draft(
     client: Client,
     lead_id: str,

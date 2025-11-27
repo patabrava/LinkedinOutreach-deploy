@@ -26,7 +26,7 @@ logger = get_logger("sender")
 
 # Reuse the scraper's persisted auth state to avoid drift between workers.
 AUTH_STATE_PATH = (Path(__file__).parent.parent / "scraper" / "auth.json").resolve()
-DAILY_SEND_DEFAULT = 20
+DAILY_SEND_DEFAULT = 42
 
 
 def get_supabase_client() -> Client:
@@ -175,6 +175,31 @@ def fetch_draft(client: Client, lead_id: str) -> Optional[Dict[str, Any]]:
     return draft
 
 
+def _hard_cap_text(text: str, limit: int) -> str:
+    """Return text trimmed to <= limit characters with an ellipsis if trimmed.
+
+    Tries to cut at a word boundary and cleans up trailing punctuation.
+    """
+    try:
+        t = (text or "").strip()
+    except Exception:
+        t = str(text or "")
+    if limit <= 0:
+        return ""
+    if len(t) <= limit:
+        return t
+    if limit <= 3:
+        return t[:limit]
+    candidate = t[: limit - 1].rstrip()
+    space_idx = candidate.rfind(" ")
+    if space_idx >= max(10, limit // 2):
+        candidate = candidate[:space_idx]
+    candidate = candidate.rstrip(" ,.;:-")
+    if not candidate:
+        candidate = t[: limit - 1]
+    return f"{candidate}…"
+
+
 def build_message(draft: Dict[str, Any]) -> str:
     opener = draft.get("opener") or ""
     body = draft.get("body_text") or draft.get("body") or ""
@@ -182,12 +207,18 @@ def build_message(draft: Dict[str, Any]) -> str:
     final = draft.get("final_message")
     if final:
         logger.debug("Using final_message from draft", data={"length": len(final)})
-        return final
+        # Hard-cap to 300 characters regardless of source
+        capped = _hard_cap_text(final, 300)
+        if len(capped) != len(final):
+            logger.warn("final_message exceeded limit and was capped", data={"original": len(final), "final": len(capped)})
+        return capped
     parts = [opener.strip(), body.strip(), cta.strip()]
     message = "\n\n".join([p for p in parts if p])
     logger.debug("Built message from parts", data={"length": len(message)})
-    return message
-
+    capped = _hard_cap_text(message, 300)
+    if len(capped) != len(message):
+        logger.warn("Assembled message exceeded limit and was capped", data={"original": len(message), "final": len(capped)})
+    return capped
 
 async def open_message_surface(page: Page) -> str:
     """Open a messaging surface on a LinkedIn profile page.

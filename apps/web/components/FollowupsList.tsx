@@ -13,7 +13,7 @@ const formatDate = (iso?: string | null) => {
   if (!iso) return "—";
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleString();
+  return date.toLocaleString("en-US");
 };
 
 const statusStyle: Record<string, { bg: string; color: string }> = {
