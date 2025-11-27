@@ -565,6 +565,7 @@ def mark_failed(client: Client, lead_id: str, error_message: str = "") -> None:
     logger.db_result("update", "leads", {"leadId": lead_id}, 1)
     logger.warn(f"Lead marked as FAILED", {"leadId": lead_id, "error": error_message})
 
+
 async def send_connection_request(page: Page) -> bool:
     """Try to connect if not already connected. Returns True if a request was attempted."""
     connect = page.locator("button:has-text('Connect'), a:has-text('Connect')")

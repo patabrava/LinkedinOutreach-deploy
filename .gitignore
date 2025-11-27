@@ -41,3 +41,6 @@ auth.json
 # Misc
 coverage/
 .tmp/
+
+# Runtime PIDs
+*.pid
