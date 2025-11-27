@@ -72,6 +72,9 @@ def save_draft(
     body_type: str = "",
     cta_type: str = "",
 ) -> Dict[str, Any]:
+    # Delete any existing drafts for this lead to ensure only one draft exists
+    client.table("drafts").delete().eq("lead_id", lead_id).execute()
+    
     draft = {
         "lead_id": lead_id,
         "opener": opener,

@@ -123,23 +123,28 @@ def sent_today_count(client: Client) -> int:
     return count
 
 
-def fetch_next_lead(client: Client) -> Optional[Dict[str, Any]]:
-    logger.db_query("select", "leads", {"status": "APPROVED"})
+def fetch_approved_leads(client: Client, limit: int) -> list[Dict[str, Any]]:
+    """Fetch multiple approved leads at once to prevent duplicate fetching."""
+    logger.db_query("select", "leads", {"status": "APPROVED", "limit": limit})
     resp = (
         client.table("leads")
         .select("id, linkedin_url, first_name, last_name, company_name")
         .eq("status", "APPROVED")
         .order("updated_at", desc=True)
-        .limit(1)
-        .limit(1)
+        .limit(limit)
         .execute()
     )
     rows = resp.data or []
-    lead = rows[0] if rows else None
-    logger.db_result("select", "leads", {"status": "APPROVED"}, 1 if lead else 0)
-    if lead:
-        logger.info(f"Fetched next APPROVED lead", {"leadId": lead["id"]})
-    return lead
+    logger.db_result("select", "leads", {"status": "APPROVED"}, len(rows))
+    if rows:
+        logger.info(f"Fetched {len(rows)} APPROVED leads")
+    return rows
+
+
+def fetch_next_lead(client: Client) -> Optional[Dict[str, Any]]:
+    """Legacy function - fetch a single approved lead."""
+    leads = fetch_approved_leads(client, 1)
+    return leads[0] if leads else None
 
 
 def fetch_lead_by_id(client: Client, lead_id: str) -> Optional[Dict[str, Any]]:
@@ -532,6 +537,14 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
         raise
 
 
+def mark_processing(client: Client, lead_id: str) -> None:
+    """Mark lead as PROCESSING to prevent re-fetching during the same run."""
+    logger.db_query("update", "leads", {"leadId": lead_id}, {"status": "PROCESSING"})
+    client.table("leads").update({"status": "PROCESSING"}).eq("id", lead_id).execute()
+    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
+    logger.debug(f"Lead marked as PROCESSING", {"leadId": lead_id})
+
+
 def mark_sent(client: Client, lead_id: str) -> None:
     logger.db_query("update", "leads", {"leadId": lead_id}, {"status": "SENT"})
     client.table("leads").update({"status": "SENT", "sent_at": datetime.utcnow().isoformat()}).eq(
@@ -539,6 +552,18 @@ def mark_sent(client: Client, lead_id: str) -> None:
     ).execute()
     logger.db_result("update", "leads", {"leadId": lead_id}, 1)
     logger.info(f"Lead marked as SENT", {"leadId": lead_id})
+
+
+def mark_failed(client: Client, lead_id: str, error_message: str = "") -> None:
+    """Mark lead as FAILED for permanent failures (e.g., can't message this profile)."""
+    logger.db_query("update", "leads", {"leadId": lead_id}, {"status": "FAILED"})
+    update_data = {"status": "FAILED", "updated_at": datetime.utcnow().isoformat()}
+    if error_message:
+        # Store error in profile_data for debugging
+        update_data["error_message"] = error_message[:500]  # Truncate to reasonable length
+    client.table("leads").update(update_data).eq("id", lead_id).execute()
+    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
+    logger.warn(f"Lead marked as FAILED", {"leadId": lead_id, "error": error_message})
 
 async def send_connection_request(page: Page) -> bool:
     """Try to connect if not already connected. Returns True if a request was attempted."""
@@ -908,11 +933,8 @@ async def main() -> None:
                 return
             leads_to_send.append(lead)
         else:
-            while len(leads_to_send) < remaining:
-                nxt = fetch_next_lead(client)
-                if not nxt:
-                    break
-                leads_to_send.append(nxt)
+            # Fetch all approved leads at once to prevent duplicate fetching
+            leads_to_send = fetch_approved_leads(client, remaining)
 
         if not leads_to_send:
             logger.info("No APPROVED leads to send")
@@ -924,6 +946,10 @@ async def main() -> None:
             logger.info("Browser opened, authenticating...")
             await ensure_linkedin_auth(context, client)
             
+            # Mark all leads as PROCESSING immediately to prevent re-fetching
+            for lead in leads_to_send:
+                mark_processing(client, lead["id"])
+            
             success_count = 0
             for lead in leads_to_send:
                 lead_id = lead["id"]
@@ -931,9 +957,27 @@ async def main() -> None:
                     await process_one(context, client, lead)
                     success_count += 1
                 except Exception as exc:
+                    error_msg = str(exc)
                     logger.error(f"Failed to send message", {"leadId": lead_id}, error=exc)
-                    # keep status as APPROVED for retry
-                    client.table("leads").update({"status": "APPROVED"}).eq("id", lead_id).execute()
+                    
+                    # Determine if this is a permanent failure or retriable error
+                    permanent_failure_indicators = [
+                        "No messaging surface found",
+                        "3rd-degree",
+                        "restrictions",
+                        "Lead has no draft",
+                    ]
+                    
+                    is_permanent = any(indicator in error_msg for indicator in permanent_failure_indicators)
+                    
+                    if is_permanent:
+                        # Permanent failure - mark as FAILED so we don't retry
+                        mark_failed(client, lead_id, error_msg)
+                    else:
+                        # Retriable error - mark as APPROVED for manual retry or debugging
+                        client.table("leads").update({"status": "APPROVED"}).eq("id", lead_id).execute()
+                        logger.info(f"Lead marked as APPROVED for retry", {"leadId": lead_id})
+                
                 await random_pause(2, 4)
             
             logger.operation_complete("sender-outreach", result={"sent": success_count, "total": len(leads_to_send)})

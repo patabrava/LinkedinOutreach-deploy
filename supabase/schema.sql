@@ -19,7 +19,8 @@ begin
       'APPROVED',
       'SENT',
       'REPLIED',
-      'REJECTED'
+      'REJECTED',
+      'FAILED'
     );
   end if;
 end$$;
@@ -32,9 +33,12 @@ create table if not exists leads (
   company_name text,
   status lead_status not null default 'NEW',
   sent_at timestamptz,
+  error_message text,
   profile_data jsonb,
   recent_activity jsonb,
   ai_tags jsonb,
+  followup_count int default 0,
+  last_reply_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
