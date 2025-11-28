@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import re
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -81,6 +82,7 @@ def build_prompt(lead: Dict[str, Any], case_study: str, company_type: str, examp
         "Follow the logic chain: classify company type, select case study, decide opener (post if "
         "recent <30 days else profile), choose body type, choose CTA (low friction default), "
         "and ensure word-count limits. Hard cap: opener + body + CTA combined must be <= 300 characters."
+        "\nHard rule: Do not use hyphens or dashes '-', '–', or '—' in opener, body, cta, or full_message. Use spaces instead."
     )
 
 
@@ -146,6 +148,15 @@ def enforce_char_limit(opener: str, body: str, cta: str, limit: int = 300, lead_
     return results["opener"], results["body"], results["cta"], current
 
 
+def sanitize_no_dashes(text: str) -> str:
+    if not text:
+        return ""
+    # Replace hyphen-like characters with spaces and collapse multiple spaces (preserve newlines)
+    text = re.sub(r"[\-\u2010-\u2015\u2212]+", " ", text)
+    text = re.sub(r" {2,}", " ", text)
+    return text.strip()
+
+
 def main() -> None:
     logger.operation_start("draft-generation")
     
@@ -209,6 +220,13 @@ def main() -> None:
                             "Schreibe prägnante, warme und branchenspezifische Outreach-Nachrichten auf Deutsch."
                         ),
                     },
+                    {
+                        "role": "system",
+                        "content": (
+                            "Harte Regel: Verwende keine Bindestriche oder Gedankenstriche ('-', '–', '—') "
+                            "in irgendeinem Ausgabefeld (opener, body, cta, full_message). Nutze stattdessen Leerzeichen."
+                        ),
+                    },
                     {"role": "system", "content": PROMPT},
                     {"role": "user", "content": prompt},
                 ],
@@ -265,12 +283,24 @@ def main() -> None:
             if not data.get("full_message"):
                 full_message = "\n\n".join([part for part in [opener, body, cta] if part])
 
+            # Enforce no-dash rule on fields and rebuild full_message for consistency
+            opener = sanitize_no_dashes(opener)
+            body = sanitize_no_dashes(body)
+            cta = sanitize_no_dashes(cta)
+            full_message = "\n\n".join([part for part in [opener, body, cta] if part])
+
             # Check length before enforcement
-            pre_check = "\n\n".join([part for part in [opener, body, cta] if part])
+            pre_check = full_message
             if len(pre_check) > 300:
                 logger.warn(f"AI generated message exceeds 300 chars", {"leadId": lead_id}, {"length": len(pre_check)})
             
             opener, body, cta, full_message = enforce_char_limit(opener, body, cta, lead_id=lead_id)
+
+            # Final safety: ensure no dashes remain after truncation
+            opener = sanitize_no_dashes(opener)
+            body = sanitize_no_dashes(body)
+            cta = sanitize_no_dashes(cta)
+            full_message = sanitize_no_dashes(full_message)
 
             save_draft(client, lead_id, opener, body, cta, full_message, body_type, cta_type)
             logger.info(f"Draft saved for lead", {"leadId": lead_id})
