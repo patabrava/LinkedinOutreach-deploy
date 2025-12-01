@@ -456,9 +456,9 @@ export async function approveDraft(input: DraftInput) {
   try {
     const client = supabaseAdmin();
     
-    // Check daily send limit (enforce minimum of 42 even if env is set lower)
+    // Check daily send limit (enforce minimum of 100 even if env is set lower)
     const parsedEnvLimit = parseInt(process.env.DAILY_SEND_LIMIT || "", 10);
-    const dailyLimit = Number.isFinite(parsedEnvLimit) && parsedEnvLimit > 0 ? Math.max(parsedEnvLimit, 42) : 42;
+    const dailyLimit = Number.isFinite(parsedEnvLimit) && parsedEnvLimit > 0 ? Math.max(parsedEnvLimit, 100) : 100;
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
     const { count } = await client

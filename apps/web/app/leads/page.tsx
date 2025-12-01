@@ -36,14 +36,56 @@ export default async function LeadsPage({
             </a>
           </div>
         </div>
-        <div className="card" style={{ padding: 16 }}>
-          <div className="pill">Automation Control</div>
-          <h3 style={{ margin: "12px 0 6px 0" }}>Lead enrichment</h3>
-          <div className="muted" style={{ marginBottom: 12 }}>
-            Kick off scraping when you are ready. Progress updates live as leads are enriched.
+        <div className="card" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+          <div>
+            <div className="pill">Automation Control</div>
+            <h3 style={{ margin: "12px 0 6px 0" }}>Lead enrichment</h3>
+            <div className="muted">
+              Run enrichment in two modes: prepare message drafts (standard) or send a connection request without a
+              note for leads flagged as connect-only.
+            </div>
           </div>
-          <StartEnrichmentButton />
-          <div className="muted" style={{ marginTop: 10 }}>
+
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
+              border: "1px solid rgba(148, 163, 184, 0.3)",
+              borderRadius: 12,
+              padding: 12,
+            }}
+          >
+            <div>
+              <strong>Standard enrichment + drafts</strong>
+              <div className="muted" style={{ marginTop: 4 }}>
+                Enrich NEW leads and move them toward draft generation.
+              </div>
+            </div>
+            <StartEnrichmentButton mode="message" />
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
+              border: "1px solid rgba(59, 130, 246, 0.3)",
+              borderRadius: 12,
+              padding: 12,
+            }}
+          >
+            <div>
+              <strong>Enrich + connect (no note)</strong>
+              <div className="muted" style={{ marginTop: 4 }}>
+                Targets leads whose <code>outreach_mode</code> is set to connect_only. After enrichment, a connection
+                request is sent without drafting a message.
+              </div>
+            </div>
+            <StartEnrichmentButton mode="connect_only" />
+          </div>
+
+          <div className="muted" style={{ marginTop: 4 }}>
             Manage LinkedIn login & credentials in <a href="/settings">Settings</a>.
           </div>
         </div>

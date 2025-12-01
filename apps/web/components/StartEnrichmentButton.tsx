@@ -17,11 +17,44 @@ type StatusResponse = {
     last_name: string | null;
     company_name: string | null;
   } | null;
+  mode?: EnrichmentMode;
 };
 
 const POLL_INTERVAL_MS = 5_000;
 
-export function StartEnrichmentButton() {
+type EnrichmentMode = "message" | "connect_only";
+
+type StartEnrichmentButtonProps = {
+  mode?: EnrichmentMode;
+};
+
+const MODE_CONFIG: Record<EnrichmentMode, {
+  statusUrl: string;
+  startEndpoint: string;
+  startLabel: string;
+  runningLabel: string;
+  buttonColor: string;
+  defaultStartMessage: string;
+}> = {
+  message: {
+    statusUrl: "/api/enrich/status",
+    startEndpoint: "/api/enrich",
+    startLabel: "Start Enrichment",
+    runningLabel: "Starting...",
+    buttonColor: "#10b981",
+    defaultStartMessage: "Scraper started. A browser window should appear.",
+  },
+  connect_only: {
+    statusUrl: "/api/enrich/status?mode=connect_only",
+    startEndpoint: "/api/enrich/connect-only",
+    startLabel: "Enrich + Connect (no note)",
+    runningLabel: "Starting connect-only...",
+    buttonColor: "#3b82f6",
+    defaultStartMessage: "Connect-only run started. A browser window should appear.",
+  },
+};
+
+export function StartEnrichmentButton({ mode = "message" }: StartEnrichmentButtonProps) {
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
@@ -29,13 +62,14 @@ export function StartEnrichmentButton() {
   const [statusLoading, setStatusLoading] = useState<boolean>(false);
   const [polling, setPolling] = useState<boolean>(false);
   const [stopping, setStopping] = useState<boolean>(false);
+  const modeConfig = MODE_CONFIG[mode];
 
   const refreshStatus = useCallback(async ({ silent = false } = {}) => {
     if (!silent) {
       setStatusLoading(true);
     }
     try {
-      const res = await fetch("/api/enrich/status", { cache: "no-store" });
+      const res = await fetch(modeConfig.statusUrl, { cache: "no-store" });
       const data = (await res.json()) as StatusResponse & { error?: string };
       if (!res.ok || data?.ok === false) {
         throw new Error(data?.error || "Failed to fetch enrichment status.");
@@ -52,7 +86,7 @@ export function StartEnrichmentButton() {
         setStatusLoading(false);
       }
     }
-  }, []);
+  }, [modeConfig.statusUrl]);
 
   useEffect(() => {
     refreshStatus();
@@ -119,7 +153,7 @@ export function StartEnrichmentButton() {
     setMessage("");
     setError("");
     try {
-      const res = await fetch("/api/enrich", {
+      const res = await fetch(modeConfig.startEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
@@ -128,7 +162,7 @@ export function StartEnrichmentButton() {
       if (!res.ok || data?.ok === false) {
         throw new Error(data?.error || "Failed to start scraper.");
       }
-      setMessage(data?.message || "Scraper started. A browser window should appear.");
+      setMessage(data?.message || modeConfig.defaultStartMessage);
       setPolling(true);
       await refreshStatus();
     } catch (e: any) {
@@ -166,12 +200,12 @@ export function StartEnrichmentButton() {
           disabled={running}
           className="btn"
           style={{
-            background: running ? "#374151" : "#10b981",
+            background: running ? "#374151" : modeConfig.buttonColor,
             color: "white",
             flex: 1,
           }}
         >
-          {running ? "Starting..." : "Start Enrichment"}
+          {running ? modeConfig.runningLabel : modeConfig.startLabel}
         </button>
         <button
           onClick={stop}

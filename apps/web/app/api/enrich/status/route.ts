@@ -7,7 +7,20 @@ import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-const STATUSES = ["NEW", "PROCESSING", "ENRICHED", "ENRICH_FAILED", "DRAFT_READY", "APPROVED", "SENT", "REPLIED", "REJECTED"] as const;
+const STATUSES = [
+  "NEW",
+  "PROCESSING",
+  "ENRICHED",
+  "ENRICH_FAILED",
+  "DRAFT_READY",
+  "APPROVED",
+  "SENT",
+  "CONNECT_ONLY_SENT",
+  "CONNECTED",
+  "REPLIED",
+  "REJECTED",
+  "FAILED",
+] as const;
 
 type StatusKey = (typeof STATUSES)[number];
 
@@ -20,7 +33,21 @@ const createInitialCounts = (): StatusCounts => {
   }, {} as StatusCounts);
 };
 
-export async function GET() {
+const MODE_CONFIG = {
+  message: {
+    outreachMode: "message",
+    completedStatuses: ["ENRICHED", "ENRICH_FAILED"] as StatusKey[],
+  },
+  connect_only: {
+    outreachMode: "connect_only",
+    completedStatuses: ["CONNECT_ONLY_SENT", "ENRICH_FAILED", "ENRICHED"] as StatusKey[],
+  },
+} as const;
+
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const requestedMode = url.searchParams.get("mode") === "connect_only" ? "connect_only" : "message";
+  const modeConfig = MODE_CONFIG[requestedMode];
   const correlationId = logger.apiRequest("GET", "/api/enrich/status");
   
   try {
@@ -42,12 +69,13 @@ export async function GET() {
 
     await Promise.all(
       STATUSES.map(async (status) => {
-        logger.dbQuery("select-count", "leads", { correlationId, status });
+        logger.dbQuery("select-count", "leads", { correlationId, status, outreachMode: modeConfig.outreachMode });
         
         const { count, error } = await client
           .from("leads")
           .select("id", { count: "exact" })
           .eq("status", status)
+          .eq("outreach_mode", modeConfig.outreachMode)
           .limit(0);
 
         if (error) {
@@ -66,6 +94,7 @@ export async function GET() {
       .from("leads")
       .select("id, linkedin_url, first_name, last_name, company_name")
       .in("status", ["NEW", "PROCESSING"])
+      .eq("outreach_mode", modeConfig.outreachMode)
       .order("created_at", { ascending: true })
       .limit(1)
       .maybeSingle();
@@ -81,17 +110,18 @@ export async function GET() {
     // remaining = NEW + PROCESSING
     // completed = ENRICHED + ENRICH_FAILED (both are terminal states for enrichment)
     const remaining = (counts.NEW || 0) + (counts.PROCESSING || 0);
-    const completed = (counts.ENRICHED || 0) + (counts.ENRICH_FAILED || 0);
+    const completed = modeConfig.completedStatuses.reduce((sum, status) => sum + (counts[status] || 0), 0);
 
     // Explicit ground-truth log of counts and computed values
     logger.debug(
       "Enrichment status snapshot",
       { correlationId },
-      { counts, remaining, completed }
+      { counts, remaining, completed, mode: requestedMode }
     );
 
     const response = {
       ok: true,
+      mode: requestedMode,
       counts,
       remaining,
       completed,

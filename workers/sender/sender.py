@@ -26,7 +26,7 @@ logger = get_logger("sender")
 
 # Reuse the scraper's persisted auth state to avoid drift between workers.
 AUTH_STATE_PATH = (Path(__file__).parent.parent / "scraper" / "auth.json").resolve()
-DAILY_SEND_DEFAULT = 42
+DAILY_SEND_DEFAULT = 100
 
 
 def get_supabase_client() -> Client:
@@ -250,11 +250,46 @@ async def open_message_surface(page: Page) -> str:
             profile_container = page
             logger.warn("Using page-level selectors as last resort")
     
-    # PATH 1: Try Message link (for existing connections)
+    # PATH 1: Try Message button/link (for existing connections)
     # Scoped to profile container to avoid inbox Message buttons
+    # LinkedIn uses both buttons and links for "Nachricht" depending on the profile layout
+    
+    # First try button with personalized name pattern "Nachricht an {Name}" or generic "Nachricht"
+    message_btn = profile_container.get_by_role("button", name=re.compile(r"(Message|Nachricht\s*(an\s+\w+)?)", re.I))
+    message_btn_count = await message_btn.count()
+    logger.debug("Message button check (container)", data={"count": message_btn_count})
+    
+    # If not found in container, try page-level (fallback for edge cases)
+    if message_btn_count == 0:
+        message_btn = page.get_by_role("button", name=re.compile(r"(Message|Nachricht\s*(an\s+\w+)?)", re.I))
+        message_btn_count = await message_btn.count()
+        logger.debug("Message button check (page-level fallback)", data={"count": message_btn_count})
+    
+    if message_btn_count > 0:
+        logger.debug("Found Message button - user is in network")
+        try:
+            await message_btn.first.click(timeout=8_000)
+            # Wait for messaging overlay
+            await page.wait_for_selector(
+                "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
+                timeout=10_000,
+            )
+            await random_pause()
+            logger.debug("Message button path successful")
+            return "message"
+        except Exception as e:
+            logger.debug("Message button path failed", error=e)
+    
+    # Then try link (fallback)
     message_link = profile_container.get_by_role("link", name=re.compile(r"(Message|Nachricht)", re.I))
     message_link_count = await message_link.count()
-    logger.debug(f"Message link check", data={"count": message_link_count})
+    logger.debug("Message link check (container)", data={"count": message_link_count})
+    
+    # Page-level fallback for link
+    if message_link_count == 0:
+        message_link = page.get_by_role("link", name=re.compile(r"(Message|Nachricht)", re.I))
+        message_link_count = await message_link.count()
+        logger.debug("Message link check (page-level fallback)", data={"count": message_link_count})
     
     if message_link_count > 0:
         logger.debug("Found Message link - user is in network")
@@ -269,12 +304,18 @@ async def open_message_surface(page: Page) -> str:
             logger.debug("Message link path successful")
             return "message"
         except Exception as e:
-            logger.debug(f"Message link path failed", error=e)
+            logger.debug("Message link path failed", error=e)
     
     # PATH 2: Direct invite link inside profile container (Invite <Name> to ...)
     invite_link = profile_container.get_by_role("link", name=re.compile(r"(Invite .+ to|Einladen .+ zu)", re.I))
     invite_link_count = await invite_link.count()
-    logger.debug("Invite link check", data={"count": invite_link_count})
+    logger.debug("Invite link check (container)", data={"count": invite_link_count})
+    
+    # Page-level fallback
+    if invite_link_count == 0:
+        invite_link = page.get_by_role("link", name=re.compile(r"(Invite .+ to|Einladen .+ zu)", re.I))
+        invite_link_count = await invite_link.count()
+        logger.debug("Invite link check (page-level fallback)", data={"count": invite_link_count})
     
     if invite_link_count > 0:
         logger.debug("Found invite link inside profile container")
@@ -303,7 +344,16 @@ async def open_message_surface(page: Page) -> str:
         name=re.compile(r"(Vernetzen|Als Kontakt|als Kontakt)", re.I),
     )
     direct_connect_count = await direct_connect_btn.count()
-    logger.debug("Direct connect button check", data={"count": direct_connect_count})
+    logger.debug("Direct connect button check (container)", data={"count": direct_connect_count})
+    
+    # Page-level fallback
+    if direct_connect_count == 0:
+        direct_connect_btn = page.get_by_role(
+            "button",
+            name=re.compile(r"(Vernetzen|Als Kontakt|als Kontakt)", re.I),
+        )
+        direct_connect_count = await direct_connect_btn.count()
+        logger.debug("Direct connect button check (page-level fallback)", data={"count": direct_connect_count})
     
     if direct_connect_count > 0:
         logger.debug("Clicking direct connect button on profile")
@@ -330,7 +380,13 @@ async def open_message_surface(page: Page) -> str:
     # Scoped to profile container - allow partial match for "Mehr" or "More"
     more_button = profile_container.get_by_role("button", name=re.compile(r"(More|Mehr)", re.I))
     more_button_count = await more_button.count()
-    logger.debug(f"More button check", data={"count": more_button_count})
+    logger.debug("More button check (container)", data={"count": more_button_count})
+    
+    # Page-level fallback
+    if more_button_count == 0:
+        more_button = page.get_by_role("button", name=re.compile(r"(More|Mehr)", re.I))
+        more_button_count = await more_button.count()
+        logger.debug("More button check (page-level fallback)", data={"count": more_button_count})
     
     if more_button_count > 0:
         logger.debug("Found More button - attempting invite flow")
@@ -917,13 +973,13 @@ async def main() -> None:
 
     try:
         client = get_supabase_client()
-        # Compute daily limit with a hard minimum of 42 to avoid getting stuck at 20
+        # Compute daily limit with a hard minimum of 100 to keep throughput aligned with the higher target
         env_limit = os.getenv("DAILY_SEND_LIMIT")
         try:
             parsed_limit = int(env_limit) if env_limit else DAILY_SEND_DEFAULT
         except Exception:
             parsed_limit = DAILY_SEND_DEFAULT
-        daily_limit = max(parsed_limit, 42)
+        daily_limit = max(parsed_limit, 100)
         logger.info("Daily send limit computed", data={"limit": daily_limit, "env": env_limit, "default": DAILY_SEND_DEFAULT})
         already_sent = sent_today_count(client)
         

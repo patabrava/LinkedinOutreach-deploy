@@ -8,6 +8,7 @@ import datetime
 import json
 import os
 import random
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,35 +67,51 @@ def get_supabase_client() -> Client:
     return create_client(url, key)
 
 
-def fetch_new_leads(client: Client, limit: int = 10) -> List[Lead]:
-    logger.db_query("select", "leads", {"status": "NEW"}, {"limit": limit})
-    resp = (
+def fetch_new_leads(client: Client, limit: int = 10, outreach_mode: Optional[str] = None) -> List[Lead]:
+    query_meta: Dict[str, Any] = {"status": "NEW", "limit": limit}
+    if outreach_mode:
+        query_meta["outreach_mode"] = outreach_mode
+
+    logger.db_query("select", "leads", query_meta)
+
+    query = (
         client.table("leads")
         .select("id, linkedin_url, first_name, last_name, company_name")
         .eq("status", "NEW")
         .limit(limit)
-        .execute()
     )
+
+    if outreach_mode:
+        query = query.eq("outreach_mode", outreach_mode)
+
+    resp = query.execute()
     leads: List[Lead] = [Lead(**row) for row in resp.data or []]
-    logger.db_result("select", "leads", {"status": "NEW"}, len(leads))
-    logger.info(f"Fetched {len(leads)} NEW leads", data={"count": len(leads)})
+    logger.db_result("select", "leads", query_meta, len(leads))
+    logger.info(
+        f"Fetched {len(leads)} NEW leads",
+        data={"count": len(leads), "outreach_mode": outreach_mode or "message"},
+    )
     return leads
 
 
 def fetch_today_enrichment_count(client: Client) -> int:
-    """Return count of leads marked ENRICHED since 00:00 UTC today."""
+    """Return count of leads processed today (enriched or connect-only)."""
     start_of_day = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    logger.db_query("select-count", "leads", {"status": "ENRICHED"}, {"since": start_of_day})
+    tracked_statuses = ["ENRICHED", "CONNECT_ONLY_SENT"]
+    logger.db_query("select-count", "leads", {"status": tracked_statuses}, {"since": start_of_day})
     resp = (
         client.table("leads")
         .select("id", count="exact")
-        .eq("status", "ENRICHED")
+        .in_("status", tracked_statuses)
         .gte("updated_at", start_of_day)
         .execute()
     )
     count = resp.count or 0
-    logger.db_result("select-count", "leads", {"status": "ENRICHED"}, count)
-    logger.info(f"Enriched today: {count}", data={"count": count, "cap": DAILY_ENRICHMENT_CAP})
+    logger.db_result("select-count", "leads", {"status": tracked_statuses}, count)
+    logger.info(
+        f"Enriched today: {count}",
+        data={"count": count, "cap": DAILY_ENRICHMENT_CAP, "statuses": tracked_statuses},
+    )
     return count
 
 
@@ -439,51 +456,153 @@ async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str,
     return results[:5]
 
 
-async def send_connection_request(page: Page, profile_url: str) -> bool:
-    """Attempt to send a connection request to the profile. Returns True if a send was attempted."""
+async def send_connection_request(page: Page, lead: Lead) -> bool:
+    """Send a no-note connection request. Mirrors sender.py open_message_surface flow exactly.
+    
+    CRITICAL: This function assumes the page is already on the profile (after enrichment).
+    It navigates back to the profile first since activity scraping may have left us elsewhere.
+    """
+    profile_url = lead.linkedin_url or ""
     normalized = profile_url.replace("http://", "https://").split("?")[0]
+    
+    logger.debug("connect-only: starting connection request", data={"url": normalized})
+    
+    # Navigate back to profile (activity scraping may have left us on /recent-activity/)
     try:
         await gentle_nav(page, normalized)
-    except Exception:
+        await page.wait_for_selector("main", timeout=15_000)
+        await random_pause(1.0, 2.0)
+    except Exception as exc:
+        logger.warn("connect-only: failed to navigate to profile", data={"url": normalized}, error=exc)
         return False
 
-    # If already connected, there might be no Connect button.
-    connect_candidates = [
-        "button:has-text('Connect')",
-        "a:has-text('Connect')",
-        "button[aria-label*='Connect']",
-    ]
-    connect = None
-    for selector in connect_candidates:
-        locator = page.locator(selector)
-        if await locator.count() > 0:
-            connect = locator.first
-            break
+    await wiggle_mouse(page)
+    
+    logger.debug("connect-only: starting open_message_surface equivalent")
+    
+    # Scope all interactions to the profile page's main content area
+    # Try lazy-column test ID first, with fallback to main profile section
+    profile_container = None
+    try:
+        profile_container = page.get_by_test_id("lazy-column")
+        await profile_container.wait_for(state="visible", timeout=5_000)
+        logger.debug("connect-only: profile container found via lazy-column test ID")
+    except Exception as e:
+        logger.warn("connect-only: lazy-column test ID not found, trying fallback selectors", error=e)
+        # Fallback to main profile section
+        try:
+            profile_container = page.locator("main.scaffold-layout__main, section.artdeco-card").first
+            await profile_container.wait_for(state="visible", timeout=5_000)
+            logger.debug("connect-only: profile container found via fallback selector")
+        except Exception as e2:
+            logger.error("connect-only: no profile container found with any selector", error=e2)
+            # Last resort: use page itself (risky but better than failing)
+            profile_container = page
+            logger.warn("connect-only: using page-level selectors as last resort")
+    
+    # PATH 1: Direct invite link inside profile container (Invite <Name> to ...)
+    invite_link = profile_container.get_by_role("link", name=re.compile(r"(Invite .+ to|Einladen .+ zu)", re.I))
+    invite_link_count = await invite_link.count()
+    logger.debug("connect-only: invite link check", data={"count": invite_link_count})
+    
+    if invite_link_count > 0:
+        logger.debug("connect-only: found invite link inside profile container")
+        try:
+            await invite_link.first.click(timeout=8_000)
+            await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
+            await random_pause()
+            logger.debug("connect-only: invite link clicked, dialog opened")
+            return await _click_send_without_note(page, normalized)
+        except Exception as e:
+            logger.debug("connect-only: invite link path failed", error=e)
+    
+    # PATH 2: Direct Vernetzen / Als Kontakt button on profile card
+    direct_connect_btn = profile_container.get_by_role(
+        "button",
+        name=re.compile(r"(Vernetzen|Als Kontakt|als Kontakt)", re.I),
+    )
+    direct_connect_count = await direct_connect_btn.count()
+    logger.debug("connect-only: direct connect button check", data={"count": direct_connect_count})
+    
+    if direct_connect_count > 0:
+        logger.debug("connect-only: clicking direct connect button on profile")
+        try:
+            await direct_connect_btn.first.click(timeout=8_000)
+            await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
+            await random_pause()
+            logger.debug("connect-only: direct connect clicked, dialog opened")
+            return await _click_send_without_note(page, normalized)
+        except Exception as e:
+            logger.debug("connect-only: direct connect path failed", error=e)
+    
+    # PATH 3: Try More button -> Invite flow (fallback)
+    more_button = profile_container.get_by_role("button", name=re.compile(r"(More|Mehr)", re.I))
+    more_button_count = await more_button.count()
+    logger.debug("connect-only: more button check", data={"count": more_button_count})
+    
+    if more_button_count > 0:
+        logger.debug("connect-only: found More button - attempting invite flow")
+        try:
+            await more_button.first.click(timeout=8_000)
+            await page.wait_for_timeout(300)
+            
+            # Look for Invite/Connect menuitem
+            invite_menuitem = page.get_by_role("menuitem", name=re.compile(r"(Invite|Einladen|Connect|Vernetzen)", re.I))
+            invite_count = await invite_menuitem.count()
+            logger.debug("connect-only: invite menuitem check", data={"count": invite_count})
+            
+            if invite_count > 0:
+                logger.debug("connect-only: clicking Invite menuitem")
+                await invite_menuitem.first.click(timeout=8_000)
+                
+                # Wait for connection dialog
+                await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
+                await random_pause()
+                logger.debug("connect-only: More menu invite clicked, dialog opened")
+                return await _click_send_without_note(page, normalized)
+            else:
+                logger.warn("connect-only: no Invite menuitem found in More dropdown")
+        except Exception as e:
+            logger.debug("connect-only: More button path failed", error=e)
+    
+    logger.warn("connect-only: all connection paths exhausted", data={"url": normalized})
+    return False
 
-    if not connect:
+
+async def _click_send_without_note(page: Page, url: str) -> bool:
+    """Click 'Ohne Notiz senden' button in the connection dialog."""
+    # Try exact German buttons first, then fallback to regex
+    send_label = page.get_by_role("button", name="Ohne Notiz senden")
+    send_count = await send_label.count()
+    logger.debug("connect-only: 'Ohne Notiz senden' button check", data={"count": send_count})
+    
+    if send_count == 0:
+        send_label = page.get_by_role("button", name="Ohne Nachricht senden")
+        send_count = await send_label.count()
+        logger.debug("connect-only: 'Ohne Nachricht senden' button check", data={"count": send_count})
+    
+    if send_count == 0:
+        send_label = page.get_by_role(
+            "button",
+            name=re.compile(r"(Send without a note|Send now|Send|Einladung senden|Senden)", re.I),
+        )
+        send_count = await send_label.count()
+        logger.debug("connect-only: fallback send button check", data={"count": send_count})
+
+    if send_count == 0:
+        logger.warn("connect-only: send button not found in dialog", data={"url": url})
         return False
 
     try:
-        await connect.click(timeout=6_000)
-    except Exception:
+        await send_label.first.scroll_into_view_if_needed(timeout=4_000)
+        await send_label.first.wait_for(state="visible", timeout=5_000)
+        await send_label.first.click(timeout=8_000)
+        await random_pause(0.8, 1.3)
+        logger.info("connect-only: connection sent via dialog", data={"url": url})
+        return True
+    except Exception as exc:
+        logger.error("connect-only: failed to click send button", data={"url": url}, error=exc)
         return False
-
-    send_candidates = [
-        "button:has-text('Send without a note')",
-        "button:has-text('Send')",
-        "button:has-text('Send now')",
-    ]
-    for selector in send_candidates:
-        try:
-            target = page.locator(selector)
-            if await target.count() > 0:
-                await target.first.click(timeout=6_000)
-                await page.wait_for_timeout(800)
-                return True
-        except Exception:
-            continue
-
-    return False
 
 
 async def login_with_credentials(context: BrowserContext, creds: LinkedinCredentials) -> None:
@@ -628,6 +747,25 @@ def mark_enrich_failed(client: Client, lead_id: str, reason: Optional[str] = Non
     logger.warn("Lead marked ENRICH_FAILED", {"leadId": lead_id}, error=reason)
 
 
+def mark_connect_sent(client: Client, lead_id: str) -> None:
+    """Mark a lead as CONNECT_ONLY_SENT and capture timestamp."""
+    now_iso = datetime.datetime.utcnow().isoformat()
+    logger.db_query(
+        "update",
+        "leads",
+        {"leadId": lead_id},
+        {"status": "CONNECT_ONLY_SENT", "connection_sent_at": now_iso},
+    )
+    client.table("leads").update(
+        {
+            "status": "CONNECT_ONLY_SENT",
+            "connection_sent_at": now_iso,
+        }
+    ).eq("id", lead_id).execute()
+    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
+    logger.info("Lead marked CONNECT_ONLY_SENT", {"leadId": lead_id})
+
+
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 async def enrich_one(page: Page, client: Client, lead: Lead) -> None:
     logger.scrape_start(lead.id, lead.linkedin_url)
@@ -661,7 +799,7 @@ async def enrich_one(page: Page, client: Client, lead: Lead) -> None:
         raise
 
 
-async def process_batch(context: BrowserContext, client: Client, leads: List[Lead]) -> None:
+async def process_batch(context: BrowserContext, client: Client, leads: List[Lead], mode: str = "enrich") -> None:
     for lead in leads:
         logger.info(f"Processing lead {lead.id}", {"leadId": lead.id}, {"url": lead.linkedin_url})
         logger.db_query("update", "leads", {"leadId": lead.id}, {"status": "PROCESSING"})
@@ -671,12 +809,28 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
         try:
             await enrich_one(page, client, lead)
             logger.info(f"Lead {lead.id} enriched successfully", {"leadId": lead.id})
-            try:
-                sent = await send_connection_request(page, lead.linkedin_url)
-                if sent:
-                    logger.info(f"Connection request sent to {lead.id}", {"leadId": lead.id})
-            except Exception as exc:
-                logger.warn(f"Connection request failed for {lead.id}", {"leadId": lead.id}, error=exc)
+            if mode == "connect_only":
+                try:
+                    sent = await send_connection_request(page, lead)
+                    if sent:
+                        mark_connect_sent(client, lead.id)
+                        logger.info(
+                            f"Connection request sent to {lead.id}",
+                            {"leadId": lead.id},
+                            {"mode": mode},
+                        )
+                    else:
+                        logger.info(
+                            f"No connect button for {lead.id}",
+                            {"leadId": lead.id},
+                            {"mode": mode},
+                        )
+                except Exception as exc:
+                    logger.warn(
+                        f"Connection request failed for {lead.id}",
+                        {"leadId": lead.id},
+                        error=exc,
+                    )
         except TimeoutError as exc:
             logger.error(f"Timeout enriching {lead.id}", {"leadId": lead.id}, error=exc)
             mark_enrich_failed(client, lead.id, reason=f"Timeout: {exc}")
@@ -692,8 +846,8 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
         await random_pause()
 
 
-async def main(limit: int = 10) -> None:
-    logger.operation_start("enrichment", input_data={"limit": limit})
+async def main(limit: int = 10, mode: str = "enrich") -> None:
+    logger.operation_start("enrichment", input_data={"limit": limit, "mode": mode})
     
     try:
         client = get_supabase_client()
@@ -710,7 +864,9 @@ async def main(limit: int = 10) -> None:
             logger.info("No quota left for today")
             return
 
-        leads = fetch_new_leads(client, limit=effective_limit)
+        outreach_filter = "connect_only" if mode == "connect_only" else None
+        os.environ["SCRAPER_MODE"] = mode
+        leads = fetch_new_leads(client, limit=effective_limit, outreach_mode=outreach_filter)
         if not leads:
             logger.info("No NEW leads to process")
             return
@@ -719,14 +875,17 @@ async def main(limit: int = 10) -> None:
         try:
             logger.info("Browser opened, authenticating...")
             await ensure_linkedin_auth(context, creds)
-            logger.info(f"Starting batch processing of {len(leads)} leads")
-            await process_batch(context, client, leads)
+            logger.info(
+                f"Starting batch processing of {len(leads)} leads",
+                data={"count": len(leads), "mode": mode},
+            )
+            await process_batch(context, client, leads, mode=mode)
             logger.operation_complete("enrichment", result={"processed": len(leads)})
         finally:
             await shutdown(playwright, browser)
             logger.info("Browser closed")
     except Exception as exc:
-        logger.operation_error("enrichment", error=exc, input_data={"limit": limit})
+        logger.operation_error("enrichment", error=exc, input_data={"limit": limit, "mode": mode})
         raise
 
 
@@ -748,6 +907,13 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="Maximum number of leads to process in a single run (default: 10).",
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["enrich", "connect_only"],
+        default="enrich",
+        help="Execution mode: enrich (default) or connect_only for enrichment + invite without note.",
+    )
     return parser.parse_args()
 
 
@@ -762,7 +928,8 @@ if __name__ == "__main__":
         asyncio.run(inbox_mode(limit=limit))
     else:
         limit = args.limit if isinstance(args.limit, int) and args.limit > 0 else 10
-        asyncio.run(main(limit=limit))
+        mode = getattr(args, "mode", "enrich")
+        asyncio.run(main(limit=limit, mode=mode))
 
 ###################################################################################################
 # Inbox scanning mode
