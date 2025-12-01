@@ -6,6 +6,7 @@ import path from "path";
 import { revalidatePath } from "next/cache";
 
 import { logger } from "../lib/logger";
+import type { PromptType } from "../lib/promptTypes";
 import { supabaseAdmin } from "../lib/supabaseAdmin";
 
 type DraftInput = {
@@ -27,7 +28,7 @@ export type LinkedinCredentialState = {
   error?: string;
 };
 
-function startDraftAgent(correlationId?: string) {
+function startDraftAgent(correlationId?: string, promptType: PromptType = 1) {
   try {
     const repoRoot = path.resolve(process.cwd(), "..", "..");
     const agentDir = path.resolve(repoRoot, "mcp-server");
@@ -36,9 +37,9 @@ function startDraftAgent(correlationId?: string) {
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-    const args = [agentPath];
+    const args = [agentPath, "--prompt-type", String(promptType)];
 
-    logger.workerSpawn("draft-agent", args, correlationId ? { correlationId } : undefined);
+    logger.workerSpawn("draft-agent", args, correlationId ? { correlationId, promptType } : { promptType });
 
     const proc = spawn(execToUse, args, {
       cwd: repoRoot,
@@ -351,9 +352,14 @@ export async function triggerInboxScan() {
  *
  * This spawns the MCP agent runner which converts ENRICHED leads into drafts
  * and moves them to DRAFT_READY. It runs detached and returns immediately.
+ *
+ * @param promptType - The type of prompt to use:
+ *   1 = Standard Outreach (default)
+ *   2 = Vernetzung Thank-You
+ *   3 = Process Optimization
  */
-export async function triggerDraftGeneration() {
-  startDraftAgent();
+export async function triggerDraftGeneration(promptType: PromptType = 1) {
+  startDraftAgent(undefined, promptType);
 }
 
 export async function triggerFollowupSender() {

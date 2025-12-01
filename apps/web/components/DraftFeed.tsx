@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import { approveAndSendAllDrafts, approveDraft, fetchDraftFeed, regenerateDraft, rejectDraft, triggerDraftGeneration, sendLeadNow, sendAllApproved } from "../app/actions";
+import { PROMPT_TYPE_LABELS } from "../lib/promptTypes";
+import type { PromptType } from "../lib/promptTypes";
 import { supabaseBrowserClient } from "../lib/supabaseClient";
 
 export type DraftWithLead = {
@@ -41,6 +43,7 @@ export function DraftFeed({ drafts }: Props) {
   const [bulkMessage, setBulkMessage] = useState<string | null>(null);
   const [regenerating, setRegenerating] = useState<Set<string>>(new Set());
   const [isPolling, setIsPolling] = useState(false);
+  const [promptType, setPromptType] = useState<PromptType>(1);
   const pollingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const lastDraftCountRef = useRef<number>(drafts.length || 0);
   const isPollingRef = useRef(false);
@@ -214,9 +217,10 @@ export function DraftFeed({ drafts }: Props) {
     setGenPending(true);
     setIsPolling(true);
     try {
-      await triggerDraftGeneration();
+      await triggerDraftGeneration(promptType);
       lastDraftCountRef.current = localDraftsRef.current.length;
-      setGenMessage("Draft generation started. Drafts will appear here automatically as they are ready.");
+      const promptName = PROMPT_TYPE_LABELS[promptType];
+      setGenMessage(`Draft generation started with "${promptName}" style. Drafts will appear here automatically.`);
     } catch (err: any) {
       setGenMessage(err?.message || "Failed to start draft generation.");
       setIsPolling(false);
@@ -307,7 +311,36 @@ export function DraftFeed({ drafts }: Props) {
         <div className="pill">Draft Feed</div>
         <h3 style={{ margin: "10px 0 6px 0" }}>No drafts ready.</h3>
         <div className="muted">When the agent generates drafts, they will appear here.</div>
-        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        <div style={{ marginTop: 12, marginBottom: 12 }}>
+          <label className="muted" style={{ marginRight: 8, fontSize: 13 }}>Message Style:</label>
+          <select
+            value={promptType}
+            onChange={(e) => setPromptType(Number(e.target.value) as PromptType)}
+            disabled={isGenerating}
+            style={{
+              maxWidth: 240,
+              padding: "8px 12px",
+              fontSize: 13,
+              backgroundColor: "rgba(30, 41, 59, 0.95)",
+              color: "#e2e8f0",
+              border: "1px solid rgba(148, 163, 184, 0.2)",
+              borderRadius: 6,
+              cursor: "pointer",
+              outline: "none",
+              appearance: "none",
+              WebkitAppearance: "none",
+              backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E")`,
+              backgroundRepeat: "no-repeat",
+              backgroundPosition: "right 10px center",
+              paddingRight: 32,
+            }}
+          >
+            <option value={1} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[1]}</option>
+            <option value={2} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[2]}</option>
+            <option value={3} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[3]}</option>
+          </select>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
             {genPending ? "Starting…" : isPolling ? "Generating…" : "Generate Drafts for ENRICHED Leads"}
           </button>
@@ -337,22 +370,53 @@ export function DraftFeed({ drafts }: Props) {
   return (
     <>
       <div className="card" style={{ marginTop: 20, marginBottom: 12 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
             <div className="pill">Draft Feed</div>
             <h3 style={{ margin: "10px 0 6px 0" }}>Review and approve drafts</h3>
             <div className="muted">Manually trigger draft generation for ENRICHED leads when you are ready.</div>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn warn" onClick={handleBulkApproveSend} disabled={disableBulkSend}>
-              {bulkPending ? "Sending…" : "Approve & Send All"}
-            </button>
-            <button className="btn secondary" onClick={handleSendAllApproved} disabled={bulkPending}>
-              {bulkPending ? "Triggering…" : "Send All Approved"}
-            </button>
-            <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
-              {genPending ? "Starting…" : isPolling ? "Generating…" : "Generate Drafts"}
-            </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <label className="muted" style={{ fontSize: 13 }}>Message Style:</label>
+              <select
+                value={promptType}
+                onChange={(e) => setPromptType(Number(e.target.value) as PromptType)}
+                disabled={isGenerating}
+                style={{
+                  maxWidth: 220,
+                  padding: "8px 12px",
+                  fontSize: 13,
+                  backgroundColor: "rgba(30, 41, 59, 0.95)",
+                  color: "#e2e8f0",
+                  border: "1px solid rgba(148, 163, 184, 0.2)",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  outline: "none",
+                  appearance: "none",
+                  WebkitAppearance: "none",
+                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E")`,
+                  backgroundRepeat: "no-repeat",
+                  backgroundPosition: "right 10px center",
+                  paddingRight: 32,
+                }}
+              >
+                <option value={1} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[1]}</option>
+                <option value={2} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[2]}</option>
+                <option value={3} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[3]}</option>
+              </select>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="btn warn" onClick={handleBulkApproveSend} disabled={disableBulkSend}>
+                {bulkPending ? "Sending…" : "Approve & Send All"}
+              </button>
+              <button className="btn secondary" onClick={handleSendAllApproved} disabled={bulkPending}>
+                {bulkPending ? "Triggering…" : "Send All Approved"}
+              </button>
+              <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
+                {genPending ? "Starting…" : isPolling ? "Generating…" : "Generate Drafts"}
+              </button>
+            </div>
           </div>
         </div>
         {(genMessage || bulkMessage || isGenerating || bulkPending) ? (

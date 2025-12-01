@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -32,8 +33,30 @@ load_dotenv()
 # Initialize logger
 logger = get_logger("mcp-agent")
 
-PROMPT = Path(__file__).parent.joinpath("prompt.txt").read_text()
+# Prompt files mapping: 1=standard, 2=vernetzung (thank-you), 3=process optimization
+PROMPT_FILES = {
+    1: "prompt.txt",
+    2: "prompt_vernetzung.txt",
+    3: "prompt_process.txt",
+}
+
+PROMPT_NAMES = {
+    1: "Standard Outreach",
+    2: "Vernetzung Thank-You",
+    3: "Process Optimization",
+}
+
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+
+def load_prompt(prompt_type: int = 1) -> str:
+    """Load the appropriate prompt file based on prompt_type."""
+    prompt_file = PROMPT_FILES.get(prompt_type, "prompt.txt")
+    prompt_path = Path(__file__).parent.joinpath(prompt_file)
+    if not prompt_path.exists():
+        logger.warn(f"Prompt file not found, falling back to default", data={"requested": prompt_file})
+        prompt_path = Path(__file__).parent.joinpath("prompt.txt")
+    return prompt_path.read_text()
 
 
 def guess_company_type(profile: Dict[str, Any]) -> str:
@@ -54,7 +77,14 @@ def choose_case_study(ai_tags: Dict[str, Any]) -> str:
     return "General"
 
 
-def build_prompt(lead: Dict[str, Any], case_study: str, company_type: str, example: str, category: str) -> str:
+def build_prompt(
+    lead: Dict[str, Any],
+    case_study: str,
+    company_type: str,
+    example: str,
+    category: str,
+    prompt_text: str,
+) -> str:
     """Build the prompt with a specific example injected."""
     profile_json = json.dumps(lead.get("profile_data", {}), indent=2)
     activity_json = json.dumps(lead.get("recent_activity", []), indent=2)
@@ -63,8 +93,8 @@ def build_prompt(lead: Dict[str, Any], case_study: str, company_type: str, examp
     last_name = (lead.get("last_name") or "").strip()
     full_name = " ".join([p for p in [first_name, last_name] if p]).strip()
 
-    # Inject the selected example into the prompt
-    personalized_prompt = PROMPT.replace("{SELECTED_EXAMPLE}", example).replace("{EXAMPLE_CATEGORY}", category)
+    # Inject the selected example into the prompt (if placeholders exist)
+    personalized_prompt = prompt_text.replace("{SELECTED_EXAMPLE}", example).replace("{EXAMPLE_CATEGORY}", category)
 
     return (
         f"{personalized_prompt}\n\n"
@@ -158,7 +188,24 @@ def sanitize_no_dashes(text: str) -> str:
 
 
 def main() -> None:
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Generate drafts for ENRICHED leads")
+    parser.add_argument(
+        "--prompt-type",
+        type=int,
+        default=1,
+        choices=[1, 2, 3],
+        help="Prompt type: 1=Standard Outreach, 2=Vernetzung Thank-You, 3=Process Optimization",
+    )
+    args = parser.parse_args()
+    prompt_type = args.prompt_type
+    
+    # Load the appropriate prompt
+    prompt_text = load_prompt(prompt_type)
+    prompt_name = PROMPT_NAMES.get(prompt_type, "Standard Outreach")
+    
     logger.operation_start("draft-generation")
+    logger.info(f"Using prompt type: {prompt_name}", data={"promptType": prompt_type, "promptName": prompt_name})
     
     try:
         api_key = os.getenv("OPENAI_API_KEY")
@@ -174,7 +221,7 @@ def main() -> None:
             logger.info("No ENRICHED leads found")
             return
         
-        logger.info(f"Processing {len(leads)} ENRICHED leads", data={"count": len(leads)})
+        logger.info(f"Processing {len(leads)} ENRICHED leads", data={"count": len(leads), "promptType": prompt_type})
 
         # Initialize example pool
         example_pool = get_example_pool()
@@ -205,7 +252,7 @@ def main() -> None:
             # Update rotation state for next lead
             update_rotation_state(client, new_category_index)
 
-            prompt = build_prompt(lead, case_study, company_type, example_text, category_name)
+            prompt = build_prompt(lead, case_study, company_type, example_text, category_name, prompt_text)
             
             logger.ai_request(OPENAI_MODEL, {"leadId": lead_id}, prompt[:200])
             
@@ -227,7 +274,7 @@ def main() -> None:
                             "in irgendeinem Ausgabefeld (opener, body, cta, full_message). Nutze stattdessen Leerzeichen."
                         ),
                     },
-                    {"role": "system", "content": PROMPT},
+                    {"role": "system", "content": prompt_text},
                     {"role": "user", "content": prompt},
                 ],
             )
