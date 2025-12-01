@@ -2,6 +2,9 @@ import { DraftFeed } from "../components/DraftFeed";
 import { LeadList } from "../components/LeadList";
 import { fetchDraftFeed, fetchLeadList } from "./actions";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export default async function MissionControlPage() {
   // Only show enriched leads in the mission control table to reduce noise.
   const [drafts, leadResult] = await Promise.all([

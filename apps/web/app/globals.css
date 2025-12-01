@@ -234,16 +234,35 @@ a {
 
 .brand {
   display: inline-flex;
-  align-items: center;
+  align-items: flex-start;
+  flex-direction: column;
   padding: 4px 0;
-  line-height: 0;
+  line-height: 1.1;
 }
 
-.brand-logo {
-  height: clamp(28px, 3vw, 38px);
-  width: auto;
-  display: block;
-  object-fit: contain;
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.brand-name {
+  font-size: clamp(18px, 2vw, 22px);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  background: linear-gradient(135deg, #22d3ee, #a855f7);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  color: transparent;
+}
+
+.brand-tagline {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 700;
 }
 
 .nav-links {

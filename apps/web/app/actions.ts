@@ -55,16 +55,17 @@ function startDraftAgent(correlationId?: string, promptType: PromptType = 1) {
 
 export async function fetchDraftFeed() {
   const correlationId = logger.actionStart("fetchDraftFeed");
+  const statuses = ["DRAFT_READY", "APPROVED"] as const;
   
   try {
     const client = supabaseAdmin();
     
-    logger.dbQuery("select", "leads", { correlationId }, { status: ["DRAFT_READY", "APPROVED"], limit: 50 });
+    logger.dbQuery("select", "leads", { correlationId }, { status: statuses, limit: 50 });
     
     const { data, error } = await client
       .from("leads")
       .select("id, linkedin_url, first_name, last_name, company_name, status, sent_at, profile_data, recent_activity, drafts(*)")
-      .in("status", ["DRAFT_READY", "APPROVED"]) // include approved-but-not-sent
+      .in("status", statuses)
       .order("updated_at", { ascending: false })
       .limit(50);
 
@@ -78,12 +79,12 @@ export async function fetchDraftFeed() {
     
     const result = (data || []).flatMap((lead) => {
       const drafts = lead.drafts || [];
-      logger.debug("Processing lead", { correlationId, leadId: lead.id }, { 
-        status: lead.status, 
+      logger.debug("Processing lead", { correlationId, leadId: lead.id }, {
+        status: lead.status,
         draftCount: drafts.length,
-        hasDrafts: Array.isArray(drafts)
+        hasDrafts: Array.isArray(drafts),
       });
-      
+
       return drafts.map((draft: any) => ({
         leadId: lead.id,
         draftId: draft.id,
@@ -139,6 +140,7 @@ export type LeadListResult = {
 
 export type LeadFilters = {
   status?: string;
+  statuses?: string[];
   company?: string;
   name?: string;
   linkedin?: string;
@@ -168,8 +170,10 @@ export async function fetchLeadList(
 
     // Apply optional filters
     if (filters) {
-      const { status, company, name, linkedin } = filters;
-      if (status) {
+      const { status, statuses, company, name, linkedin } = filters;
+      if (Array.isArray(statuses) && statuses.length) {
+        query = query.in("status", statuses);
+      } else if (status) {
         query = query.eq("status", status);
       }
       if (company) {
