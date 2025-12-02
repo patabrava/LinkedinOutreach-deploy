@@ -26,7 +26,7 @@ logger = get_logger("sender")
 
 # Reuse the scraper's persisted auth state to avoid drift between workers.
 AUTH_STATE_PATH = (Path(__file__).parent.parent / "scraper" / "auth.json").resolve()
-DAILY_SEND_DEFAULT = 100
+DAILY_SEND_DEFAULT = 42
 
 
 def get_supabase_client() -> Client:
@@ -227,9 +227,9 @@ async def open_message_surface(page: Page) -> str:
     clicking buttons in the messaging inbox or other parts of the page.
     """
     await wiggle_mouse(page)
-    
+
     logger.debug("Starting open_message_surface")
-    
+
     # Scope all interactions to the profile page's main content area
     # Try lazy-column test ID first, with fallback to main profile section
     profile_container = None
@@ -249,48 +249,13 @@ async def open_message_surface(page: Page) -> str:
             # Last resort: use page itself (risky but better than failing)
             profile_container = page
             logger.warn("Using page-level selectors as last resort")
-    
-    # PATH 1: Try Message button/link (for existing connections)
+
+    # PATH 1: Try Message link (for existing connections)
     # Scoped to profile container to avoid inbox Message buttons
-    # LinkedIn uses both buttons and links for "Nachricht" depending on the profile layout
-    
-    # First try button with personalized name pattern "Nachricht an {Name}" or generic "Nachricht"
-    message_btn = profile_container.get_by_role("button", name=re.compile(r"(Message|Nachricht\s*(an\s+\w+)?)", re.I))
-    message_btn_count = await message_btn.count()
-    logger.debug("Message button check (container)", data={"count": message_btn_count})
-    
-    # If not found in container, try page-level (fallback for edge cases)
-    if message_btn_count == 0:
-        message_btn = page.get_by_role("button", name=re.compile(r"(Message|Nachricht\s*(an\s+\w+)?)", re.I))
-        message_btn_count = await message_btn.count()
-        logger.debug("Message button check (page-level fallback)", data={"count": message_btn_count})
-    
-    if message_btn_count > 0:
-        logger.debug("Found Message button - user is in network")
-        try:
-            await message_btn.first.click(timeout=8_000)
-            # Wait for messaging overlay
-            await page.wait_for_selector(
-                "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
-                timeout=10_000,
-            )
-            await random_pause()
-            logger.debug("Message button path successful")
-            return "message"
-        except Exception as e:
-            logger.debug("Message button path failed", error=e)
-    
-    # Then try link (fallback)
     message_link = profile_container.get_by_role("link", name=re.compile(r"(Message|Nachricht)", re.I))
     message_link_count = await message_link.count()
-    logger.debug("Message link check (container)", data={"count": message_link_count})
-    
-    # Page-level fallback for link
-    if message_link_count == 0:
-        message_link = page.get_by_role("link", name=re.compile(r"(Message|Nachricht)", re.I))
-        message_link_count = await message_link.count()
-        logger.debug("Message link check (page-level fallback)", data={"count": message_link_count})
-    
+    logger.debug(f"Message link check", data={"count": message_link_count})
+
     if message_link_count > 0:
         logger.debug("Found Message link - user is in network")
         try:
@@ -304,30 +269,24 @@ async def open_message_surface(page: Page) -> str:
             logger.debug("Message link path successful")
             return "message"
         except Exception as e:
-            logger.debug("Message link path failed", error=e)
-    
+            logger.debug(f"Message link path failed", error=e)
+
     # PATH 2: Direct invite link inside profile container (Invite <Name> to ...)
     invite_link = profile_container.get_by_role("link", name=re.compile(r"(Invite .+ to|Einladen .+ zu)", re.I))
     invite_link_count = await invite_link.count()
-    logger.debug("Invite link check (container)", data={"count": invite_link_count})
-    
-    # Page-level fallback
-    if invite_link_count == 0:
-        invite_link = page.get_by_role("link", name=re.compile(r"(Invite .+ to|Einladen .+ zu)", re.I))
-        invite_link_count = await invite_link.count()
-        logger.debug("Invite link check (page-level fallback)", data={"count": invite_link_count})
-    
+    logger.debug("Invite link check", data={"count": invite_link_count})
+
     if invite_link_count > 0:
         logger.debug("Found invite link inside profile container")
         try:
             await invite_link.first.click(timeout=8_000)
             await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
             await random_pause()
-            
+
             add_note_btn = page.get_by_role("button", name=re.compile(r"(Nachricht hinzufügen|Add a note|Notiz hinzufügen)", re.I))
             add_note_count = await add_note_btn.count()
             logger.debug("Add note button after invite link", data={"count": add_note_count})
-            
+
             if add_note_count > 0:
                 await add_note_btn.first.click(timeout=6_000)
                 await page.wait_for_timeout(500)
@@ -337,35 +296,26 @@ async def open_message_surface(page: Page) -> str:
             return "connect"
         except Exception as e:
             logger.debug("Invite link path failed", error=e)
-    
+
     # PATH 3: Direct Vernetzen / Als Kontakt button on profile card
     direct_connect_btn = profile_container.get_by_role(
         "button",
         name=re.compile(r"(Vernetzen|Als Kontakt|als Kontakt)", re.I),
     )
     direct_connect_count = await direct_connect_btn.count()
-    logger.debug("Direct connect button check (container)", data={"count": direct_connect_count})
-    
-    # Page-level fallback
-    if direct_connect_count == 0:
-        direct_connect_btn = page.get_by_role(
-            "button",
-            name=re.compile(r"(Vernetzen|Als Kontakt|als Kontakt)", re.I),
-        )
-        direct_connect_count = await direct_connect_btn.count()
-        logger.debug("Direct connect button check (page-level fallback)", data={"count": direct_connect_count})
-    
+    logger.debug("Direct connect button check", data={"count": direct_connect_count})
+
     if direct_connect_count > 0:
         logger.debug("Clicking direct connect button on profile")
         try:
             await direct_connect_btn.first.click(timeout=8_000)
             await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
             await random_pause()
-            
+
             add_note_btn = page.get_by_role("button", name=re.compile(r"(Nachricht hinzufügen|Add a note|Notiz hinzufügen)", re.I))
             add_note_count = await add_note_btn.count()
             logger.debug("Add note button after direct connect", data={"count": add_note_count})
-            
+
             if add_note_count > 0:
                 await add_note_btn.first.click(timeout=6_000)
                 await page.wait_for_timeout(500)
@@ -375,43 +325,37 @@ async def open_message_surface(page: Page) -> str:
             return "connect"
         except Exception as e:
             logger.debug("Direct connect path failed", error=e)
-    
+
     # PATH 4: Try More button -> Invite flow (fallback)
     # Scoped to profile container - allow partial match for "Mehr" or "More"
     more_button = profile_container.get_by_role("button", name=re.compile(r"(More|Mehr)", re.I))
     more_button_count = await more_button.count()
-    logger.debug("More button check (container)", data={"count": more_button_count})
-    
-    # Page-level fallback
-    if more_button_count == 0:
-        more_button = page.get_by_role("button", name=re.compile(r"(More|Mehr)", re.I))
-        more_button_count = await more_button.count()
-        logger.debug("More button check (page-level fallback)", data={"count": more_button_count})
-    
+    logger.debug(f"More button check", data={"count": more_button_count})
+
     if more_button_count > 0:
         logger.debug("Found More button - attempting invite flow")
         try:
             await more_button.first.click(timeout=8_000)
             await page.wait_for_timeout(300)
-            
+
             # Look for Invite/Connect menuitem (can include name like "Invite Antonio-Jean")
             invite_menuitem = page.get_by_role("menuitem", name=re.compile(r"(Invite|Einladen|Connect|Vernetzen)", re.I))
             invite_count = await invite_menuitem.count()
             logger.debug(f"Invite menuitem check", data={"count": invite_count})
-            
+
             if invite_count > 0:
                 logger.debug("Clicking Invite menuitem")
                 await invite_menuitem.first.click(timeout=8_000)
-                
+
                 # Wait for connection dialog
                 await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
                 await random_pause()
-                
+
                 # Click "Add a note" button
                 add_note_btn = page.get_by_role("button", name=re.compile(r"(Nachricht hinzufügen|Add a note|Notiz hinzufügen)", re.I))
                 add_note_count = await add_note_btn.count()
                 logger.debug(f"Add a note button check", data={"count": add_note_count})
-                
+
                 if add_note_count > 0:
                     logger.debug("Clicking Add a note button")
                     await add_note_btn.first.click(timeout=6_000)
@@ -425,7 +369,7 @@ async def open_message_surface(page: Page) -> str:
                 logger.warn("No Invite menuitem found in More dropdown")
         except Exception as e:
             logger.debug(f"More button path failed", error=e)
-    
+
     logger.error("All messaging surface paths exhausted")
     raise RuntimeError("No messaging surface found. Check if profile is 3rd-degree or has restrictions.")
 
@@ -439,21 +383,21 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
         surface: Type of surface opened ("message" or "connect_note")
         draft: Optional draft data to extract opener for connection notes
     """
-    
+
     if surface == "connect_note":
         # Add-a-note modal: Use the specific textbox selector
         logger.debug("Sending connection request with note")
-        
+
         # LinkedIn limits note to 300 characters
         safe_message = (message or "").strip()
-        
+
         if len(safe_message) > 300:
             logger.warn(f"Message too long ({len(safe_message)} chars), truncating to 300")
             # Intelligently truncate at sentence/word boundary
             safe_message = safe_message[:297] + "..."
         else:
             logger.debug(f"Message fits in connection note limit ({len(safe_message)}/300 chars)")
-        
+
         # Use the exact selector provided by user (support English & German labels)
         note_box_selectors = [
             lambda: page.get_by_role("textbox", name=re.compile(r"Please limit personal note to", re.I)),
@@ -476,7 +420,7 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
             except Exception:
                 continue
         logger.debug(f"Note textbox check", data={"count": note_box_count})
-        
+
         if note_box and note_box_count > 0:
             logger.debug(f"Typing note textbox with {len(safe_message)} characters")
             target = note_box.first
@@ -497,18 +441,18 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
                 pass
             await human_type(page, safe_message)
             await random_pause(0.5, 1.0)
-            
+
             # CRITICAL: Verify the full message was typed before clicking send
             # Wait for DOM to stabilize and verify text length
             await page.wait_for_timeout(500)
-            
+
             # Verify the text was actually entered
             for verification_attempt in range(10):
                 try:
                     actual_text = await target.evaluate("el => el.value || el.textContent || ''") or ""
                     actual_length = len(actual_text.strip())
                     expected_length = len(safe_message)
-                    
+
                     if actual_length >= expected_length - 2:  # Allow 1-2 char margin for encoding
                         logger.debug(f"Text verification passed", data={"expected": expected_length, "actual": actual_length})
                         break
@@ -523,29 +467,29 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
         else:
             logger.error("Note textbox not found in connect dialog")
             raise RuntimeError("Could not find note textbox in connection request dialog")
-        
+
         # Find and click Send button in the dialog
         dialog = page.locator("section[role='dialog'], div[role='dialog']").first
         # Support both English and German
         send_btn = dialog.locator(
             "button:has-text('Send invitation'), button:has-text('Send'), button:has-text('Einladung senden'), button:has-text('Senden'), button[aria-label*='Send']"
         ).first
-        
+
         # Wait for button to be enabled
         try:
             await send_btn.wait_for(state="visible", timeout=10_000)
             logger.debug("Send button found, waiting for it to be enabled")
-            
+
             # Wait for button to be enabled AND give extra time for any final DOM updates
             for attempt in range(30):
                 if await send_btn.is_enabled():
                     logger.debug(f"Send button enabled after {attempt} attempts")
                     break
                 await page.wait_for_timeout(300)
-            
+
             # Additional safety pause before clicking to ensure typing is truly complete
             await page.wait_for_timeout(800)
-            
+
             await send_btn.click()
             logger.debug("Send button clicked")
             await random_pause()
@@ -553,10 +497,10 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
         except Exception as e:
             logger.error("Failed to click Send button in connect dialog", error=e)
             raise
-    
+
     # Direct message composer path (for existing connections)
     logger.debug("Sending direct message")
-    
+
     # Find message input box
     editor_candidates = [
         "div.msg-form__contenteditable[contenteditable='true']",
@@ -565,7 +509,7 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
         "div[aria-label*='Write a message'][contenteditable='true']",
         "div[role='textbox'][contenteditable='true']:not([id^='g-recaptcha'])",
     ]
-    
+
     editor = None
     for sel in editor_candidates:
         try:
@@ -576,26 +520,26 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
             break
         except Exception:
             continue
-    
+
     if editor is None:
         logger.error("No message editor found")
         raise RuntimeError("Could not find message input box")
-    
+
     await editor.click()
     await human_type(page, message)
     await random_pause()
-    
+
     # CRITICAL: Verify the full message was typed before clicking send
     # Wait for DOM to stabilize and verify text length
     await page.wait_for_timeout(500)
-    
+
     # Verify the text was actually entered
     for verification_attempt in range(10):
         try:
             actual_text = await editor.evaluate("el => el.value || el.textContent || el.innerText || ''") or ""
             actual_length = len(actual_text.strip())
             expected_length = len(message.strip())
-            
+
             if actual_length >= expected_length - 2:  # Allow 1-2 char margin for encoding
                 logger.debug(f"Direct message text verification passed", data={"expected": expected_length, "actual": actual_length})
                 break
@@ -607,15 +551,15 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
             await page.wait_for_timeout(200)
     else:
         logger.warn("Could not verify full direct message text was entered, proceeding anyway")
-    
+
     # Find and click Send button
     send_btn = page.locator("button:has-text('Send'), button:has-text('Senden'), button[aria-label*='Send']").first
     try:
         await send_btn.wait_for(state="visible", timeout=10_000)
-        
+
         # Additional safety pause before clicking to ensure typing is truly complete
         await page.wait_for_timeout(800)
-        
+
         await send_btn.click()
         logger.debug("Direct message sent")
         await random_pause()
@@ -684,7 +628,7 @@ async def send_connection_request(page: Page) -> bool:
 async def process_one(context: BrowserContext, client: Client, lead: Dict[str, Any]) -> None:
     lead_id = lead["id"]
     logger.message_send_start(lead_id, {"url": lead.get("linkedin_url")})
-    
+
     draft = fetch_draft(client, lead_id)
     if not draft:
         logger.error("Lead has no draft to send", {"leadId": lead_id})
@@ -692,7 +636,7 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
 
     message = build_message(draft)
     logger.message_send_start(lead_id, message_preview=message)
-    
+
     page = await context.new_page()
     # Normalize to https to reduce redirects
     url = str(lead["linkedin_url"]).replace("http://", "https://")
@@ -755,16 +699,16 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
         except Exception:
             pass
         raise
-    
+
     try:
         await send_message(page, message, surface, draft)
     except Exception as e:
         logger.error(f"Failed to send message through surface", {"leadId": lead_id}, error=e)
         raise
-    
+
     mark_sent(client, lead_id)
     await page.close()
-    
+
     logger.message_send_complete(lead_id)
     logger.info(f"Message sent successfully", {"leadId": lead_id})
 
@@ -809,9 +753,9 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
     lead = (followup.get("lead") or {})
     lead_id = lead.get("id")
     linkedin_url = str(lead.get("linkedin_url") or "").replace("http://", "https://")
-    
+
     logger.info(f"Processing followup", {"followupId": followup_id, "leadId": lead_id})
-    
+
     if not linkedin_url:
         logger.error("Followup has no linked lead URL", {"followupId": followup_id})
         raise RuntimeError("Followup has no linked lead URL")
@@ -822,17 +766,17 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
         raise RuntimeError("Followup has no draft_text to send")
 
     logger.message_send_start(lead_id or "unknown", {"followupId": followup_id}, message)
-    
+
     page = await context.new_page()
     await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
     await page.wait_for_timeout(1_000)
     surface = await open_message_surface(page)
     logger.debug(f"Message surface opened for followup", {"followupId": followup_id}, {"surface": surface})
-    
+
     await send_message(page, message, surface)
     await page.close()
     mark_followup_sent(client, followup_id, message)
-    
+
     logger.message_send_complete(lead_id or "unknown", {"followupId": followup_id})
     logger.info(f"Followup sent successfully", {"followupId": followup_id, "leadId": lead_id})
 
@@ -973,16 +917,17 @@ async def main() -> None:
 
     try:
         client = get_supabase_client()
-        # Compute daily limit with a hard minimum of 100 to keep throughput aligned with the higher target
+       
+        # Compute daily limit with a hard minimum of 42 to avoid getting stuck at 20
         env_limit = os.getenv("DAILY_SEND_LIMIT")
         try:
             parsed_limit = int(env_limit) if env_limit else DAILY_SEND_DEFAULT
         except Exception:
             parsed_limit = DAILY_SEND_DEFAULT
-        daily_limit = max(parsed_limit, 100)
+        daily_limit = max(parsed_limit, 42)
         logger.info("Daily send limit computed", data={"limit": daily_limit, "env": env_limit, "default": DAILY_SEND_DEFAULT})
         already_sent = sent_today_count(client)
-        
+
         if already_sent >= daily_limit and not args.followup:
             logger.warn("Daily send limit reached", data={"limit": daily_limit, "sent": already_sent})
             return
@@ -1001,20 +946,20 @@ async def main() -> None:
             if not items:
                 logger.info("No APPROVED followups to send")
                 return
-                
+
             logger.info(f"Processing {len(items)} followups")
             playwright, browser, context = await open_browser(headless=False)
             try:
                 logger.info("Browser opened, authenticating...")
                 await ensure_linkedin_auth(context, client)
-                
+
                 for fu in items:
                     try:
                         await process_followup_one(context, client, fu)
                     except Exception as exc:
                         logger.error(f"Failed to send followup", {"followupId": fu.get('id')}, error=exc)
                     await random_pause(2, 4)
-                
+
                 logger.operation_complete("sender-followup", result={"sent": len(items)})
             finally:
                 await shutdown(playwright, browser)
@@ -1040,11 +985,11 @@ async def main() -> None:
         try:
             logger.info("Browser opened, authenticating...")
             await ensure_linkedin_auth(context, client)
-            
+
             # Mark all leads as PROCESSING immediately to prevent re-fetching
             for lead in leads_to_send:
                 mark_processing(client, lead["id"])
-            
+
             success_count = 0
             for lead in leads_to_send:
                 lead_id = lead["id"]
@@ -1054,7 +999,7 @@ async def main() -> None:
                 except Exception as exc:
                     error_msg = str(exc)
                     logger.error(f"Failed to send message", {"leadId": lead_id}, error=exc)
-                    
+
                     # Determine if this is a permanent failure or retriable error
                     permanent_failure_indicators = [
                         "No messaging surface found",
@@ -1062,9 +1007,9 @@ async def main() -> None:
                         "restrictions",
                         "Lead has no draft",
                     ]
-                    
+
                     is_permanent = any(indicator in error_msg for indicator in permanent_failure_indicators)
-                    
+
                     if is_permanent:
                         # Permanent failure - mark as FAILED so we don't retry
                         mark_failed(client, lead_id, error_msg)
@@ -1072,9 +1017,9 @@ async def main() -> None:
                         # Retriable error - mark as APPROVED for manual retry or debugging
                         client.table("leads").update({"status": "APPROVED"}).eq("id", lead_id).execute()
                         logger.info(f"Lead marked as APPROVED for retry", {"leadId": lead_id})
-                
+
                 await random_pause(2, 4)
-            
+
             logger.operation_complete("sender-outreach", result={"sent": success_count, "total": len(leads_to_send)})
         finally:
             await shutdown(playwright, browser)
