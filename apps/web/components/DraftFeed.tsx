@@ -1,8 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { approveAndSendAllDrafts, approveDraft, fetchDraftFeed, regenerateDraft, rejectDraft, triggerDraftGeneration, sendLeadNow, sendAllApproved } from "../app/actions";
+import { OUTREACH_MODE_LABELS } from "../lib/outreachModes";
+import type { OutreachMode } from "../lib/outreachModes";
 import { PROMPT_TYPE_LABELS } from "../lib/promptTypes";
 import type { PromptType } from "../lib/promptTypes";
 import { supabaseBrowserClient } from "../lib/supabaseClient";
@@ -28,12 +31,16 @@ export type DraftWithLead = {
 
 type Props = {
   drafts: DraftWithLead[];
+  initialOutreachMode?: OutreachMode;
 };
 
 const POLL_INTERVAL_MS = 5000;
 const POLL_TIMEOUT_MS = 2 * 60 * 1000;
 
-export function DraftFeed({ drafts }: Props) {
+export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: Props) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [localDrafts, setLocalDrafts] = useState<DraftWithLead[]>([]);
   const localDraftsRef = useRef<DraftWithLead[]>(drafts);
   const [loading, setLoading] = useState(true);
@@ -44,17 +51,18 @@ export function DraftFeed({ drafts }: Props) {
   const [regenerating, setRegenerating] = useState<Set<string>>(new Set());
   const [isPolling, setIsPolling] = useState(false);
   const [promptType, setPromptType] = useState<PromptType>(1);
+  const [outreachMode, setOutreachMode] = useState<OutreachMode>(initialOutreachMode);
   const pollingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const lastDraftCountRef = useRef<number>(drafts.length || 0);
   const isPollingRef = useRef(false);
   const regeneratingRef = useRef(regenerating);
 
-  const fetchDrafts = useCallback(async (showLoading = false) => {
+  const fetchDrafts = useCallback(async (showLoading = false, mode?: OutreachMode) => {
     if (showLoading) {
       setLoading(true);
     }
     try {
-      const mapped = await fetchDraftFeed();
+      const mapped = await fetchDraftFeed(mode ?? outreachMode);
       const previousCount = lastDraftCountRef.current;
       lastDraftCountRef.current = mapped.length;
 
@@ -97,12 +105,17 @@ export function DraftFeed({ drafts }: Props) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [outreachMode]);
 
-  // Fetch existing drafts on mount
+  // Keep outreachMode in sync with server-provided initial value
   useEffect(() => {
-    fetchDrafts(true);
-  }, [fetchDrafts]);
+    setOutreachMode(initialOutreachMode);
+  }, [initialOutreachMode]);
+
+  // Fetch existing drafts on mount and when outreach mode changes
+  useEffect(() => {
+    fetchDrafts(true, outreachMode);
+  }, [fetchDrafts, outreachMode]);
 
   useEffect(() => {
     localDraftsRef.current = localDrafts;
@@ -232,17 +245,37 @@ export function DraftFeed({ drafts }: Props) {
   const isGenerating = genPending || isPolling;
   const disableBulkSend = bulkPending || isGenerating || !localDrafts.length;
 
+  const generateButtonLabel = outreachMode === "message_only" ? "Prepare Message Drafts" : "Generate Drafts";
+
+  const updateUrlOutreachMode = (mode: OutreachMode) => {
+    const params = new URLSearchParams(searchParams?.toString() || "");
+    if (mode === "connect_message") {
+      params.delete("outreachMode");
+    } else {
+      params.set("outreachMode", mode);
+    }
+    const query = params.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+  };
+
+  const handleOutreachModeChange = (mode: OutreachMode) => {
+    setOutreachMode(mode);
+    updateUrlOutreachMode(mode);
+  };
+
   const handleSendAllApproved = async () => {
     setBulkMessage(null);
     setBulkPending(true);
     try {
-      const result = await sendAllApproved();
+      const result = await sendAllApproved(outreachMode);
       const msg = result?.senderTriggered
-        ? "Triggered sender for approved leads."
-        : "No approved leads to send.";
+        ? outreachMode === "message_only" 
+          ? "Triggered sender for pending connections (message-only mode)."
+          : "Triggered sender for approved leads."
+        : "No leads to send.";
       setBulkMessage(msg);
     } catch (err: any) {
-      setBulkMessage(err?.message || "Failed to trigger sending for approved leads.");
+      setBulkMessage(err?.message || "Failed to trigger sending.");
     } finally {
       setBulkPending(false);
       fetchDrafts(true);
@@ -309,43 +342,84 @@ export function DraftFeed({ drafts }: Props) {
     return (
       <div className="card" style={{ marginTop: 20 }}>
         <div className="pill">Draft Feed</div>
-        <h3 style={{ margin: "10px 0 6px 0" }}>No drafts ready.</h3>
-        <div className="muted">When the agent generates drafts, they will appear here.</div>
-        <div style={{ marginTop: 12, marginBottom: 12 }}>
-          <label className="muted" style={{ marginRight: 8, fontSize: 13 }}>Message Style:</label>
-          <select
-            value={promptType}
-            onChange={(e) => setPromptType(Number(e.target.value) as PromptType)}
-            disabled={isGenerating}
-            style={{
-              maxWidth: 240,
-              padding: "8px 12px",
-              fontSize: 13,
-              backgroundColor: "rgba(30, 41, 59, 0.95)",
-              color: "#e2e8f0",
-              border: "1px solid rgba(148, 163, 184, 0.2)",
-              borderRadius: 6,
-              cursor: "pointer",
-              outline: "none",
-              appearance: "none",
-              WebkitAppearance: "none",
-              backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E")`,
-              backgroundRepeat: "no-repeat",
-              backgroundPosition: "right 10px center",
-              paddingRight: 32,
-            }}
-          >
-            <option value={1} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[1]}</option>
-            <option value={2} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[2]}</option>
-            <option value={3} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[3]}</option>
-          </select>
+        <h3 style={{ margin: "10px 0 6px 0" }}>
+          {outreachMode === "message_only" ? "No pending connections." : "No drafts ready."}
+        </h3>
+        <div className="muted">
+          {outreachMode === "message_only" 
+            ? "When connections are accepted, leads will appear here for messaging."
+            : "When the agent generates drafts, they will appear here."}
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ marginTop: 12, marginBottom: 12, display: "flex", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <label className="muted" style={{ fontSize: 13 }}>Outreach Style:</label>
+            <select
+              value={outreachMode}
+              onChange={(e) => handleOutreachModeChange(e.target.value as OutreachMode)}
+              disabled={isGenerating}
+              style={{
+                maxWidth: 200,
+                padding: "8px 12px",
+                fontSize: 13,
+                backgroundColor: outreachMode === "message_only" ? "rgba(59, 130, 246, 0.2)" : "rgba(30, 41, 59, 0.95)",
+                color: "#e2e8f0",
+                border: outreachMode === "message_only" ? "1px solid rgba(59, 130, 246, 0.5)" : "1px solid rgba(148, 163, 184, 0.2)",
+                borderRadius: 6,
+                cursor: "pointer",
+                outline: "none",
+                appearance: "none",
+                WebkitAppearance: "none",
+                backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E")`,
+                backgroundRepeat: "no-repeat",
+                backgroundPosition: "right 10px center",
+                paddingRight: 32,
+              }}
+            >
+              <option value="connect_message" style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{OUTREACH_MODE_LABELS.connect_message}</option>
+              <option value="message_only" style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{OUTREACH_MODE_LABELS.message_only}</option>
+            </select>
+          </div>
+          {outreachMode === "connect_message" && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <label className="muted" style={{ fontSize: 13 }}>Message Style:</label>
+              <select
+                value={promptType}
+                onChange={(e) => setPromptType(Number(e.target.value) as PromptType)}
+                disabled={isGenerating}
+                style={{
+                  maxWidth: 200,
+                  padding: "8px 12px",
+                  fontSize: 13,
+                  backgroundColor: "rgba(30, 41, 59, 0.95)",
+                  color: "#e2e8f0",
+                  border: "1px solid rgba(148, 163, 184, 0.2)",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  outline: "none",
+                  appearance: "none",
+                  WebkitAppearance: "none",
+                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E")`,
+                  backgroundRepeat: "no-repeat",
+                  backgroundPosition: "right 10px center",
+                  paddingRight: 32,
+                }}
+              >
+                <option value={1} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[1]}</option>
+                <option value={2} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[2]}</option>
+                <option value={3} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[3]}</option>
+              </select>
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
-            {genPending ? "Starting…" : isPolling ? "Generating…" : "Generate Drafts for ENRICHED Leads"}
+            {genPending ? "Starting…" : isPolling ? "Generating…" : generateButtonLabel}
           </button>
           <button className="btn warn" onClick={handleBulkApproveSend} disabled={disableBulkSend}>
             {bulkPending ? "Sending…" : "Approve & Send All"}
+          </button>
+          <button className="btn secondary" onClick={handleSendAllApproved} disabled={bulkPending}>
+            {bulkPending ? "Triggering…" : outreachMode === "message_only" ? "Send to Accepted" : "Send All Approved"}
           </button>
           {genMessage ? (
             <span className="muted" style={{ marginLeft: 6 }} aria-live="polite">
@@ -377,34 +451,64 @@ export function DraftFeed({ drafts }: Props) {
             <div className="muted">Manually trigger draft generation for ENRICHED leads when you are ready.</div>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <label className="muted" style={{ fontSize: 13 }}>Message Style:</label>
-              <select
-                value={promptType}
-                onChange={(e) => setPromptType(Number(e.target.value) as PromptType)}
-                disabled={isGenerating}
-                style={{
-                  maxWidth: 220,
-                  padding: "8px 12px",
-                  fontSize: 13,
-                  backgroundColor: "rgba(30, 41, 59, 0.95)",
-                  color: "#e2e8f0",
-                  border: "1px solid rgba(148, 163, 184, 0.2)",
-                  borderRadius: 6,
-                  cursor: "pointer",
-                  outline: "none",
-                  appearance: "none",
-                  WebkitAppearance: "none",
-                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E")`,
-                  backgroundRepeat: "no-repeat",
-                  backgroundPosition: "right 10px center",
-                  paddingRight: 32,
-                }}
-              >
-                <option value={1} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[1]}</option>
-                <option value={2} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[2]}</option>
-                <option value={3} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[3]}</option>
-              </select>
+            <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <label className="muted" style={{ fontSize: 13 }}>Outreach Style:</label>
+                <select
+                  value={outreachMode}
+                  onChange={(e) => handleOutreachModeChange(e.target.value as OutreachMode)}
+                  disabled={isGenerating}
+                  style={{
+                    maxWidth: 200,
+                    padding: "8px 12px",
+                    fontSize: 13,
+                    backgroundColor: outreachMode === "message_only" ? "rgba(59, 130, 246, 0.2)" : "rgba(30, 41, 59, 0.95)",
+                    color: "#e2e8f0",
+                    border: outreachMode === "message_only" ? "1px solid rgba(59, 130, 246, 0.5)" : "1px solid rgba(148, 163, 184, 0.2)",
+                    borderRadius: 6,
+                    cursor: "pointer",
+                    outline: "none",
+                    appearance: "none",
+                    WebkitAppearance: "none",
+                    backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E")`,
+                    backgroundRepeat: "no-repeat",
+                    backgroundPosition: "right 10px center",
+                    paddingRight: 32,
+                  }}
+                >
+                  <option value="connect_message" style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{OUTREACH_MODE_LABELS.connect_message}</option>
+                  <option value="message_only" style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{OUTREACH_MODE_LABELS.message_only}</option>
+                </select>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <label className="muted" style={{ fontSize: 13 }}>Message Style:</label>
+                <select
+                  value={promptType}
+                  onChange={(e) => setPromptType(Number(e.target.value) as PromptType)}
+                  disabled={isGenerating || outreachMode === "message_only"}
+                  style={{
+                    maxWidth: 200,
+                    padding: "8px 12px",
+                    fontSize: 13,
+                    backgroundColor: "rgba(30, 41, 59, 0.95)",
+                    color: outreachMode === "message_only" ? "#64748b" : "#e2e8f0",
+                    border: "1px solid rgba(148, 163, 184, 0.2)",
+                    borderRadius: 6,
+                    cursor: outreachMode === "message_only" ? "not-allowed" : "pointer",
+                    outline: "none",
+                    appearance: "none",
+                    WebkitAppearance: "none",
+                    backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E")`,
+                    backgroundRepeat: "no-repeat",
+                    backgroundPosition: "right 10px center",
+                    paddingRight: 32,
+                  }}
+                >
+                  <option value={1} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[1]}</option>
+                  <option value={2} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[2]}</option>
+                  <option value={3} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[3]}</option>
+                </select>
+              </div>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button className="btn warn" onClick={handleBulkApproveSend} disabled={disableBulkSend}>
@@ -413,9 +517,11 @@ export function DraftFeed({ drafts }: Props) {
               <button className="btn secondary" onClick={handleSendAllApproved} disabled={bulkPending}>
                 {bulkPending ? "Triggering…" : "Send All Approved"}
               </button>
-              <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
-                {genPending ? "Starting…" : isPolling ? "Generating…" : "Generate Drafts"}
-              </button>
+              {outreachMode === "connect_message" && (
+                <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
+                  {genPending ? "Starting…" : isPolling ? "Generating…" : "Generate Drafts"}
+                </button>
+              )}
             </div>
           </div>
         </div>

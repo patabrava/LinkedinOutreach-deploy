@@ -1,15 +1,26 @@
 import { DraftFeed } from "../components/DraftFeed";
 import { LeadList } from "../components/LeadList";
 import { fetchDraftFeed, fetchLeadList } from "./actions";
+import type { OutreachMode } from "../lib/outreachModes";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-export default async function MissionControlPage() {
-  // Only show enriched leads in the mission control table to reduce noise.
+type PageProps = {
+  searchParams?: {
+    outreachMode?: OutreachMode;
+  };
+};
+
+export default async function MissionControlPage({ searchParams }: PageProps) {
+  const outreachMode: OutreachMode = searchParams?.outreachMode === "message_only" ? "message_only" : "connect_message";
+  const leadStatuses = outreachMode === "message_only"
+    ? ["CONNECT_ONLY_SENT"]
+    : ["ENRICHED", "DRAFT_READY", "APPROVED"];
+
   const [drafts, leadResult] = await Promise.all([
-    fetchDraftFeed(),
-    fetchLeadList(1, 50, { status: "ENRICHED" }),
+    fetchDraftFeed(outreachMode),
+    fetchLeadList(1, 50, { statuses: leadStatuses }),
   ]);
 
   return (
@@ -34,9 +45,14 @@ export default async function MissionControlPage() {
         </div>
       </div>
 
-      <LeadList leads={leadResult.leads} condensed maxRows={8} initialFilters={{ status: "ENRICHED" }} />
+      <LeadList
+        leads={leadResult.leads}
+        condensed
+        maxRows={8}
+        initialFilters={{ status: outreachMode === "message_only" ? "CONNECT_ONLY_SENT" : "ENRICHED" }}
+      />
 
-      <DraftFeed drafts={drafts} />
+      <DraftFeed drafts={drafts} initialOutreachMode={outreachMode} />
     </div>
   );
 }

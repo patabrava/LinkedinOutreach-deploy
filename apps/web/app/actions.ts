@@ -6,6 +6,8 @@ import path from "path";
 import { revalidatePath } from "next/cache";
 
 import { logger } from "../lib/logger";
+import type { OutreachMode } from "../lib/outreachModes";
+import { OUTREACH_MODE_TO_DB } from "../lib/outreachModes";
 import type { PromptType } from "../lib/promptTypes";
 import { supabaseAdmin } from "../lib/supabaseAdmin";
 
@@ -53,21 +55,35 @@ function startDraftAgent(correlationId?: string, promptType: PromptType = 1) {
   }
 }
 
-export async function fetchDraftFeed() {
-  const correlationId = logger.actionStart("fetchDraftFeed");
-  const statuses = ["DRAFT_READY", "APPROVED"] as const;
+export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_message") {
+  const correlationId = logger.actionStart("fetchDraftFeed", {}, { outreachMode });
+  
+  // For message_only mode, fetch CONNECT_ONLY_SENT leads (pending connections that may have been accepted)
+  // For connect_message mode, fetch DRAFT_READY and APPROVED leads (standard draft workflow)
+  const statuses = outreachMode === "message_only" 
+    ? ["CONNECT_ONLY_SENT"] as const
+    : ["DRAFT_READY", "APPROVED"] as const;
+  
+  const dbOutreachMode = outreachMode === "message_only" ? "connect_only" : "message";
   
   try {
     const client = supabaseAdmin();
     
-    logger.dbQuery("select", "leads", { correlationId }, { status: statuses, limit: 50 });
+    logger.dbQuery("select", "leads", { correlationId }, { status: statuses, outreachMode: dbOutreachMode, limit: 50 });
     
-    const { data, error } = await client
+    let query = client
       .from("leads")
       .select("id, linkedin_url, first_name, last_name, company_name, status, sent_at, profile_data, recent_activity, drafts(*)")
       .in("status", statuses)
       .order("updated_at", { ascending: false })
       .limit(50);
+    
+    // For message_only mode, filter by outreach_mode = 'connect_only'
+    if (outreachMode === "message_only") {
+      query = query.eq("outreach_mode", "connect_only");
+    }
+    
+    const { data, error } = await query;
 
     if (error) {
       logger.error("Failed to fetch draft feed", { correlationId }, error);
@@ -85,23 +101,48 @@ export async function fetchDraftFeed() {
         hasDrafts: Array.isArray(drafts),
       });
 
-      return drafts.map((draft: any) => ({
-        leadId: lead.id,
-        draftId: draft.id,
-        opener: draft.opener || "",
-        body: draft.body_text || "",
-        cta: draft.cta_text || "",
-        finalMessage: draft.final_message || "",
-        ctaType: draft.cta_type || "",
-        profile: lead.profile_data || {},
-        activity: lead.recent_activity || [],
-        name: [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim(),
-        headline: lead.profile_data?.headline || "",
-        company: lead.company_name || lead.profile_data?.current_company || "",
-        linkedinUrl: lead.linkedin_url,
-        status: lead.status || "DRAFT_READY",
-        sentAt: lead.sent_at || null,
-      }));
+      if (drafts.length) {
+        return drafts.map((draft: any) => ({
+          leadId: lead.id,
+          draftId: draft.id,
+          opener: draft.opener || "",
+          body: draft.body_text || "",
+          cta: draft.cta_text || "",
+          finalMessage: draft.final_message || "",
+          ctaType: draft.cta_type || "",
+          profile: lead.profile_data || {},
+          activity: lead.recent_activity || [],
+          name: [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim(),
+          headline: lead.profile_data?.headline || "",
+          company: lead.company_name || lead.profile_data?.current_company || "",
+          linkedinUrl: lead.linkedin_url,
+          status: lead.status || "DRAFT_READY",
+          sentAt: lead.sent_at || null,
+        }));
+      }
+
+      if (outreachMode === "message_only") {
+        // Message-only mode surfaces CONNECT_ONLY_SENT leads even without draft rows.
+        return [{
+          leadId: lead.id,
+          draftId: undefined,
+          opener: "",
+          body: "",
+          cta: "",
+          finalMessage: "",
+          ctaType: "",
+          profile: lead.profile_data || {},
+          activity: lead.recent_activity || [],
+          name: [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim(),
+          headline: lead.profile_data?.headline || "",
+          company: lead.company_name || lead.profile_data?.current_company || "",
+          linkedinUrl: lead.linkedin_url,
+          status: lead.status || "CONNECT_ONLY_SENT",
+          sentAt: lead.sent_at || null,
+        }];
+      }
+
+      return [];
     });
     
     logger.actionComplete("fetchDraftFeed", { correlationId }, { count: result.length });
@@ -418,8 +459,8 @@ export async function sendLeadNow(leadId: string) {
   }
 }
 
-export async function sendAllApproved() {
-  const correlationId = logger.actionStart("sendAllApproved");
+export async function sendAllApproved(outreachMode: OutreachMode = "connect_message") {
+  const correlationId = logger.actionStart("sendAllApproved", {}, { outreachMode });
   let senderTriggered = false;
   try {
     const repoRoot = path.resolve(process.cwd(), "..", "..");
@@ -429,9 +470,13 @@ export async function sendAllApproved() {
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-    const args = [senderPath];
+    
+    // For message_only mode, pass --message-only flag to sender
+    const args = outreachMode === "message_only" 
+      ? [senderPath, "--message-only"]
+      : [senderPath];
 
-    logger.workerSpawn("sender", args, { correlationId, mode: "approved" });
+    logger.workerSpawn("sender", args, { correlationId, mode: outreachMode });
 
     const proc = spawn(execToUse, args, {
       cwd: repoRoot,
@@ -441,7 +486,7 @@ export async function sendAllApproved() {
     });
     proc.unref();
     senderTriggered = true;
-    logger.info("Sender worker triggered for all approved", { correlationId, pid: proc.pid });
+    logger.info("Sender worker triggered for all approved", { correlationId, pid: proc.pid, outreachMode });
   } catch (err: any) {
     logger.error("sendAllApproved error", { correlationId }, err);
   } finally {

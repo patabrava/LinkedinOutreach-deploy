@@ -86,6 +86,23 @@ export function LeadList({
   });
   const [sort, setSort] = useState<{ key: SortKey; direction: "asc" | "desc" } | null>(null);
 
+  useEffect(() => {
+    setFilters((prev) => {
+      const next = {
+        status: initialFilters?.status || "",
+        company: initialFilters?.company || "",
+        name: initialFilters?.name || "",
+        linkedin: initialFilters?.linkedin || "",
+      };
+      const isSame =
+        prev.status === next.status &&
+        prev.company === next.company &&
+        prev.name === next.name &&
+        prev.linkedin === next.linkedin;
+      return isSame ? prev : next;
+    });
+  }, [initialFilters?.status, initialFilters?.company, initialFilters?.name, initialFilters?.linkedin]);
+
   const mapLeadToRow = (lead: LeadListRow) => {
     const statusKey = (lead.status || "NEW").toUpperCase();
     const style = statusStyle[statusKey] || { bg: "rgba(255,255,255,0.08)", color: "#cbd5e1" };

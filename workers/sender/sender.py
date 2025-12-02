@@ -141,6 +141,25 @@ def fetch_approved_leads(client: Client, limit: int) -> list[Dict[str, Any]]:
     return rows
 
 
+def fetch_connect_only_sent_leads(client: Client, limit: int) -> list[Dict[str, Any]]:
+    """Fetch leads with status CONNECT_ONLY_SENT and outreach_mode = 'connect_only'."""
+    logger.db_query("select", "leads", {"status": "CONNECT_ONLY_SENT", "outreach_mode": "connect_only", "limit": limit})
+    resp = (
+        client.table("leads")
+        .select("id, linkedin_url, first_name, last_name, company_name")
+        .eq("status", "CONNECT_ONLY_SENT")
+        .eq("outreach_mode", "connect_only")
+        .order("updated_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    rows = resp.data or []
+    logger.db_result("select", "leads", {"status": "CONNECT_ONLY_SENT"}, len(rows))
+    if rows:
+        logger.info(f"Fetched {len(rows)} CONNECT_ONLY_SENT leads for message-only mode")
+    return rows
+
+
 def fetch_next_lead(client: Client) -> Optional[Dict[str, Any]]:
     """Legacy function - fetch a single approved lead."""
     leads = fetch_approved_leads(client, 1)
@@ -478,7 +497,6 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
         # Wait for button to be enabled
         try:
             await send_btn.wait_for(state="visible", timeout=10_000)
-            logger.debug("Send button found, waiting for it to be enabled")
 
             # Wait for button to be enabled AND give extra time for any final DOM updates
             for attempt in range(30):
@@ -781,6 +799,115 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
     logger.info(f"Followup sent successfully", {"followupId": followup_id, "leadId": lead_id})
 
 
+# ------------------------- MESSAGE-ONLY FLOW -------------------------
+async def process_message_only_one(context: BrowserContext, client: Client, lead: Dict[str, Any]) -> str:
+    """Process a CONNECT_ONLY_SENT lead: check if connected, send message if so.
+    
+    Returns:
+        'sent' - message was sent successfully
+        'pending' - connection still pending (Ausstehend), skipped
+        'failed' - could not process
+    """
+    lead_id = lead["id"]
+    first_name = (lead.get("first_name") or "").strip()
+    last_name = (lead.get("last_name") or "").strip()
+    full_name = " ".join([p for p in [first_name, last_name] if p]).strip()
+    
+    logger.message_send_start(lead_id, {"url": lead.get("linkedin_url"), "mode": "message-only"})
+    
+    # Fetch the draft for this lead
+    draft = fetch_draft(client, lead_id)
+    if not draft:
+        logger.warn("No draft found for message-only lead, using default message", {"leadId": lead_id})
+        message = "Freue mich auf den Austausch!"
+    else:
+        message = build_message(draft)
+    
+    page = await context.new_page()
+    url = str(lead["linkedin_url"]).replace("http://", "https://")
+    logger.debug(f"Navigating to profile for message-only", {"leadId": lead_id}, {"url": url})
+    
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        await page.wait_for_timeout(1_500)
+        await random_pause()
+        
+        # Check for pending connection indicator (Ausstehend)
+        pending_indicators = [
+            page.locator("button:has-text('Ausstehend')"),
+            page.locator("button:has-text('Pending')"),
+            page.locator("span:has-text('Ausstehend')"),
+            page.locator("span:has-text('Pending')"),
+        ]
+        
+        for indicator in pending_indicators:
+            try:
+                if await indicator.count() > 0 and await indicator.first.is_visible(timeout=2_000):
+                    logger.info("Connection still pending (Ausstehend), skipping", {"leadId": lead_id})
+                    await page.close()
+                    return "pending"
+            except Exception:
+                continue
+        
+        # Try to find the Message button (Nachricht) - indicates we're connected
+        profile_container = None
+        try:
+            profile_container = page.get_by_test_id("lazy-column")
+            await profile_container.wait_for(state="visible", timeout=5_000)
+        except Exception:
+            try:
+                profile_container = page.locator("main.scaffold-layout__main, section.artdeco-card").first
+                await profile_container.wait_for(state="visible", timeout=5_000)
+            except Exception:
+                profile_container = page
+        
+        # Look for Message link/button (for connected users)
+        message_link = profile_container.get_by_role("link", name=re.compile(r"(Message|Nachricht)", re.I))
+        message_link_count = await message_link.count()
+        
+        if message_link_count > 0:
+            logger.debug("Found Message link - user is connected", {"leadId": lead_id})
+            try:
+                await message_link.first.click(timeout=8_000)
+                await page.wait_for_selector(
+                    "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
+                    timeout=10_000,
+                )
+                await random_pause()
+                
+                # Send the message
+                await send_message(page, message, "message")
+                
+                # Mark as SENT and update connection_accepted_at
+                client.table("leads").update({
+                    "status": "SENT",
+                    "sent_at": datetime.utcnow().isoformat(),
+                    "connection_accepted_at": datetime.utcnow().isoformat(),
+                }).eq("id", lead_id).execute()
+                
+                logger.message_send_complete(lead_id)
+                logger.info("Message sent to connected lead", {"leadId": lead_id})
+                await page.close()
+                return "sent"
+            except Exception as e:
+                logger.error("Failed to send message to connected lead", {"leadId": lead_id}, error=e)
+                await page.close()
+                return "failed"
+        else:
+            # No message button found - might still be pending or profile restricted
+            logger.info("No Message button found, connection may still be pending", {"leadId": lead_id})
+            await page.close()
+            return "pending"
+            
+    except Exception as e:
+        logger.error("Error processing message-only lead", {"leadId": lead_id}, error=e)
+        try:
+            await page.close()
+        except Exception:
+            pass
+        return "failed"
+
+
 def fetch_linkedin_credentials(client: Client) -> Optional[Dict[str, str]]:
     resp = (
         client.table("settings")
@@ -910,9 +1037,10 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description="Send approved drafts or follow-ups via LinkedIn.")
     parser.add_argument("--lead-id", help="Send only this lead id (bypass queue).")
     parser.add_argument("--followup", action="store_true", help="Process APPROVED followups instead of initial outreach.")
+    parser.add_argument("--message-only", action="store_true", help="Process CONNECT_ONLY_SENT leads to send messages to accepted connections.")
     args = parser.parse_args()
 
-    mode = "followup" if args.followup else "outreach"
+    mode = "followup" if args.followup else ("message-only" if args.message_only else "outreach")
     logger.operation_start(f"sender-{mode}", input_data={"lead_id": args.lead_id, "mode": mode})
 
     try:
@@ -961,6 +1089,48 @@ async def main() -> None:
                     await random_pause(2, 4)
 
                 logger.operation_complete("sender-followup", result={"sent": len(items)})
+            finally:
+                await shutdown(playwright, browser)
+                logger.info("Browser closed")
+            return
+
+        if args.message_only:
+            # Process CONNECT_ONLY_SENT leads - send messages to accepted connections
+            leads_to_process = fetch_connect_only_sent_leads(client, remaining)
+            if not leads_to_process:
+                logger.info("No CONNECT_ONLY_SENT leads to process")
+                return
+
+            logger.info(f"Processing {len(leads_to_process)} CONNECT_ONLY_SENT leads in message-only mode")
+            playwright, browser, context = await open_browser(headless=False)
+            try:
+                logger.info("Browser opened, authenticating...")
+                await ensure_linkedin_auth(context, client)
+
+                sent_count = 0
+                pending_count = 0
+                failed_count = 0
+
+                for lead in leads_to_process:
+                    try:
+                        result = await process_message_only_one(context, client, lead)
+                        if result == "sent":
+                            sent_count += 1
+                        elif result == "pending":
+                            pending_count += 1
+                        else:
+                            failed_count += 1
+                    except Exception as exc:
+                        logger.error(f"Failed to process message-only lead", {"leadId": lead.get('id')}, error=exc)
+                        failed_count += 1
+                    await random_pause(2, 4)
+
+                logger.operation_complete("sender-message-only", result={
+                    "sent": sent_count,
+                    "pending": pending_count,
+                    "failed": failed_count,
+                    "total": len(leads_to_process)
+                })
             finally:
                 await shutdown(playwright, browser)
                 logger.info("Browser closed")
