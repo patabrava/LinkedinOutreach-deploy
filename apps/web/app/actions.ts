@@ -18,7 +18,15 @@ type DraftInput = {
   body: string;
   cta: string;
   ctaType?: string;
+  outreachMode?: OutreachMode;
 };
+
+const CONNECT_MESSAGE_FEED_STATUSES = ["DRAFT_READY", "APPROVED"] as const;
+const MESSAGE_ONLY_FEED_STATUSES = [
+  "CONNECT_ONLY_SENT",
+  "MESSAGE_ONLY_READY",
+  "MESSAGE_ONLY_APPROVED",
+] as const;
 
 export type LinkedinCredentialSummary = {
   email?: string;
@@ -30,7 +38,11 @@ export type LinkedinCredentialState = {
   error?: string;
 };
 
-function startDraftAgent(correlationId?: string, promptType: PromptType = 1) {
+function startDraftAgent(
+  correlationId: string | undefined,
+  promptType: PromptType = 1,
+  outreachMode: OutreachMode = "connect_message"
+) {
   try {
     const repoRoot = path.resolve(process.cwd(), "..", "..");
     const agentDir = path.resolve(repoRoot, "mcp-server");
@@ -39,9 +51,19 @@ function startDraftAgent(correlationId?: string, promptType: PromptType = 1) {
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-    const args = [agentPath, "--prompt-type", String(promptType)];
+    const args = [
+      agentPath,
+      "--prompt-type",
+      String(promptType),
+      "--mode",
+      outreachMode === "message_only" ? "connect_only" : "message",
+    ];
 
-    logger.workerSpawn("draft-agent", args, correlationId ? { correlationId, promptType } : { promptType });
+    logger.workerSpawn(
+      "draft-agent",
+      args,
+      correlationId ? { correlationId, promptType, outreachMode } : { promptType, outreachMode }
+    );
 
     const proc = spawn(execToUse, args, {
       cwd: repoRoot,
@@ -58,30 +80,26 @@ function startDraftAgent(correlationId?: string, promptType: PromptType = 1) {
 export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_message") {
   const correlationId = logger.actionStart("fetchDraftFeed", {}, { outreachMode });
   
-  // For message_only mode, fetch CONNECT_ONLY_SENT leads (pending connections that may have been accepted)
-  // For connect_message mode, fetch DRAFT_READY and APPROVED leads (standard draft workflow)
-  const statuses = outreachMode === "message_only" 
-    ? ["CONNECT_ONLY_SENT"] as const
-    : ["DRAFT_READY", "APPROVED"] as const;
+  // Message-only mode surfaces pending connections plus message-only draft stages
+  // Connect+message mode shows standard DRAFT_READY/APPROVED leads
+  const statusList = outreachMode === "message_only" 
+    ? [...MESSAGE_ONLY_FEED_STATUSES]
+    : [...CONNECT_MESSAGE_FEED_STATUSES];
   
-  const dbOutreachMode = outreachMode === "message_only" ? "connect_only" : "message";
+  const dbOutreachMode = OUTREACH_MODE_TO_DB[outreachMode];
   
   try {
     const client = supabaseAdmin();
     
-    logger.dbQuery("select", "leads", { correlationId }, { status: statuses, outreachMode: dbOutreachMode, limit: 50 });
+    logger.dbQuery("select", "leads", { correlationId }, { status: statusList, outreachMode: dbOutreachMode, limit: 50 });
     
     let query = client
       .from("leads")
       .select("id, linkedin_url, first_name, last_name, company_name, status, sent_at, profile_data, recent_activity, drafts(*)")
-      .in("status", statuses)
+      .in("status", statusList)
       .order("updated_at", { ascending: false })
-      .limit(50);
-    
-    // For message_only mode, filter by outreach_mode = 'connect_only'
-    if (outreachMode === "message_only") {
-      query = query.eq("outreach_mode", "connect_only");
-    }
+      .limit(50)
+      .eq("outreach_mode", dbOutreachMode);
     
     const { data, error } = await query;
 
@@ -403,8 +421,8 @@ export async function triggerInboxScan() {
  *   2 = Vernetzung Thank-You
  *   3 = Process Optimization
  */
-export async function triggerDraftGeneration(promptType: PromptType = 1) {
-  startDraftAgent(undefined, promptType);
+export async function triggerDraftGeneration(promptType: PromptType = 1, outreachMode: OutreachMode = "connect_message") {
+  startDraftAgent(undefined, promptType, outreachMode);
 }
 
 export async function triggerFollowupSender() {
@@ -497,6 +515,8 @@ export async function sendAllApproved(outreachMode: OutreachMode = "connect_mess
 
 export async function approveDraft(input: DraftInput) {
   const correlationId = logger.actionStart("approveDraft", { leadId: input.leadId, draftId: input.draftId?.toString() }, input);
+  const mode: OutreachMode = input.outreachMode ?? "connect_message";
+  const approvedStatus = mode === "message_only" ? "MESSAGE_ONLY_APPROVED" : "APPROVED";
   
   try {
     const client = supabaseAdmin();
@@ -539,11 +559,11 @@ export async function approveDraft(input: DraftInput) {
     }
     
     logger.dbResult("update", "drafts", { correlationId, draftId: input.draftId?.toString() });
-    logger.dbQuery("update", "leads", { correlationId, leadId: input.leadId }, { status: "APPROVED" });
+    logger.dbQuery("update", "leads", { correlationId, leadId: input.leadId }, { status: approvedStatus });
 
     const { error: leadErr } = await client
       .from("leads")
-      .update({ status: "APPROVED" })
+      .update({ status: approvedStatus })
       .eq("id", input.leadId);
       
     if (leadErr) {
@@ -553,30 +573,34 @@ export async function approveDraft(input: DraftInput) {
     
     logger.dbResult("update", "leads", { correlationId, leadId: input.leadId });
 
-    // Fire-and-forget: trigger the sender worker to send this lead right away.
-    try {
-      const repoRoot = path.resolve(process.cwd(), "..", "..");
-      const senderDir = path.resolve(repoRoot, "workers", "sender");
-      const senderPath = path.join(senderDir, "sender.py");
-      const venvPython = path.join(senderDir, "venv", "bin", "python");
-      const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
-      const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
-      const execToUse = pythonExec;
-      const args = [senderPath, "--lead-id", input.leadId];
-      
-      logger.workerSpawn("sender", args, { correlationId, leadId: input.leadId });
-      
-      const proc = spawn(execToUse, args, {
-        cwd: repoRoot,
-        stdio: ["ignore", "inherit", "inherit"], // inherit stdout/stderr for debugging
-        detached: true,
-        env: { ...process.env, CORRELATION_ID: correlationId },
-      });
-      proc.unref();
-      
-      logger.info("Sender worker triggered", { correlationId, leadId: input.leadId, pid: proc.pid });
-    } catch (err: any) {
-      logger.error("Failed to trigger sender worker", { correlationId, leadId: input.leadId }, err);
+    // Fire-and-forget: trigger the sender worker for connect+message approvals only.
+    if (mode === "connect_message") {
+      try {
+        const repoRoot = path.resolve(process.cwd(), "..", "..");
+        const senderDir = path.resolve(repoRoot, "workers", "sender");
+        const senderPath = path.join(senderDir, "sender.py");
+        const venvPython = path.join(senderDir, "venv", "bin", "python");
+        const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
+        const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
+        const execToUse = pythonExec;
+        const args = [senderPath, "--lead-id", input.leadId];
+        
+        logger.workerSpawn("sender", args, { correlationId, leadId: input.leadId });
+        
+        const proc = spawn(execToUse, args, {
+          cwd: repoRoot,
+          stdio: ["ignore", "inherit", "inherit"],
+          detached: true,
+          env: { ...process.env, CORRELATION_ID: correlationId },
+        });
+        proc.unref();
+        
+        logger.info("Sender worker triggered", { correlationId, leadId: input.leadId, pid: proc.pid });
+      } catch (err: any) {
+        logger.error("Failed to trigger sender worker", { correlationId, leadId: input.leadId }, err);
+      }
+    } else {
+      logger.info("Message-only draft approved; awaiting message-only sender run", { correlationId, leadId: input.leadId });
     }
 
     revalidatePath("/");
@@ -587,19 +611,25 @@ export async function approveDraft(input: DraftInput) {
   }
 }
 
-export async function approveAndSendAllDrafts() {
-  const correlationId = logger.actionStart("approveAndSendAllDrafts");
+export async function approveAndSendAllDrafts(outreachMode: OutreachMode = "connect_message") {
+  const correlationId = logger.actionStart("approveAndSendAllDrafts", {}, { outreachMode });
+  const isMessageOnly = outreachMode === "message_only";
+  const dbOutreachMode = OUTREACH_MODE_TO_DB[outreachMode];
+  const draftingStatus = isMessageOnly ? "MESSAGE_ONLY_READY" : "DRAFT_READY";
+  const approvedStatus = isMessageOnly ? "MESSAGE_ONLY_APPROVED" : "APPROVED";
 
   try {
     const client = supabaseAdmin();
-    logger.dbQuery("select", "leads", { correlationId }, { status: "DRAFT_READY" });
+
+    logger.dbQuery("select", "leads", { correlationId }, { status: draftingStatus, outreachMode: dbOutreachMode });
 
     const { data, error } = await client
       .from("leads")
       .select(
         "id, drafts(id, opener, body_text, cta_text, cta_type, created_at)"
       )
-      .eq("status", "DRAFT_READY");
+      .eq("status", draftingStatus)
+      .eq("outreach_mode", dbOutreachMode);
 
     if (error) {
       logger.error("Failed to load drafts for bulk approval", { correlationId }, error);
@@ -658,7 +688,7 @@ export async function approveAndSendAllDrafts() {
         continue;
       }
 
-      const { error: leadErr } = await client.from("leads").update({ status: "APPROVED" }).eq("id", lead.id);
+      const { error: leadErr } = await client.from("leads").update({ status: approvedStatus }).eq("id", lead.id);
       if (leadErr) {
         const msg = `Lead status update failed for ${lead.id}: ${leadErr.message || "unknown error"}`;
         logger.error("Bulk lead update failed", { correlationId, leadId: lead.id }, leadErr);
@@ -667,7 +697,7 @@ export async function approveAndSendAllDrafts() {
       }
 
       approvedCount += 1;
-      logger.dbResult("update", "leads", { correlationId, leadId: lead.id }, { status: "APPROVED" });
+      logger.dbResult("update", "leads", { correlationId, leadId: lead.id }, { status: approvedStatus });
     }
 
     let senderTriggered = false;
@@ -680,9 +710,9 @@ export async function approveAndSendAllDrafts() {
         const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
         const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
         const execToUse = pythonExec;
-        const args = [senderPath];
+        const args = outreachMode === "message_only" ? [senderPath, "--message-only"] : [senderPath];
 
-        logger.workerSpawn("sender", args, { correlationId, approvedCount });
+        logger.workerSpawn("sender", args, { correlationId, approvedCount, outreachMode });
 
         const proc = spawn(execToUse, args, {
           cwd: repoRoot,
@@ -699,13 +729,19 @@ export async function approveAndSendAllDrafts() {
     }
 
     revalidatePath("/");
-    logger.actionComplete("approveAndSendAllDrafts", { correlationId }, { approvedCount, attempted: leads.length, senderTriggered });
+    logger.actionComplete("approveAndSendAllDrafts", { correlationId }, {
+      approvedCount,
+      attempted: leads.length,
+      senderTriggered,
+      outreachMode,
+    });
 
     return {
       approvedCount,
       attempted: leads.length,
       errors,
       senderTriggered,
+      outreachMode,
     };
   } catch (error: any) {
     logger.actionError("approveAndSendAllDrafts", { correlationId }, error);
@@ -723,7 +759,7 @@ export async function rejectDraft(leadId: string) {
   revalidatePath("/");
 }
 
-export async function regenerateDraft(leadId: string) {
+export async function regenerateDraft(leadId: string, outreachMode: OutreachMode = "connect_message") {
   const correlationId = logger.actionStart("regenerateDraft", { leadId });
   const client = supabaseAdmin();
   const { error: draftErr } = await client.from("drafts").delete().eq("lead_id", leadId);
@@ -731,13 +767,18 @@ export async function regenerateDraft(leadId: string) {
     logger.error("regenerateDraft delete error", { correlationId, leadId }, draftErr);
     throw draftErr;
   }
-  const { error: leadErr } = await client.from("leads").update({ status: "ENRICHED" }).eq("id", leadId);
+  const nextStatus = outreachMode === "message_only" ? "CONNECT_ONLY_SENT" : "ENRICHED";
+  const nextOutreachMode = outreachMode === "message_only" ? "connect_only" : "message";
+  const { error: leadErr } = await client
+    .from("leads")
+    .update({ status: nextStatus, outreach_mode: nextOutreachMode })
+    .eq("id", leadId);
   if (leadErr) {
     logger.error("regenerateDraft lead error", { correlationId, leadId }, leadErr);
     throw leadErr;
   }
 
-  startDraftAgent(correlationId);
+  startDraftAgent(correlationId, 1, outreachMode);
   revalidatePath("/");
   logger.actionComplete("regenerateDraft", { correlationId, leadId });
 }

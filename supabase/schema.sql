@@ -17,6 +17,8 @@ begin
       'ENRICH_FAILED',
       'DRAFT_READY',
       'APPROVED',
+      'MESSAGE_ONLY_READY',
+      'MESSAGE_ONLY_APPROVED',
       'SENT',
       'CONNECT_ONLY_SENT',
       'CONNECTED',

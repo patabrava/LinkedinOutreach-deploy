@@ -15,7 +15,7 @@ from openai import OpenAI
 
 from tools import (
     classify_lead,
-    get_enriched_leads,
+    get_leads_for_generation,
     get_rotation_state,
     save_draft,
     select_case_study,
@@ -187,9 +187,25 @@ def sanitize_no_dashes(text: str) -> str:
     return text.strip()
 
 
+GENERIC_FILLER_PATTERNS = [
+    r"\b(das )?spart zeit( und)? senkt den verwaltungsaufwand\.?",
+]
+
+
+def strip_generic_filler(text: str) -> str:
+    """Remove verbose filler phrases that bloat the message without adding value."""
+    if not text:
+        return ""
+    cleaned = text
+    for pattern in GENERIC_FILLER_PATTERNS:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip(" ,.;!")
+
+
 def main() -> None:
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description="Generate drafts for ENRICHED leads")
+    parser = argparse.ArgumentParser(description="Generate drafts for LinkedIn outreach leads")
     parser.add_argument(
         "--prompt-type",
         type=int,
@@ -197,15 +213,26 @@ def main() -> None:
         choices=[1, 2, 3],
         help="Prompt type: 1=Standard Outreach, 2=Vernetzung Thank-You, 3=Process Optimization",
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="message",
+        choices=["message", "connect_only"],
+        help="Which outreach pipeline to process: message (connection + DM) or connect_only (message-only mode)",
+    )
     args = parser.parse_args()
     prompt_type = args.prompt_type
+    mode = args.mode
     
     # Load the appropriate prompt
     prompt_text = load_prompt(prompt_type)
     prompt_name = PROMPT_NAMES.get(prompt_type, "Standard Outreach")
     
-    logger.operation_start("draft-generation")
-    logger.info(f"Using prompt type: {prompt_name}", data={"promptType": prompt_type, "promptName": prompt_name})
+    logger.operation_start("draft-generation", {"promptType": prompt_type, "mode": mode})
+    logger.info(
+        f"Using prompt type: {prompt_name}",
+        data={"promptType": prompt_type, "promptName": prompt_name, "mode": mode},
+    )
     
     try:
         api_key = os.getenv("OPENAI_API_KEY")
@@ -216,12 +243,15 @@ def main() -> None:
         client = supabase_client()
         openai = OpenAI(api_key=api_key)
 
-        leads = get_enriched_leads(client)
+        leads = get_leads_for_generation(client, mode=mode)
         if not leads:
-            logger.info("No ENRICHED leads found")
+            logger.info("No leads found for requested mode", data={"mode": mode})
             return
         
-        logger.info(f"Processing {len(leads)} ENRICHED leads", data={"count": len(leads), "promptType": prompt_type})
+        logger.info(
+            f"Processing {len(leads)} leads",
+            data={"count": len(leads), "promptType": prompt_type, "mode": mode},
+        )
 
         # Initialize example pool
         example_pool = get_example_pool()
@@ -334,6 +364,9 @@ def main() -> None:
             opener = sanitize_no_dashes(opener)
             body = sanitize_no_dashes(body)
             cta = sanitize_no_dashes(cta)
+            opener = strip_generic_filler(opener)
+            body = strip_generic_filler(body)
+            cta = strip_generic_filler(cta)
             full_message = "\n\n".join([part for part in [opener, body, cta] if part])
 
             # Check length before enforcement
@@ -343,13 +376,27 @@ def main() -> None:
             
             opener, body, cta, full_message = enforce_char_limit(opener, body, cta, lead_id=lead_id)
 
-            # Final safety: ensure no dashes remain after truncation
+            # Final safety: ensure no dashes or filler remain after truncation
             opener = sanitize_no_dashes(opener)
             body = sanitize_no_dashes(body)
             cta = sanitize_no_dashes(cta)
-            full_message = sanitize_no_dashes(full_message)
+            opener = strip_generic_filler(opener)
+            body = strip_generic_filler(body)
+            cta = strip_generic_filler(cta)
+            full_message = "\n\n".join([part for part in [opener, body, cta] if part])
 
-            save_draft(client, lead_id, opener, body, cta, full_message, body_type, cta_type)
+            next_status = "MESSAGE_ONLY_READY" if mode == "connect_only" else "DRAFT_READY"
+            save_draft(
+                client,
+                lead_id,
+                opener,
+                body,
+                cta,
+                full_message,
+                body_type,
+                cta_type,
+                next_status=next_status,
+            )
             logger.info(f"Draft saved for lead", {"leadId": lead_id})
         
         logger.operation_complete("draft-generation", result={"processed": len(leads)})
@@ -360,4 +407,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -62,6 +62,7 @@ WICHTIG:
 – Authentisch und menschlich
 – Immobilien-Vokabular nutzen (Objekt, Portfolio, Vermarktung, Bestand, Transaktion)
 – Immer auf konkretes Problem/Lösung fokussieren
+– Keine generischen Nutzen-Sätze anhängen (z. B. "Das spart Zeit und senkt den Verwaltungsaufwand."). Nutze das Beispiel knapp und ohne Zusatz-Fluff.
 – Standard-CTA: Nach Netzwerk-Intro fragen, nicht nach Meeting
 – Keine Bindestriche oder Gedankenstriche in den Nachrichtenfeldern (opener, body, cta, full_message). Ersetze '-', '–' oder '—' durch Leerzeichen (z. B. "10 Min Abgleich" statt "10-Min-Abgleich").
 – FINALE KONTROLLE: Zähle die Zeichen der kompletten Nachricht. Wenn >300, schreibe ALLES neu und kürzer und antworte erst dann.

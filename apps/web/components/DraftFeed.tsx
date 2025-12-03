@@ -230,7 +230,7 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
     setGenPending(true);
     setIsPolling(true);
     try {
-      await triggerDraftGeneration(promptType);
+      await triggerDraftGeneration(promptType, outreachMode);
       lastDraftCountRef.current = localDraftsRef.current.length;
       const promptName = PROMPT_TYPE_LABELS[promptType];
       setGenMessage(`Draft generation started with "${promptName}" style. Drafts will appear here automatically.`);
@@ -318,7 +318,7 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
     if (typeof window !== "undefined" && !window.confirm(confirmText)) return;
     setBulkPending(true);
     try {
-      const result = await approveAndSendAllDrafts();
+      const result = await approveAndSendAllDrafts(outreachMode);
       const sentNote = result.senderTriggered
         ? "Sender worker started; outreach will go out up to the daily cap."
         : "Sender worker not started (check logs).";
@@ -517,11 +517,9 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
               <button className="btn secondary" onClick={handleSendAllApproved} disabled={bulkPending}>
                 {bulkPending ? "Triggering…" : "Send All Approved"}
               </button>
-              {outreachMode === "connect_message" && (
-                <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
-                  {genPending ? "Starting…" : isPolling ? "Generating…" : "Generate Drafts"}
-                </button>
-              )}
+              <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
+                {genPending ? "Starting…" : isPolling ? "Generating…" : generateButtonLabel}
+              </button>
             </div>
           </div>
         </div>
@@ -548,6 +546,7 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
             <DraftCard
               key={draft.draftId || draft.leadId}
               draft={draft}
+              outreachMode={outreachMode}
               onAction={fetchDrafts}
               onRegenerateStart={handleRegenerateStart}
               onRegenerateError={handleRegenerateError}
@@ -561,11 +560,13 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
 
 function DraftCard({
   draft,
+  outreachMode,
   onAction,
   onRegenerateStart,
   onRegenerateError,
 }: {
   draft: DraftWithLead;
+  outreachMode: OutreachMode;
   onAction?: () => void;
   onRegenerateStart?: (leadId: string, draft: DraftWithLead) => void;
   onRegenerateError?: (leadId: string) => void;
@@ -710,6 +711,7 @@ function DraftCard({
                 body: localDraft.body,
                 cta: localDraft.cta,
                 ctaType: localDraft.ctaType,
+                outreachMode,
               })
             )
           }
@@ -730,21 +732,21 @@ function DraftCard({
             {pending ? "Sending..." : "Send Now"}
           </button>
         ) : (
-        <button
-          className="btn warn"
-          disabled={locked}
-          onClick={() => {
-            onRegenerateStart?.(draft.leadId, draft);
-            run(
-              () => regenerateDraft(draft.leadId),
-              {
-                onError: () => onRegenerateError?.(draft.leadId),
-              }
-            );
-          }}
-        >
-          {pending || draft.regenerating ? "Regenerating..." : "Regenerate"}
-        </button>
+          <button
+            className="btn warn"
+            disabled={locked}
+            onClick={() => {
+              onRegenerateStart?.(draft.leadId, draft);
+              run(
+                () => regenerateDraft(draft.leadId, outreachMode),
+                {
+                  onError: () => onRegenerateError?.(draft.leadId),
+                }
+              );
+            }}
+          >
+            {pending || draft.regenerating ? "Regenerating..." : "Regenerate"}
+          </button>
         )}
         {message ? (
           <span className="muted" style={{ marginLeft: 8 }}>

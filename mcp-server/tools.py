@@ -19,14 +19,23 @@ def supabase_client() -> Client:
     return create_client(url, key)
 
 
-def get_enriched_leads(client: Client, limit: int = 20) -> List[Dict[str, Any]]:
-    resp = (
+def get_leads_for_generation(
+    client: Client,
+    mode: str = "message",
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    status_filter = "ENRICHED" if mode == "message" else "CONNECT_ONLY_SENT"
+    outreach_filter = "message" if mode == "message" else "connect_only"
+
+    query = (
         client.table("leads")
         .select("*")
-        .eq("status", "ENRICHED")
+        .eq("status", status_filter)
+        .eq("outreach_mode", outreach_filter)
         .limit(limit)
-        .execute()
     )
+
+    resp = query.execute()
     return resp.data or []
 
 
@@ -92,6 +101,7 @@ def save_draft(
     full_message: str,
     body_type: str = "",
     cta_type: str = "",
+    next_status: str = "DRAFT_READY",
 ) -> Dict[str, Any]:
     # Delete any existing drafts for this lead to ensure only one draft exists
     client.table("drafts").delete().eq("lead_id", lead_id).execute()
@@ -106,6 +116,6 @@ def save_draft(
         "cta_type": cta_type,
     }
     client.table("drafts").insert(draft).execute()
-    client.table("leads").update({"status": "DRAFT_READY"}).eq("id", lead_id).execute()
+    client.table("leads").update({"status": next_status}).eq("id", lead_id).execute()
     return draft
 
