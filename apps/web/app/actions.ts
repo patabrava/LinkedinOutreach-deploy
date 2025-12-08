@@ -290,10 +290,14 @@ export async function fetchLeadList(
 }
 
 // Follow-ups data model
+export type FollowupStatus = "PENDING_REVIEW" | "APPROVED" | "PROCESSING" | "SENT" | "SKIPPED" | "FAILED" | "RETRY_LATER";
+export type FollowupType = "REPLY" | "NUDGE";
+
 export type FollowupRow = {
   id: string;
   lead_id: string;
-  status: "PENDING_REVIEW" | "APPROVED" | "SENT" | "SKIPPED";
+  status: FollowupStatus;
+  followup_type?: FollowupType | null;  // REPLY = lead responded, NUDGE = no response yet
   reply_id?: string | null;
   reply_snippet?: string | null;
   reply_timestamp?: string | null;
@@ -301,6 +305,9 @@ export type FollowupRow = {
   sent_text?: string | null;
   sent_at?: string | null;
   attempt: number;
+  last_error?: string | null;
+  next_send_at?: string | null;
+  processing_started_at?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
   lead?: {
@@ -311,7 +318,10 @@ export type FollowupRow = {
     linkedin_url: string;
     last_reply_at?: string | null;
     followup_count?: number | null;
+    profile_data?: any;
   };
+  // History of previous messages for context
+  previous_sent_text?: string | null;
 };
 
 export async function fetchFollowups(statuses: Array<FollowupRow["status"]> = ["PENDING_REVIEW", "APPROVED"], limit = 50) {
@@ -324,7 +334,7 @@ export async function fetchFollowups(statuses: Array<FollowupRow["status"]> = ["
     
     let query = client
       .from("followups")
-      .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, last_reply_at, followup_count)")
+      .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, last_reply_at, followup_count, profile_data)")
       .in("status", statuses)
       .order("updated_at", { ascending: false })
       .limit(limit);
@@ -392,6 +402,144 @@ export async function skipFollowup(followupId: string) {
   revalidatePath("/followups");
 }
 
+export async function generateFollowupDraft(followupId: string): Promise<{ success: boolean; draft?: string; error?: string }> {
+  const correlationId = logger.actionStart("generateFollowupDraft", { followupId });
+  
+  try {
+    const client = supabaseAdmin();
+    
+    // Fetch followup with lead data
+    const { data: followup, error: fetchError } = await client
+      .from("followups")
+      .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, profile_data)")
+      .eq("id", followupId)
+      .single();
+    
+    if (fetchError || !followup) {
+      logger.error("Failed to fetch followup for draft generation", { correlationId, followupId }, fetchError || undefined);
+      return { success: false, error: "Followup not found" };
+    }
+    
+    // Get previous sent messages for context
+    const { data: previousFollowups } = await client
+      .from("followups")
+      .select("sent_text, sent_at")
+      .eq("lead_id", followup.lead_id)
+      .eq("status", "SENT")
+      .order("sent_at", { ascending: false })
+      .limit(3);
+    
+    // Get the original draft sent to this lead
+    const { data: originalDraft } = await client
+      .from("drafts")
+      .select("final_message, opener, body_text, cta_text")
+      .eq("lead_id", followup.lead_id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+    
+    // Spawn the followup agent
+    const repoRoot = path.resolve(process.cwd(), "..", "..");
+    const agentDir = path.resolve(repoRoot, "mcp-server");
+    const agentPath = path.join(agentDir, "run_followup_agent.py");
+    const venvPython = path.join(agentDir, "venv", "bin", "python");
+    const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
+    const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
+    
+    // Prepare context JSON for the agent
+    const context = {
+      followup_id: followupId,
+      lead_id: followup.lead_id,
+      first_name: followup.lead?.first_name || "",
+      last_name: followup.lead?.last_name || "",
+      company_name: followup.lead?.company_name || "",
+      reply_snippet: followup.reply_snippet || null,
+      attempt: followup.attempt || 1,
+      profile_data: followup.lead?.profile_data || {},
+      previous_messages: previousFollowups?.map(f => f.sent_text).filter(Boolean) || [],
+      original_message: originalDraft?.final_message || "",
+    };
+    
+    // Write context to temp file for the agent to read
+    const fs = await import("fs/promises");
+    const os = await import("os");
+    const contextPath = path.join(os.tmpdir(), `followup_context_${followupId}.json`);
+    await fs.writeFile(contextPath, JSON.stringify(context, null, 2));
+    
+    logger.workerSpawn("followup-agent", [agentPath, "--context", contextPath], { correlationId, followupId });
+    
+    const { execSync } = await import("child_process");
+    
+    try {
+      // Run synchronously to get the result
+      const result = execSync(`${pythonExec} ${agentPath} --context "${contextPath}"`, {
+        cwd: repoRoot,
+        encoding: "utf-8",
+        timeout: 60000, // 60 second timeout
+        env: { ...process.env, CORRELATION_ID: correlationId },
+      });
+      
+      // Parse the result (expected JSON with "message" field)
+      const parsed = JSON.parse(result.trim());
+      const draft = parsed.message || "";
+      
+      if (draft) {
+        // Update the followup with the generated draft
+        await client
+          .from("followups")
+          .update({ draft_text: draft })
+          .eq("id", followupId);
+        
+        logger.actionComplete("generateFollowupDraft", { correlationId, followupId }, { draftLength: draft.length });
+        revalidatePath("/followups");
+        return { success: true, draft };
+      }
+      
+      return { success: false, error: "No draft generated" };
+    } catch (execError: any) {
+      logger.error("Followup agent execution failed", { correlationId, followupId }, execError);
+      return { success: false, error: execError.message || "Agent execution failed" };
+    } finally {
+      // Clean up temp file
+      try {
+        await fs.unlink(contextPath);
+      } catch {}
+    }
+  } catch (error: any) {
+    logger.actionError("generateFollowupDraft", { correlationId, followupId }, error);
+    return { success: false, error: error.message || "Unknown error" };
+  }
+}
+
+export async function stopFollowups(leadId: string) {
+  const client = supabaseAdmin();
+  // Mark all pending/approved followups for this lead as SKIPPED
+  const { error } = await client
+    .from("followups")
+    .update({ status: "SKIPPED" })
+    .eq("lead_id", leadId)
+    .in("status", ["PENDING_REVIEW", "APPROVED"]);
+  if (error) {
+    console.error("stopFollowups error", error);
+    throw error;
+  }
+  revalidatePath("/followups");
+}
+
+export async function retryFollowup(followupId: string) {
+  const client = supabaseAdmin();
+  // Reset a FAILED or RETRY_LATER followup back to PENDING_REVIEW
+  const { error } = await client
+    .from("followups")
+    .update({ status: "PENDING_REVIEW", last_error: null, processing_started_at: null })
+    .eq("id", followupId);
+  if (error) {
+    console.error("retryFollowup error", error);
+    throw error;
+  }
+  revalidatePath("/followups");
+}
+
 export async function triggerInboxScan() {
   // Fire-and-forget execution of scraper in inbox mode
   try {
@@ -403,9 +551,14 @@ export async function triggerInboxScan() {
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
     const args = [scraperPath, "--inbox", "--run"]; // reuse --run gate
+
+    // Minimal logging so we can see what is being spawned from the Followups tab
+    console.log("triggerInboxScan: spawning inbox scraper", { execToUse, args, cwd: repoRoot });
+
     const proc = spawn(execToUse, args, {
       cwd: repoRoot,
-      stdio: "ignore",
+      // Pipe stdout/stderr through to the dev process so logs are visible
+      stdio: ["ignore", "inherit", "inherit"],
       detached: true,
       env: { ...process.env },
     });

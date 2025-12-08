@@ -7,6 +7,7 @@ import asyncio
 import datetime
 import json
 import os
+import time
 import random
 import re
 import sys
@@ -37,6 +38,8 @@ logger = get_logger("scraper")
 # Avoid tripping LinkedIn automation warnings by capping daily enrichments.
 DAILY_ENRICHMENT_CAP = 50
 DAILY_INBOX_SCAN_LIMIT = 60
+INBOX_SCAN_COOLDOWN_HOURS = 24  # skip re-opening profiles scanned within this window
+PENDING_INVITE_BACKOFF_DAYS = 7  # skip pending invites for this many days
 
 
 @dataclass
@@ -65,6 +68,48 @@ def get_supabase_client() -> Client:
     logger.debug("Supabase client initialized")
     print(f"[SCRAPER] Supabase client created successfully", file=sys.stderr)
     return create_client(url, key)
+
+
+def now_iso_utc() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def execute_with_retry(query, desc: str, attempts: int = 3, delay: float = 1.0):
+    """Execute a Supabase query with basic retry/backoff for transient network errors."""
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return query.execute()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.warn(
+                f"{desc} failed (attempt {attempt}/{attempts}), retrying...",
+                error=exc,
+            )
+            if attempt < attempts:
+                time.sleep(delay)
+    # Exhausted retries
+    logger.error(f"{desc} failed after {attempts} attempts", error=last_exc)
+    raise last_exc
+
+
+def extract_profile_meta(profile_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(profile_data, dict):
+        return {}
+    meta = profile_data.get("meta")
+    return meta if isinstance(meta, dict) else {}
+
+
+def update_profile_meta(client: Client, lead_id: str, profile_data: Optional[Dict[str, Any]], meta_updates: Dict[str, Any]) -> None:
+    """Persist meta flags inside profile_data.meta without schema changes."""
+    base = profile_data if isinstance(profile_data, dict) else {}
+    meta = extract_profile_meta(profile_data)
+    meta.update(meta_updates)
+    new_profile = {**base, "meta": meta}
+    execute_with_retry(
+        client.table("leads").update({"profile_data": new_profile}).eq("id", lead_id),
+        desc=f"Update profile_data meta for lead {lead_id}",
+    )
 
 
 def fetch_new_leads(client: Client, limit: int = 10, outreach_mode: Optional[str] = None) -> List[Lead]:
@@ -890,11 +935,11 @@ async def main(limit: int = 10, mode: str = "enrich") -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="LinkedIn enrichment scraper")
+    parser = argparse.ArgumentParser(description="LinkedIn scraper")
     parser.add_argument(
         "--run",
         action="store_true",
-        help="Execute the scraper. Without this flag the script exits without doing any work.",
+        help="Actually run scraping; without this flag the script exits immediately.",
     )
     parser.add_argument(
         "--inbox",
@@ -904,8 +949,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--limit",
         type=int,
-        default=10,
-        help="Maximum number of leads to process in a single run (default: 10).",
+        default=0,
+        help="Maximum number of leads to process in a single run; 0 means no limit (process all).",
     )
     parser.add_argument(
         "--mode",
@@ -916,37 +961,398 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
-
-if __name__ == "__main__":
-    args = parse_args()
-    if not args.run:
-        print("Scraper invoked without --run flag. Exiting without processing leads.")
-        sys.exit(0)
-    # Dispatch based on mode
-    if getattr(args, "inbox", False):
-        limit = args.limit if isinstance(args.limit, int) and args.limit > 0 else 25
-        asyncio.run(inbox_mode(limit=limit))
-    else:
-        limit = args.limit if isinstance(args.limit, int) and args.limit > 0 else 10
-        mode = getattr(args, "mode", "enrich")
-        asyncio.run(main(limit=limit, mode=mode))
-
 ###################################################################################################
-# Inbox scanning mode
+# Inbox scanning helpers
 ###################################################################################################
 
 async def navigate_to_inbox(page: Page) -> None:
+    """Navigate to LinkedIn messaging and wait for the inbox UI to be usable.
+
+    We tolerate layout changes by waiting on several possible selectors and
+    not hard-failing on a TimeoutError. This prevents the entire inbox scan
+    from crashing if LinkedIn tweaks the DOM.
+    """
     await gentle_nav(page, "https://www.linkedin.com/messaging/")
-    # Wait for conversation list container
-    await page.wait_for_selector("div.msg-conversations-container, div[role='main']", timeout=30_000)
-    await page.wait_for_timeout(600)
+
+    # Try a few likely containers for the conversation list / main area
+    possible_selectors = [
+        "div.msg-conversations-container",
+        "ul.msg-conversations-container__conversations-list",
+        "li.msg-conversation-listitem",
+        "div.msg-conversation-card",
+        "div[role='main']",
+    ]
+
+    for selector in possible_selectors:
+        try:
+            await page.wait_for_selector(selector, timeout=10_000)
+            logger.debug("navigate_to_inbox: found inbox container", {"selector": selector})
+            break
+        except Exception:
+            continue
+    else:
+        # As a last resort, don't crash the whole run; just log a warning
+        logger.warn("navigate_to_inbox: no known inbox container found after timeout")
+
+    # Give the UI a moment and scroll a bit so lazy content loads
+    await page.wait_for_timeout(800)
+    try:
+        await slow_scroll(page, steps=2)
+    except Exception:
+        pass
+
+
+async def open_profile_and_get_last_message(
+    page: Page,
+    lead_full_name: str,
+    linkedin_url: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Visit a lead's profile and, if possible, open the message thread and return last message info.
+
+    This avoids relying on the inbox search, which can miss conversations, by going
+    profile-by-profile and clicking the appropriate Nachricht / Message button.
+    
+    Returns:
+        - {"pending_invite": True} if connection request is still pending
+        - {"sender": ..., "text": ..., "is_outbound": ..., "has_history": True} if conversation exists
+        - None if no conversation could be found
+    """
+    if not linkedin_url:
+        logger.debug("open_profile_and_get_last_message: missing linkedin_url", {"lead": lead_full_name})
+        return None
+
+    try:
+        logger.info("Opening profile for followup scan", {"lead": lead_full_name, "url": linkedin_url})
+        await gentle_nav(page, linkedin_url)
+        await page.wait_for_timeout(1200)
+
+        # Try to find a profile container similar to the sender worker, so we don't
+        # accidentally click buttons from other UI surfaces.
+        try:
+            profile_container = page.get_by_test_id("lazy-column")
+            if await profile_container.count() > 0:
+                await profile_container.first.wait_for(state="visible", timeout=5_000)
+            else:
+                raise RuntimeError("lazy-column not found")
+        except Exception:
+            # Fallback: main scaffold layout / card
+            profile_container = page.locator("main.scaffold-layout__main, section.artdeco-card").first
+
+        # ============================================================
+        # STEP 1: CHECK FOR PENDING INVITE FIRST (before anything else)
+        # ============================================================
+        # Look for "Ausstehend" / "Pending" button anywhere on profile - multiple patterns
+        pending_patterns = [
+            r"Ausstehend",  # German: "Pending"
+            r"Pending",     # English
+            r"Ausstehend, klicken Sie",  # German full text
+        ]
+        for pattern in pending_patterns:
+            pending_btn = profile_container.get_by_role("button", name=re.compile(pattern, re.I))
+            pending_count = await pending_btn.count()
+            if pending_count > 0:
+                logger.info(
+                    "open_profile_and_get_last_message: PENDING INVITE detected",
+                    {"lead": lead_full_name, "pattern": pattern},
+                )
+                return {"pending_invite": True}
+        
+        # Also check for "Vernetzen" / "Connect" button (not connected at all)
+        connect_btn = profile_container.get_by_role("button", name=re.compile(r"(Vernetzen|Connect)$", re.I))
+        if await connect_btn.count() > 0:
+            logger.info(
+                "open_profile_and_get_last_message: NOT CONNECTED (Connect button visible)",
+                {"lead": lead_full_name},
+            )
+            return {"pending_invite": True}  # Treat as pending - not connected yet
+
+        # ============================================================
+        # STEP 2: TRY TO OPEN MESSAGE THREAD
+        # ============================================================
+        msg_button = profile_container.get_by_role(
+            "button",
+            name=re.compile(r"(Nachricht an |Message)", re.I),
+        )
+        msg_btn_count = await msg_button.count()
+        logger.debug(
+            "open_profile_and_get_last_message: Nachricht/Message button count",
+            {"lead": lead_full_name, "count": msg_btn_count},
+        )
+
+        messaging_opened = False
+        if msg_btn_count > 0:
+            try:
+                await msg_button.first.click(timeout=8_000)
+                # Wait for messaging surface / overlay to appear
+                await page.wait_for_selector(
+                    "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
+                    timeout=10_000,
+                )
+                await page.wait_for_timeout(800)
+                messaging_opened = True
+            except Exception as exc:
+                logger.warn(
+                    "open_profile_and_get_last_message: failed to open messaging surface via Nachricht button",
+                    {"lead": lead_full_name},
+                    error=exc,
+                )
+
+        # Fallback: try a generic Message / Nachricht button anywhere on page
+        if not messaging_opened:
+            generic_msg_btn = page.get_by_role("button", name=re.compile(r"(Nachricht|Message)", re.I))
+            if await generic_msg_btn.count() > 0:
+                try:
+                    await generic_msg_btn.first.click(timeout=8_000)
+                    await page.wait_for_selector(
+                        "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
+                        timeout=10_000,
+                    )
+                    await page.wait_for_timeout(800)
+                    messaging_opened = True
+                except Exception as exc:
+                    logger.warn(
+                        "open_profile_and_get_last_message: generic Nachricht/Message button failed",
+                        {"lead": lead_full_name},
+                        error=exc,
+                    )
+
+        if not messaging_opened:
+            logger.debug(
+                "open_profile_and_get_last_message: no usable messaging surface found on profile",
+                {"lead": lead_full_name},
+            )
+            return None
+
+        # ============================================================
+        # STEP 3: VERIFY CONVERSATION HISTORY EXISTS
+        # ============================================================
+        # Extract the last message and verify there's actual conversation history
+        msg_info = await extract_last_message_from_conversation(page)
+        
+        if msg_info is None:
+            # No message history found - might be empty compose window
+            logger.debug(
+                "open_profile_and_get_last_message: messaging opened but no message history found",
+                {"lead": lead_full_name},
+            )
+            return None
+        
+        # Mark that we verified conversation history exists
+        msg_info["has_history"] = True
+        return msg_info
+
+    except Exception as exc:
+        logger.warn(
+            "open_profile_and_get_last_message: error while visiting profile",
+            {"lead": lead_full_name, "url": linkedin_url},
+            error=exc,
+        )
+        return None
+
+
+async def search_conversation_by_name(page: Page, lead_name: str) -> Optional[Dict[str, Any]]:
+    """Search for a conversation by lead name using LinkedIn's messaging search box.
+    
+    Returns conversation info if found, None otherwise.
+    """
+    try:
+        # Find the search box - German UI: "Nachrichten durchsuchen", English: "Search messages"
+        searchbox = page.get_by_role("searchbox", name="Nachrichten durchsuchen")
+        if not await searchbox.count():
+            searchbox = page.get_by_role("searchbox", name="Search messages")
+        if not await searchbox.count():
+            # Fallback to placeholder text
+            searchbox = page.locator("input[placeholder*='durchsuchen'], input[placeholder*='Search']").first
+        
+        if not await searchbox.count():
+            logger.warn("search_conversation_by_name: could not find search box")
+            return None
+        
+        # Clear any existing search and type the lead name
+        await searchbox.click()
+        await page.wait_for_timeout(300)
+        await searchbox.fill("")
+        await page.wait_for_timeout(200)
+        await searchbox.fill(lead_name)
+        await page.wait_for_timeout(1500)  # Wait for search results to load
+        
+        # Look for the conversation in search results
+        # Try multiple selectors for conversation items
+        result_selectors = [
+            "li.msg-conversation-listitem",
+            "div.msg-conversation-card",
+            "li[data-control-name='conversation']",
+            "div.msg-search-result",
+        ]
+        
+        result_item = None
+        for selector in result_selectors:
+            items = page.locator(selector)
+            if await items.count() > 0:
+                result_item = items.first
+                break
+        
+        if not result_item:
+            logger.debug(f"search_conversation_by_name: no results for '{lead_name}'")
+            # Clear search before returning
+            await searchbox.fill("")
+            await page.wait_for_timeout(300)
+            return None
+        
+        # Click to open the conversation
+        await result_item.click()
+        await page.wait_for_timeout(1000)  # Wait for conversation to load
+        
+        # Extract the last message from the opened conversation
+        last_message_info = await extract_last_message_from_conversation(page)
+        
+        # Clear the search box for next search
+        try:
+            await searchbox.fill("")
+        except Exception:
+            pass
+        
+        return last_message_info
+        
+    except Exception as exc:
+        logger.warn(f"search_conversation_by_name: error searching for '{lead_name}'", error=exc)
+        return None
+
+
+async def extract_last_message_from_conversation(page: Page) -> Optional[Dict[str, Any]]:
+    """Extract the last message from an open conversation thread.
+    
+    Returns dict with 'sender', 'text', 'is_outbound' or None if extraction fails.
+    """
+    try:
+        # Wait for message thread to load
+        await page.wait_for_timeout(800)
+        
+        # Find all messages in the conversation
+        # LinkedIn uses various selectors for messages
+        message_selectors = [
+            "li.msg-s-message-list__event",
+            "div.msg-s-event-listitem",
+            "div.msg-s-message-group",
+            "li[class*='message']",
+        ]
+        
+        messages = None
+        for selector in message_selectors:
+            items = page.locator(selector)
+            count = await items.count()
+            if count > 0:
+                messages = items
+                logger.debug(f"extract_last_message: found {count} messages with selector '{selector}'")
+                break
+        
+        if not messages or await messages.count() == 0:
+            logger.debug("extract_last_message: no messages found in conversation")
+            return None
+        
+        # Get the last message
+        last_msg = messages.last
+        
+        # Try to extract the sender name
+        sender = ""
+        sender_selectors = [
+            "span.msg-s-message-group__name",
+            "span.msg-s-event-listitem__sender-name",
+            "a.msg-s-message-group__profile-link",
+            "span[class*='sender']",
+            "span[class*='name']",
+        ]
+        for sel in sender_selectors:
+            try:
+                sender_el = last_msg.locator(sel).first
+                if await sender_el.count():
+                    sender = safe_text(await sender_el.text_content(timeout=2_000))
+                    if sender:
+                        break
+            except Exception:
+                continue
+        
+        # Extract message text
+        text = ""
+        text_selectors = [
+            "p.msg-s-event-listitem__body",
+            "div.msg-s-event-listitem__body",
+            "p.msg-s-message-group__body",
+            "span.msg-s-event-listitem__message-body",
+            "p[class*='body']",
+        ]
+        for sel in text_selectors:
+            try:
+                text_el = last_msg.locator(sel).first
+                if await text_el.count():
+                    text = safe_text(await text_el.text_content(timeout=2_000))
+                    if text:
+                        break
+            except Exception:
+                continue
+        
+        # Fallback: get all text from the message
+        if not text:
+            try:
+                text = safe_text(await last_msg.inner_text(timeout=3_000))[:500]
+            except Exception:
+                pass
+        
+        # Determine if this is an outbound message (sent by us)
+        # Check for outbound indicators in the message element
+        is_outbound = False
+        try:
+            # LinkedIn often marks outbound messages with specific classes or attributes
+            msg_classes = await last_msg.get_attribute("class") or ""
+            if "outbound" in msg_classes.lower() or "sent" in msg_classes.lower():
+                is_outbound = True
+            
+            # Check parent elements for outbound indicators
+            try:
+                parent = last_msg.locator("xpath=..")
+                parent_classes = await parent.get_attribute("class") or ""
+                if "outbound" in parent_classes.lower() or "from-me" in parent_classes.lower():
+                    is_outbound = True
+            except Exception:
+                pass
+            
+            # Also check if "Sie" appears as sender (German for "You")
+            if sender.lower() in ["sie", "you", "ich"]:
+                is_outbound = True
+            
+            # Check for visual indicators (e.g., message alignment, background color classes)
+            try:
+                # Outbound messages often have specific styling
+                style = await last_msg.get_attribute("style") or ""
+                if "right" in style.lower() or "flex-end" in style.lower():
+                    is_outbound = True
+            except Exception:
+                pass
+                
+        except Exception:
+            pass
+        
+        return {
+            "sender": sender,
+            "text": text,
+            "is_outbound": is_outbound,
+        }
+        
+    except Exception as exc:
+        logger.warn("extract_last_message: error extracting message", error=exc)
+        return None
 
 
 async def extract_conversation_summaries(page: Page, max_items: int) -> List[Dict[str, Any]]:
-    """Extract top-N conversation summaries with participant and last message snippet/time."""
+    """Extract top-N conversation summaries with participant and last message snippet/time.
+    
+    DEPRECATED: This function has unreliable DOM selectors. 
+    Use search_conversation_by_name() instead for targeted lead lookup.
+    """
     results: List[Dict[str, Any]] = []
     items = page.locator("li.msg-conversation-listitem, li.artdeco-list__item, div.msg-conversation-card")
     count = min(await items.count(), max_items)
+    logger.debug(f"extract_conversation_summaries: found {count} items")
     for i in range(count):
         entry = items.nth(i)
         try:
@@ -961,7 +1367,13 @@ async def extract_conversation_summaries(page: Page, max_items: int) -> List[Dic
         except Exception:
             profile_href = None
         # Last message snippet and time
-        snippet = await safe_inner_text(entry.page, "p.msg-conversation-card__message-snippet, p, span.line-clamp-1") if hasattr(entry, 'page') else ""
+        snippet = ""
+        try:
+            snippet_el = entry.locator("p.msg-conversation-card__message-snippet, p, span.line-clamp-1").first
+            if await snippet_el.count():
+                snippet = safe_text(await snippet_el.text_content(timeout=2_000))
+        except Exception:
+            pass
         # Fallback snippet
         if not snippet:
             try:
@@ -982,36 +1394,34 @@ async def extract_conversation_summaries(page: Page, max_items: int) -> List[Dic
     return results
 
 
-def find_lead_match(client: Client, profile_url: Optional[str], name: str) -> Optional[Dict[str, Any]]:
-    """Match a reply to a lead. Prefer linkedin_url exact match; fallback to name heuristic."""
-    if profile_url:
-        url_norm = profile_url.split("?")[0].rstrip("/")
-        resp = (
-            client.table("leads")
-            .select("id, linkedin_url, first_name, last_name")
-            .ilike("linkedin_url", f"%{url_norm}%")
-            .limit(1)
-            .execute()
-        )
-        rows = resp.data or []
-        if rows:
-            return rows[0]
-    # Name heuristic: requires both first and last name present and exact ilike match on either order
-    parts = [p for p in (name or "").replace("·", " ").split() if p.strip()]
-    if len(parts) >= 2:
-        first, last = parts[0], parts[-1]
-        resp = (
-            client.table("leads")
-            .select("id, linkedin_url, first_name, last_name")
-            .or_(
-                f"and(ilike.first_name.%{first}%,ilike.last_name.%{last}%),and(ilike.first_name.%{last}%,ilike.last_name.%{first}%)"
-            )
-            .limit(3)
-            .execute()
-        )
-        rows = resp.data or []
-        if rows:
-            return rows[0]
+def find_lead_match(client: Client, profile_url: Optional[str], name: str, status_filter: Optional[list[str]] = None) -> Optional[Dict[str, Any]]:
+    """Match a reply to a lead. Prefer linkedin_url exact match; fallback to name heuristic.
+    
+    Args:
+        client: Supabase client
+        profile_url: LinkedIn profile URL to match
+        name: Name to match if URL doesn't work
+        status_filter: Optional list of statuses to filter by (e.g., ["SENT"] for inbox scan)
+    """
+    if not profile_url:
+        # Without a stable profile URL, we avoid guessing based on name only.
+        # This prevents accidental association of inbox threads with unrelated leads.
+        logger.debug("find_lead_match: missing profile_url, skipping name-only match", {"name": name})
+        return None
+
+    url_norm = profile_url.split("?")[0].rstrip("/")
+    query = (
+        client.table("leads")
+        .select("id, linkedin_url, first_name, last_name, status")
+        .ilike("linkedin_url", f"%{url_norm}%")
+    )
+    if status_filter:
+        query = query.in_("status", status_filter)
+    resp = query.limit(1).execute()
+    rows = resp.data or []
+    if rows:
+        return rows[0]
+    logger.debug("find_lead_match: no lead match for profile_url", {"profile_url": profile_url, "name": name})
     return None
 
 
@@ -1021,61 +1431,385 @@ def upsert_followup_for_reply(
     reply_id: Optional[str],
     reply_snippet: str,
     reply_timestamp: Optional[str],
+    followup_type: str = "REPLY",
 ) -> None:
-    # Create new followup row as PENDING_REVIEW with attempt = (existing count + 1) capped by max.
-    # Increment followup_count on lead and set last_reply_at
-    client.table("followups").insert({
-        "lead_id": lead_id,
-        "reply_id": reply_id,
-        "reply_snippet": reply_snippet[:2000] if reply_snippet else None,
-        "reply_timestamp": reply_timestamp,
-        "status": "PENDING_REVIEW",
-    }).execute()
-    client.table("leads").update({
-        "last_reply_at": reply_timestamp or None,
+    """Create a new followup row as PENDING_REVIEW.
+    
+    Args:
+        client: Supabase client
+        lead_id: ID of the lead
+        reply_id: Optional message ID of the reply
+        reply_snippet: Text snippet of the reply (empty for nudges)
+        reply_timestamp: Timestamp of the reply/detection
+        followup_type: "REPLY" if lead responded, "NUDGE" if we need to follow up
+    """
+    insert_resp = execute_with_retry(
+        client.table("followups").insert(
+            {
+                "lead_id": lead_id,
+                "reply_id": reply_id,
+                "reply_snippet": reply_snippet[:2000] if reply_snippet else None,
+                "reply_timestamp": reply_timestamp,
+                "status": "PENDING_REVIEW",
+                "followup_type": followup_type,
+            }
+        ),
+        desc="Insert followup",
+    )
+    if getattr(insert_resp, "error", None):
+        logger.error(
+            "Failed to insert followup",
+            {"lead_id": lead_id, "followup_type": followup_type},
+            error=getattr(insert_resp, "error", None),
+        )
+        raise RuntimeError(f"Followup insert failed for lead {lead_id}: {insert_resp.error}")
+    
+    # Only update last_reply_at if this is an actual reply
+    update_data = {
         "followup_count": (client.table("followups").select("id", count="exact").eq("lead_id", lead_id).execute().count or 0)
-    }).eq("id", lead_id).execute()
+    }
+    if followup_type == "REPLY" and reply_timestamp:
+        update_data["last_reply_at"] = reply_timestamp
+    update_resp = execute_with_retry(
+        client.table("leads").update(update_data).eq("id", lead_id),
+        desc="Update lead after followup insert",
+    )
+    if getattr(update_resp, "error", None):
+        logger.error(
+            "Failed to update lead after followup insert",
+            {"lead_id": lead_id, "followup_type": followup_type},
+            error=getattr(update_resp, "error", None),
+        )
+        raise RuntimeError(f"Lead update failed for lead {lead_id}: {update_resp.error}")
 
 
 async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> None:
+    """Scan LinkedIn inbox for conversations with SENT leads using search.
+    
+    NEW APPROACH: Instead of scraping the inbox list (unreliable DOM selectors),
+    we fetch leads with status=SENT from the database and search for each one
+    by name in LinkedIn's messaging search box. This is much more reliable.
+    
+    Creates followups for two scenarios:
+    1. REPLY: The lead has replied to our message (last message is from them)
+    2. NUDGE: We sent a message but they haven't replied (last message is from us)
+    """
     page = await context.new_page()
     try:
-        await navigate_to_inbox(page)
-        convos = await extract_conversation_summaries(page, max_items=limit)
-        detected = 0
-        for convo in convos:
-            match = find_lead_match(client, convo.get("profile_url"), convo.get("name", ""))
-            if not match:
+        # Fetch leads with SENT status from database - these are contacts we've messaged
+        # Include throttling columns to skip recently scanned or pending invite leads
+        logger.info("Fetching SENT leads from database...", {"limit": limit})
+        leads_query = (
+            client.table("leads")
+            .select("id, first_name, last_name, linkedin_url, status, last_inbox_scan_at, pending_invite, pending_checked_at")
+            .eq("status", "SENT")
+        )
+        if limit and limit > 0:
+            leads_query = leads_query.limit(limit)
+        leads_resp = execute_with_retry(leads_query, desc="Fetch SENT leads for inbox scan")
+        sent_leads = leads_resp.data or []
+        logger.info(f"Found {len(sent_leads)} leads with SENT status to check")
+        
+        if not sent_leads:
+            print("No SENT leads found in database. Nothing to scan.")
+            return
+        
+        replies_detected = 0
+        nudges_detected = 0
+        skipped_existing = 0
+        skipped_no_conversation = 0
+        skipped_too_recent = 0
+        skipped_ambiguous = 0
+        skipped_recently_scanned = 0
+        skipped_pending_invite = 0
+        
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        for lead in sent_leads:
+            lead_id = lead["id"]
+            first_name = (lead.get("first_name") or "").strip()
+            last_name = (lead.get("last_name") or "").strip()
+            lead_full_name = " ".join([p for p in [first_name, last_name] if p]).strip()
+            
+            if not lead_full_name:
+                logger.debug(f"Skipping lead with no name", {"leadId": lead_id})
                 continue
-            # Basic guard: only create followup if lead was SENT recently or in APPROVED/SENT/REPLIED
-            lead = match
-            # We could fetch last SENT message time from leads.sent_at if available
-            reply_ts = None
-            try:
-                reply_ts = datetime.datetime.utcnow().isoformat()
-            except Exception:
-                reply_ts = None
-            upsert_followup_for_reply(
-                client,
-                lead_id=lead["id"],
-                reply_id=None,
-                reply_snippet=convo.get("snippet", ""),
-                reply_timestamp=reply_ts,
+            
+            # --- THROTTLING: Skip if recently scanned ---
+            last_scan = lead.get("last_inbox_scan_at")
+            if last_scan:
+                try:
+                    scan_dt = datetime.datetime.fromisoformat(last_scan.replace("Z", "+00:00"))
+                    hours_since_scan = (now_utc - scan_dt).total_seconds() / 3600
+                    if hours_since_scan < INBOX_SCAN_COOLDOWN_HOURS:
+                        logger.debug(
+                            f"Skipping {lead_full_name}, scanned {round(hours_since_scan, 1)}h ago (cooldown={INBOX_SCAN_COOLDOWN_HOURS}h)",
+                            {"leadId": lead_id}
+                        )
+                        skipped_recently_scanned += 1
+                        continue
+                except Exception:
+                    pass
+            
+            # --- THROTTLING: Skip if pending invite and checked recently ---
+            if lead.get("pending_invite"):
+                pending_checked = lead.get("pending_checked_at")
+                if pending_checked:
+                    try:
+                        checked_dt = datetime.datetime.fromisoformat(pending_checked.replace("Z", "+00:00"))
+                        days_since_check = (now_utc - checked_dt).total_seconds() / 86400
+                        if days_since_check < PENDING_INVITE_BACKOFF_DAYS:
+                            logger.debug(
+                                f"Skipping {lead_full_name}, pending invite checked {round(days_since_check, 1)}d ago (backoff={PENDING_INVITE_BACKOFF_DAYS}d)",
+                                {"leadId": lead_id}
+                            )
+                            skipped_pending_invite += 1
+                            continue
+                    except Exception:
+                        pass
+            
+            logger.info(f"Opening profile for SENT lead followup check: {lead_full_name}", {"leadId": lead_id})
+            
+            # Check if we already have a pending followup for this lead
+            existing = execute_with_retry(
+                client.table("followups")
+                .select("id")
+                .eq("lead_id", lead_id)
+                .in_("status", ["PENDING_REVIEW", "APPROVED", "PROCESSING"])
+                .limit(1),
+                desc=f"Check existing followup for lead {lead_id}",
             )
-            detected += 1
-        print(f"Inbox scan complete. New replies detected: {detected}")
+            if existing.data:
+                logger.debug(f"Lead already has pending followup, skipping", {"leadId": lead_id})
+                skipped_existing += 1
+                continue
+            
+            # Visit the profile and try to open the message thread via Nachricht / Message button
+            linkedin_url = (lead.get("linkedin_url") or "").strip()
+            convo_info = await open_profile_and_get_last_message(page, lead_full_name, linkedin_url)
+            
+            # Always update last_inbox_scan_at after visiting the profile
+            scan_ts = now_iso_utc()
+            
+            if not convo_info:
+                logger.debug(f"No conversation found for {lead_full_name}", {"leadId": lead_id})
+                # Update scan timestamp even if no conversation found
+                execute_with_retry(
+                    client.table("leads").update({
+                        "last_inbox_scan_at": scan_ts,
+                        "pending_invite": False,
+                    }).eq("id", lead_id),
+                    desc=f"Update last_inbox_scan_at for lead {lead_id}",
+                )
+                skipped_no_conversation += 1
+                continue
+            
+            # --- HANDLE PENDING INVITE ---
+            if convo_info.get("pending_invite"):
+                logger.info(f"Lead {lead_full_name} has pending invite (Ausstehend), marking and skipping", {"leadId": lead_id})
+                execute_with_retry(
+                    client.table("leads").update({
+                        "pending_invite": True,
+                        "pending_checked_at": scan_ts,
+                        "last_inbox_scan_at": scan_ts,
+                    }).eq("id", lead_id),
+                    desc=f"Mark pending_invite for lead {lead_id}",
+                )
+                skipped_pending_invite += 1
+                print(f"  ⏳ Pending invite: {lead_full_name}")
+                continue
+            
+            # Determine if the last message was from us or from them
+            sender = convo_info.get("sender", "")
+            text = convo_info.get("text", "")
+            is_outbound = convo_info.get("is_outbound", False)
+            
+            logger.debug(
+                f"Last message info for {lead_full_name}",
+                {"sender": sender, "text": text[:60] if text else "", "is_outbound": is_outbound, "leadId": lead_id}
+            )
+            
+            # Additional check: if sender name matches lead name, it's their reply
+            sender_lower = sender.lower().strip()
+            is_their_reply = False
+            
+            if is_outbound:
+                # Last message is from us
+                is_their_reply = False
+            elif sender_lower in ["sie", "you", "ich", ""]:
+                # Ambiguous sender that looks like us
+                is_their_reply = False
+                is_outbound = True
+            elif (
+                sender_lower == lead_full_name.lower() or
+                sender_lower == first_name.lower() or
+                first_name.lower() in sender_lower or
+                sender_lower in lead_full_name.lower()
+            ):
+                # Sender matches lead name - this is their reply
+                is_their_reply = True
+            else:
+                # Sender doesn't match lead name and isn't a standard "you" indicator.
+                # Since we opened this conversation from the lead's profile, if the sender
+                # is NOT the lead, it must be US (the logged-in user, e.g. "Simon Vestner").
+                # This means the last message is outbound - treat as NUDGE candidate.
+                logger.debug(
+                    f"Sender '{sender}' doesn't match lead '{lead_full_name}' - treating as our outbound message",
+                    {"leadId": lead_id, "sender": sender, "leadName": lead_full_name}
+                )
+                is_outbound = True
+            
+            reply_ts = datetime.datetime.utcnow().isoformat()
+            
+            if is_their_reply:
+                # This is a REPLY - they responded to our message
+                upsert_followup_for_reply(
+                    client,
+                    lead_id=lead_id,
+                    reply_id=None,
+                    reply_snippet=text[:500] if text else "",
+                    reply_timestamp=reply_ts,
+                    followup_type="REPLY",
+                )
+                replies_detected += 1
+                logger.info(f"✓ Created followup for REPLY from {lead_full_name}", {"leadId": lead_id})
+                print(f"  ✓ REPLY detected from: {lead_full_name}")
+                
+            elif is_outbound:
+                # This is a NUDGE opportunity - we sent but they haven't replied
+                # IMPORTANT: Only create NUDGE if we verified conversation history exists
+                if not convo_info.get("has_history"):
+                    logger.debug(
+                        f"Skipping NUDGE for {lead_full_name} - no verified conversation history",
+                        {"leadId": lead_id}
+                    )
+                    skipped_no_conversation += 1
+                    continue
+                
+                # Check if we sent a message recently (within 48 hours)
+                try:
+                    draft_resp = execute_with_retry(
+                        client.table("drafts")
+                        .select("sent_at")
+                        .eq("lead_id", lead_id)
+                        .not_.is_("sent_at", "null")
+                        .order("sent_at", desc=True)
+                        .limit(1),
+                        desc=f"Fetch last sent draft for lead {lead_id}",
+                    )
+                    if draft_resp.data:
+                        last_sent = draft_resp.data[0].get("sent_at")
+                        if last_sent:
+                            sent_dt = datetime.datetime.fromisoformat(last_sent.replace("Z", "+00:00"))
+                            now = datetime.datetime.now(datetime.timezone.utc)
+                            hours_since_sent = (now - sent_dt).total_seconds() / 3600
+                            if hours_since_sent < 48:
+                                logger.debug(
+                                    f"Skipping nudge for {lead_full_name}, message sent {round(hours_since_sent, 1)}h ago",
+                                    {"leadId": lead_id}
+                                )
+                                # Still update scan timestamp even when skipping
+                                execute_with_retry(
+                                    client.table("leads").update({
+                                        "last_inbox_scan_at": scan_ts,
+                                        "pending_invite": False,
+                                    }).eq("id", lead_id),
+                                    desc=f"Update last_inbox_scan_at for skipped nudge {lead_id}",
+                                )
+                                skipped_too_recent += 1
+                                continue
+                except Exception as exc:
+                    logger.warn(
+                        f"Failed to check last sent time for {lead_full_name}",
+                        {"leadId": lead_id},
+                        error=exc
+                    )
+                
+                # Create nudge followup
+                upsert_followup_for_reply(
+                    client,
+                    lead_id=lead_id,
+                    reply_id=None,
+                    reply_snippet="",  # Empty = no reply, this is a nudge
+                    reply_timestamp=reply_ts,
+                    followup_type="NUDGE",
+                )
+                nudges_detected += 1
+                logger.info(f"✓ Created NUDGE for {lead_full_name} (no reply yet)", {"leadId": lead_id})
+                print(f"  ✓ NUDGE opportunity: {lead_full_name}")
+            
+            # Update lead with scan timestamp after processing (reply or nudge)
+            execute_with_retry(
+                client.table("leads").update({
+                    "last_inbox_scan_at": scan_ts,
+                    "pending_invite": False,
+                }).eq("id", lead_id),
+                desc=f"Update last_inbox_scan_at after processing {lead_id}",
+            )
+            
+            # Small delay between searches to avoid rate limiting
+            await page.wait_for_timeout(500)
+        
+        # Summary
+        logger.info(
+            f"Inbox scan complete",
+            data={
+                "replies": replies_detected,
+                "nudges": nudges_detected,
+                "skipped_existing": skipped_existing,
+                "skipped_no_conversation": skipped_no_conversation,
+                "skipped_too_recent": skipped_too_recent,
+                "skipped_ambiguous": skipped_ambiguous,
+                "skipped_recently_scanned": skipped_recently_scanned,
+                "skipped_pending_invite": skipped_pending_invite,
+                "total_leads_checked": len(sent_leads),
+            }
+        )
+        print(f"\n{'='*50}")
+        print(f"INBOX SCAN COMPLETE")
+        print(f"{'='*50}")
+        print(f"  Leads checked: {len(sent_leads)}")
+        print(f"  Replies detected: {replies_detected}")
+        print(f"  Nudges created: {nudges_detected}")
+        print(f"  Already pending: {skipped_existing}")
+        print(f"  No conversation: {skipped_no_conversation}")
+        print(f"  Too recent (48h): {skipped_too_recent}")
+        print(f"  Recently scanned ({INBOX_SCAN_COOLDOWN_HOURS}h): {skipped_recently_scanned}")
+        print(f"  Pending invite ({PENDING_INVITE_BACKOFF_DAYS}d): {skipped_pending_invite}")
+        print(f"{'='*50}")
     finally:
         await page.close()
 
 
-async def inbox_mode(limit: int = 25) -> None:
+async def inbox_mode(limit: int = 0) -> None:
+    """Entry point for inbox scanning.
+
+    Opens a visible browser (headless=False), ensures LinkedIn auth, and then
+    runs inbox_scan with a daily cap based on DAILY_INBOX_SCAN_LIMIT.
+    """
     client = get_supabase_client()
     playwright, browser, context = await open_browser(headless=False)
     try:
         creds = fetch_linkedin_credentials(client)
         await ensure_linkedin_auth(context, creds)
-        # Enforce a daily cap on inbox scans via settings if desired (not persisted here, simple runtime cap)
-        effective_limit = min(limit, DAILY_INBOX_SCAN_LIMIT)
-        await inbox_scan(context, client, effective_limit)
+        # If limit <= 0, process all SENT leads; otherwise respect the explicit cap.
+        await inbox_scan(context, client, limit)
     finally:
         await shutdown(playwright, browser)
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    if not args.run:
+        print("Scraper invoked without --run flag. Exiting without processing leads.")
+        sys.exit(0)
+
+    # Dispatch based on mode / inbox flag
+    if getattr(args, "inbox", False):
+        # For inbox scans, limit=0 means "no limit" (all SENT leads)
+        limit = args.limit if isinstance(args.limit, int) and args.limit >= 0 else 0
+        asyncio.run(inbox_mode(limit=limit))
+    else:
+        limit = args.limit if isinstance(args.limit, int) and args.limit > 0 else 10
+        mode = getattr(args, "mode", "enrich")
+        asyncio.run(main(limit=limit, mode=mode))

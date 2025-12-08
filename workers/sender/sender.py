@@ -746,41 +746,108 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
 
 
 # ------------------------- FOLLOW-UP FLOW -------------------------
-def fetch_next_followup(client: Client) -> Optional[Dict[str, Any]]:
-    logger.db_query("select", "followups", {"status": "APPROVED"})
+def fetch_approved_followups(client: Client, limit: int = 10) -> list[Dict[str, Any]]:
+    """Fetch a batch of APPROVED followups and mark them PROCESSING atomically."""
+    logger.db_query("select", "followups", {"status": "APPROVED", "limit": limit})
     resp = (
         client.table("followups")
-        .select("*, lead:leads(id, linkedin_url)")
+        .select("*, lead:leads(id, linkedin_url, first_name, last_name)")
         .eq("status", "APPROVED")
         .order("updated_at", desc=True)
-        .limit(1)
+        .limit(limit)
         .execute()
     )
     rows = resp.data or []
-    followup = rows[0] if rows else None
-    logger.db_result("select", "followups", {"status": "APPROVED"}, 1 if followup else 0)
-    if followup:
-        logger.info(f"Fetched next APPROVED followup", {"followupId": followup["id"]})
-    return followup
+    logger.db_result("select", "followups", {"status": "APPROVED"}, len(rows))
+    
+    # Mark each as PROCESSING immediately to prevent double-fetch
+    for row in rows:
+        client.table("followups").update({
+            "status": "PROCESSING",
+            "processing_started_at": datetime.utcnow().isoformat(),
+        }).eq("id", row["id"]).execute()
+        logger.debug(f"Followup marked as PROCESSING", {"followupId": row["id"]})
+    
+    if rows:
+        logger.info(f"Fetched {len(rows)} APPROVED followups")
+    return rows
+
+
+def fetch_next_followup(client: Client) -> Optional[Dict[str, Any]]:
+    """Legacy single-fetch; returns first APPROVED followup."""
+    followups = fetch_approved_followups(client, 1)
+    return followups[0] if followups else None
+
+
+def sanitize_followup_message(text: str) -> str:
+    """Apply safety filters: remove dashes/apostrophes, enforce char limit."""
+    if not text:
+        return ""
+    # Remove dashes and apostrophes (same as outreach no-dash rule)
+    sanitized = re.sub(r"[\-\u2010-\u2015\u2212]+", " ", text)
+    sanitized = re.sub(r"['`\u2018\u2019]+", " ", sanitized)
+    sanitized = sanitized.replace("\n", " ").replace("\r", " ")
+    sanitized = re.sub(r" {2,}", " ", sanitized).strip()
+    
+    # Hard cap at 300 characters
+    if len(sanitized) > 300:
+        logger.warn("Followup message exceeded 300 chars, truncating", data={"original": len(sanitized)})
+        # Truncate at word boundary
+        candidate = sanitized[:297].rstrip()
+        space_idx = candidate.rfind(" ")
+        if space_idx >= 150:
+            candidate = candidate[:space_idx]
+        candidate = candidate.rstrip(" ,.;:-")
+        sanitized = f"{candidate}..."
+    
+    return sanitized
 
 
 def build_followup_message(fu: Dict[str, Any]) -> str:
     # Prefer draft_text; fallback to sent_text if somehow present
-    msg = (fu.get("draft_text") or fu.get("sent_text") or "").strip()
-    return msg
+    raw_msg = (fu.get("draft_text") or fu.get("sent_text") or "").strip()
+    return sanitize_followup_message(raw_msg)
 
 
 def mark_followup_sent(client: Client, followup_id: str, message: str) -> None:
     now_iso = datetime.utcnow().isoformat()
     logger.db_query("update", "followups", {"followupId": followup_id}, {"status": "SENT"})
     client.table("followups").update(
-        {"status": "SENT", "sent_text": message, "sent_at": now_iso}
+        {"status": "SENT", "sent_text": message, "sent_at": now_iso, "processing_started_at": None}
     ).eq("id", followup_id).execute()
     logger.db_result("update", "followups", {"followupId": followup_id}, 1)
     logger.info(f"Followup marked as SENT", {"followupId": followup_id})
 
 
-async def process_followup_one(context: BrowserContext, client: Client, followup: Dict[str, Any]) -> None:
+def mark_followup_failed(client: Client, followup_id: str, error_message: str, permanent: bool = False) -> None:
+    """Mark followup as FAILED (permanent) or RETRY_LATER (transient)."""
+    status = "FAILED" if permanent else "RETRY_LATER"
+    logger.db_query("update", "followups", {"followupId": followup_id}, {"status": status})
+    client.table("followups").update({
+        "status": status,
+        "last_error": error_message[:500] if error_message else None,
+        "processing_started_at": None,
+    }).eq("id", followup_id).execute()
+    logger.db_result("update", "followups", {"followupId": followup_id}, 1)
+    logger.warn(f"Followup marked as {status}", {"followupId": followup_id, "error": error_message})
+
+
+def revert_followup_to_approved(client: Client, followup_id: str) -> None:
+    """Revert a PROCESSING followup back to APPROVED for retry."""
+    logger.db_query("update", "followups", {"followupId": followup_id}, {"status": "APPROVED"})
+    client.table("followups").update({
+        "status": "APPROVED",
+        "processing_started_at": None,
+    }).eq("id", followup_id).execute()
+    logger.db_result("update", "followups", {"followupId": followup_id}, 1)
+    logger.info(f"Followup reverted to APPROVED for retry", {"followupId": followup_id})
+
+
+async def process_followup_one(context: BrowserContext, client: Client, followup: Dict[str, Any]) -> str:
+    """Process a single followup. Returns 'sent', 'failed', or 'retry'.
+    
+    The followup should already be marked as PROCESSING before calling this.
+    """
     followup_id = followup["id"]
     lead = (followup.get("lead") or {})
     lead_id = lead.get("id")
@@ -789,28 +856,71 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
     logger.info(f"Processing followup", {"followupId": followup_id, "leadId": lead_id})
 
     if not linkedin_url:
-        logger.error("Followup has no linked lead URL", {"followupId": followup_id})
-        raise RuntimeError("Followup has no linked lead URL")
+        error_msg = "Followup has no linked lead URL"
+        logger.error(error_msg, {"followupId": followup_id})
+        mark_followup_failed(client, followup_id, error_msg, permanent=True)
+        return "failed"
 
     message = build_followup_message(followup)
     if not message:
-        logger.error("Followup has no draft_text", {"followupId": followup_id})
-        raise RuntimeError("Followup has no draft_text to send")
+        error_msg = "Followup has no draft_text to send"
+        logger.error(error_msg, {"followupId": followup_id})
+        mark_followup_failed(client, followup_id, error_msg, permanent=True)
+        return "failed"
 
     logger.message_send_start(lead_id or "unknown", {"followupId": followup_id}, message)
+    logger.debug(f"Followup message preview", {"followupId": followup_id}, {"message": message[:100], "length": len(message)})
 
     page = await context.new_page()
-    await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
-    await page.wait_for_timeout(1_000)
-    surface = await open_message_surface(page)
-    logger.debug(f"Message surface opened for followup", {"followupId": followup_id}, {"surface": surface})
+    try:
+        await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
+        await page.wait_for_timeout(1_000)
+        await random_pause()
+        
+        surface = await open_message_surface(page)
+        logger.debug(f"Message surface opened for followup", {"followupId": followup_id}, {"surface": surface})
 
-    await send_message(page, message, surface)
-    await page.close()
-    mark_followup_sent(client, followup_id, message)
+        await send_message(page, message, surface)
+        await page.close()
+        mark_followup_sent(client, followup_id, message)
 
-    logger.message_send_complete(lead_id or "unknown", {"followupId": followup_id})
-    logger.info(f"Followup sent successfully", {"followupId": followup_id, "leadId": lead_id})
+        logger.message_send_complete(lead_id or "unknown", {"followupId": followup_id})
+        logger.info(f"Followup sent successfully", {"followupId": followup_id, "leadId": lead_id})
+        return "sent"
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Failed to send followup", {"followupId": followup_id}, error=e)
+        
+        # Take screenshot for debugging
+        try:
+            screenshot_path = f"/tmp/followup_error_{followup_id[:8]}.png"
+            await page.screenshot(path=screenshot_path)
+            logger.info(f"Screenshot saved to {screenshot_path}")
+        except Exception:
+            pass
+        
+        # Determine if this is a permanent or transient failure
+        permanent_indicators = [
+            "No messaging surface found",
+            "3rd-degree",
+            "restrictions",
+            "no draft_text",
+            "no linked lead URL",
+        ]
+        is_permanent = any(ind in error_msg for ind in permanent_indicators)
+        
+        if is_permanent:
+            mark_followup_failed(client, followup_id, error_msg, permanent=True)
+            return "failed"
+        else:
+            mark_followup_failed(client, followup_id, error_msg, permanent=False)
+            return "retry"
+    finally:
+        try:
+            await page.close()
+        except Exception:
+            pass
 
 
 # ------------------------- MESSAGE-ONLY FLOW -------------------------
@@ -1078,31 +1188,49 @@ async def main() -> None:
         remaining = max(0, daily_limit - already_sent)
 
         if args.followup:
-            # Process a batch of approved followups; keep simple cap of remaining slots
-            items: list[Dict[str, Any]] = []
-            for _ in range(max(1, daily_limit - already_sent)):
-                fu = fetch_next_followup(client)
-                if not fu:
-                    break
-                items.append(fu)
+            # Process a batch of approved followups with proper status tracking
+            batch_limit = min(20, max(1, daily_limit - already_sent))
+            items = fetch_approved_followups(client, batch_limit)
+            
             if not items:
                 logger.info("No APPROVED followups to send")
                 return
 
-            logger.info(f"Processing {len(items)} followups")
+            logger.info(f"Processing {len(items)} followups", data={"batch_limit": batch_limit})
             playwright, browser, context = await open_browser(headless=False)
             try:
                 logger.info("Browser opened, authenticating...")
                 await ensure_linkedin_auth(context, client)
 
+                sent_count = 0
+                failed_count = 0
+                retry_count = 0
+
                 for fu in items:
                     try:
-                        await process_followup_one(context, client, fu)
+                        result = await process_followup_one(context, client, fu)
+                        if result == "sent":
+                            sent_count += 1
+                        elif result == "failed":
+                            failed_count += 1
+                        else:  # retry
+                            retry_count += 1
                     except Exception as exc:
                         logger.error(f"Failed to send followup", {"followupId": fu.get('id')}, error=exc)
+                        # Unexpected exception - mark as retry
+                        try:
+                            mark_followup_failed(client, fu.get('id'), str(exc), permanent=False)
+                        except Exception:
+                            pass
+                        retry_count += 1
                     await random_pause(2, 4)
 
-                logger.operation_complete("sender-followup", result={"sent": len(items)})
+                logger.operation_complete("sender-followup", result={
+                    "sent": sent_count,
+                    "failed": failed_count,
+                    "retry": retry_count,
+                    "total": len(items),
+                })
             finally:
                 await shutdown(playwright, browser)
                 logger.info("Browser closed")
