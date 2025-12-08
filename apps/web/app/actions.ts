@@ -171,8 +171,13 @@ export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_messa
   }
 }
 
+const normalizeSegment = (segment: string) => segment.replace(/[\n\r]+/g, " ").replace(/\s{2,}/g, " ").trim();
+
 const buildFinalMessage = (opener: string, body: string, cta: string) =>
-  [opener, body, cta].filter(Boolean).join("\n\n");
+  [opener, body, cta]
+    .map((part) => normalizeSegment(part || ""))
+    .filter(Boolean)
+    .join(" ");
 
 export type LeadListRow = {
   id: string;
@@ -447,8 +452,8 @@ export async function triggerFollowupSender() {
   }
 }
 
-export async function sendLeadNow(leadId: string) {
-  const correlationId = logger.actionStart("sendLeadNow", { leadId });
+export async function sendLeadNow(leadId: string, outreachMode: OutreachMode = "connect_message") {
+  const correlationId = logger.actionStart("sendLeadNow", { leadId }, { outreachMode });
   try {
     const repoRoot = path.resolve(process.cwd(), "..", "..");
     const senderDir = path.resolve(repoRoot, "workers", "sender");
@@ -458,8 +463,11 @@ export async function sendLeadNow(leadId: string) {
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
     const args = [senderPath, "--lead-id", leadId];
+    if (outreachMode === "message_only") {
+      args.push("--message-only");
+    }
 
-    logger.workerSpawn("sender", args, { correlationId, leadId });
+    logger.workerSpawn("sender", args, { correlationId, leadId, outreachMode });
 
     const proc = spawn(execToUse, args, {
       cwd: repoRoot,
@@ -468,7 +476,7 @@ export async function sendLeadNow(leadId: string) {
       env: { ...process.env, CORRELATION_ID: correlationId },
     });
     proc.unref();
-    logger.info("Sender worker triggered for single lead", { correlationId, leadId, pid: proc.pid });
+    logger.info("Sender worker triggered for single lead", { correlationId, leadId, pid: proc.pid, outreachMode });
   } catch (err: any) {
     logger.error("sendLeadNow error", { correlationId, leadId }, err);
     throw err;

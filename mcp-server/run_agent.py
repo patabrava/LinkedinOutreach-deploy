@@ -112,7 +112,8 @@ def build_prompt(
         "Follow the logic chain: classify company type, select case study, decide opener (post if "
         "recent <30 days else profile), choose body type, choose CTA (low friction default), "
         "and ensure word-count limits. Hard cap: opener + body + CTA combined must be <= 300 characters."
-        "\nHard rule: Do not use hyphens or dashes '-', '–', or '—' in opener, body, cta, or full_message. Use spaces instead."
+        "\nHard rule: Do not use hyphens or dashes '-', '–', or '—' and do not use apostrophes (') in opener, body, cta, or full_message. "
+        "Respond as one cohesive text block without bullet formatting or line breaks in the final message."
     )
 
 
@@ -181,8 +182,10 @@ def enforce_char_limit(opener: str, body: str, cta: str, limit: int = 300, lead_
 def sanitize_no_dashes(text: str) -> str:
     if not text:
         return ""
-    # Replace hyphen-like characters with spaces and collapse multiple spaces (preserve newlines)
+    # Replace prohibited characters (dashes, apostrophes) with spaces and collapse whitespace
     text = re.sub(r"[\-\u2010-\u2015\u2212]+", " ", text)
+    text = re.sub(r"['`\u2018\u2019]+", " ", text)
+    text = text.replace("\n", " ").replace("\r", " ")
     text = re.sub(r" {2,}", " ", text)
     return text.strip()
 
@@ -200,7 +203,40 @@ def strip_generic_filler(text: str) -> str:
     for pattern in GENERIC_FILLER_PATTERNS:
         cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
-    return cleaned.strip(" ,.;!")
+    return cleaned.strip()
+
+
+def ensure_sentence_punctuation(text: str) -> str:
+    """Ensure each sentence-like fragment ends with terminal punctuation."""
+    if not text:
+        return ""
+
+    fragments = re.split(r"[\n\r]+", text)
+    normalized_fragments = []
+    for fragment in fragments:
+        cleaned = re.sub(r"\s{2,}", " ", fragment.strip())
+        if not cleaned:
+            continue
+        if cleaned[-1] not in ".?!":
+            cleaned = f"{cleaned}."
+        normalized_fragments.append(cleaned)
+
+    if not normalized_fragments:
+        return ""
+
+    return " ".join(normalized_fragments)
+
+
+def build_text_block(*sections: str) -> str:
+    parts = []
+    for section in sections:
+        normalized = ensure_sentence_punctuation(section)
+        if normalized:
+            parts.append(normalized)
+    if not parts:
+        return ""
+    text_block = " ".join(parts)
+    return re.sub(r" {2,}", " ", text_block).strip()
 
 
 def main() -> None:
@@ -301,7 +337,8 @@ def main() -> None:
                         "role": "system",
                         "content": (
                             "Harte Regel: Verwende keine Bindestriche oder Gedankenstriche ('-', '–', '—') "
-                            "in irgendeinem Ausgabefeld (opener, body, cta, full_message). Nutze stattdessen Leerzeichen."
+                            "und keine Apostrophe (') in irgendeinem Ausgabefeld (opener, body, cta, full_message). "
+                            "Formuliere deine Ausgabe als geschlossenen Textblock ohne Zeilenumbrüche."
                         ),
                     },
                     {"role": "system", "content": prompt_text},
@@ -322,9 +359,7 @@ def main() -> None:
             opener = data.get("opener", "")
             body = data.get("body", "")
             cta = data.get("cta", "")
-            full_message = data.get("full_message") or "\n\n".join(
-                [part for part in [opener, body, cta] if part]
-            )
+            full_message = build_text_block(opener, body, cta)
             body_type = data.get("body_type", "")
             cta_type = data.get("cta_type", "")
 
@@ -358,7 +393,7 @@ def main() -> None:
             opener = sanitize_opener(opener, lead)
             # If we rebuilt opener, recompute full_message to reflect sanitized opener
             if not data.get("full_message"):
-                full_message = "\n\n".join([part for part in [opener, body, cta] if part])
+                full_message = build_text_block(opener, body, cta)
 
             # Enforce no-dash rule on fields and rebuild full_message for consistency
             opener = sanitize_no_dashes(opener)
@@ -367,14 +402,17 @@ def main() -> None:
             opener = strip_generic_filler(opener)
             body = strip_generic_filler(body)
             cta = strip_generic_filler(cta)
-            full_message = "\n\n".join([part for part in [opener, body, cta] if part])
+            opener = ensure_sentence_punctuation(opener)
+            body = ensure_sentence_punctuation(body)
+            cta = ensure_sentence_punctuation(cta)
+            full_message = build_text_block(opener, body, cta)
 
             # Check length before enforcement
-            pre_check = full_message
+            pre_check = build_text_block(opener, body, cta)
             if len(pre_check) > 300:
                 logger.warn(f"AI generated message exceeds 300 chars", {"leadId": lead_id}, {"length": len(pre_check)})
             
-            opener, body, cta, full_message = enforce_char_limit(opener, body, cta, lead_id=lead_id)
+            opener, body, cta, _ = enforce_char_limit(opener, body, cta, lead_id=lead_id)
 
             # Final safety: ensure no dashes or filler remain after truncation
             opener = sanitize_no_dashes(opener)
@@ -383,7 +421,10 @@ def main() -> None:
             opener = strip_generic_filler(opener)
             body = strip_generic_filler(body)
             cta = strip_generic_filler(cta)
-            full_message = "\n\n".join([part for part in [opener, body, cta] if part])
+            opener = ensure_sentence_punctuation(opener)
+            body = ensure_sentence_punctuation(body)
+            cta = ensure_sentence_punctuation(cta)
+            full_message = build_text_block(opener, body, cta)
 
             next_status = "MESSAGE_ONLY_READY" if mode == "connect_only" else "DRAFT_READY"
             save_draft(

@@ -37,6 +37,25 @@ type Props = {
 const POLL_INTERVAL_MS = 5000;
 const POLL_TIMEOUT_MS = 2 * 60 * 1000;
 
+const STATUS_PILL_META: Record<string, { label: string; background: string; color: string }> = {
+  APPROVED: { label: "Approved (unsent)", background: "rgba(34,197,94,0.18)", color: "#bbf7d0" },
+  DRAFT_READY: { label: "Draft Ready", background: "rgba(129,140,248,0.18)", color: "#c7d2fe" },
+  MESSAGE_ONLY_READY: { label: "Message Draft Ready", background: "rgba(59,130,246,0.15)", color: "#bfdbfe" },
+  MESSAGE_ONLY_APPROVED: { label: "Message Approved", background: "rgba(16,185,129,0.18)", color: "#a7f3d0" },
+  CONNECT_ONLY_SENT: { label: "Pending Connection", background: "rgba(248,250,252,0.04)", color: "#f8fafc" },
+  SENT: { label: "Sent", background: "rgba(148,163,184,0.2)", color: "#e2e8f0" },
+  DEFAULT: { label: "Draft", background: "rgba(148,163,184,0.2)", color: "#e2e8f0" },
+};
+
+const MESSAGE_ONLY_STATUSES = ["CONNECT_ONLY_SENT", "MESSAGE_ONLY_READY", "MESSAGE_ONLY_APPROVED"];
+
+function getStatusMeta(status?: string) {
+  if (!status) {
+    return STATUS_PILL_META.DEFAULT;
+  }
+  return STATUS_PILL_META[status] ?? STATUS_PILL_META.DEFAULT;
+}
+
 export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: Props) {
   const router = useRouter();
   const pathname = usePathname();
@@ -56,6 +75,8 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
   const lastDraftCountRef = useRef<number>(drafts.length || 0);
   const isPollingRef = useRef(false);
   const regeneratingRef = useRef(regenerating);
+
+  const isMessageOnly = outreachMode === "message_only";
 
   const fetchDrafts = useCallback(async (showLoading = false, mode?: OutreachMode) => {
     if (showLoading) {
@@ -161,61 +182,41 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
   // Subscribe to real-time updates on leads/drafts table
   useEffect(() => {
     const supabase = supabaseBrowserClient();
-    const channel = supabase
-      .channel("draft-feed-updates")
-      .on(
+    const channel = supabase.channel(`draft-feed-updates-${outreachMode}`);
+
+    const leadStatuses = isMessageOnly
+      ? ["CONNECT_ONLY_SENT", "MESSAGE_ONLY_READY", "MESSAGE_ONLY_APPROVED", "SENT"]
+      : ["DRAFT_READY", "APPROVED", "SENT"];
+
+    leadStatuses.forEach((status) => {
+      channel.on(
         "postgres_changes",
         {
           event: "UPDATE",
           schema: "public",
           table: "leads",
-          filter: "status=eq.DRAFT_READY",
+          filter: `status=eq.${status}`,
         },
-        () => {
-          fetchDrafts();
-        }
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "leads",
-          filter: "status=eq.APPROVED",
-        },
-        () => {
-          fetchDrafts();
-        }
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "leads",
-          filter: "status=eq.SENT",
-        },
-        () => {
-          fetchDrafts();
-        }
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "drafts",
-        },
-        () => {
-          fetchDrafts();
-        }
-      )
-      .subscribe();
+        () => fetchDrafts()
+      );
+    });
+
+    channel.on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "drafts",
+      },
+      () => fetchDrafts()
+    );
+
+    channel.subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [fetchDrafts]);
+  }, [fetchDrafts, outreachMode, isMessageOnly]);
 
   useEffect(() => {
     return () => {
@@ -243,7 +244,17 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
   };
 
   const isGenerating = genPending || isPolling;
-  const disableBulkSend = bulkPending || isGenerating || !localDrafts.length;
+  const pendingDrafts = useMemo(
+    () => (isMessageOnly ? localDrafts.filter((d) => d.status === "CONNECT_ONLY_SENT") : []),
+    [localDrafts, isMessageOnly]
+  );
+  const actionableDrafts = useMemo(
+    () => (isMessageOnly ? localDrafts.filter((d) => d.status !== "CONNECT_ONLY_SENT") : localDrafts),
+    [localDrafts, isMessageOnly]
+  );
+  const actionableCount = actionableDrafts.length;
+
+  const disableBulkSend = bulkPending || isGenerating || actionableCount === 0;
 
   const generateButtonLabel = outreachMode === "message_only" ? "Prepare Message Drafts" : "Generate Drafts";
 
@@ -310,10 +321,19 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
     });
   };
 
+  const getActionableDraftSnapshot = () => {
+    const list = localDraftsRef.current;
+    if (outreachMode === "message_only") {
+      return list.filter((d) => d.status !== "CONNECT_ONLY_SENT");
+    }
+    return list;
+  };
+
   const handleBulkApproveSend = async () => {
-    if (!localDraftsRef.current.length) return;
+    const actionable = getActionableDraftSnapshot();
+    if (!actionable.length) return;
     setBulkMessage(null);
-    const count = localDraftsRef.current.length;
+    const count = actionable.length;
     const confirmText = `Approve and send all ${count} draft${count === 1 ? "" : "s"} now?\nThis will immediately trigger outreach via LinkedIn.`;
     if (typeof window !== "undefined" && !window.confirm(confirmText)) return;
     setBulkPending(true);
@@ -535,14 +555,13 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
           </div>
         ) : null}
       </div>
-
       <div className="grid">
         {loading && !localDrafts.length ? (
           <div className="card">
             <div className="muted">Loading drafts...</div>
           </div>
         ) : (
-          localDrafts.map((draft) => (
+          actionableDrafts.map((draft) => (
             <DraftCard
               key={draft.draftId || draft.leadId}
               draft={draft}
@@ -554,6 +573,21 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
           ))
         )}
       </div>
+
+      {isMessageOnly && pendingDrafts.length ? (
+        <div className="card" style={{ marginTop: 20 }}>
+          <div className="pill" style={{ marginBottom: 8 }}>Pending Connections</div>
+          <h3 style={{ margin: "0 0 6px 0" }}>Waiting for acceptance</h3>
+          <div className="muted" style={{ marginBottom: 16 }}>
+            These leads still show "Ausstehend" on LinkedIn. We will automatically attempt messaging as soon as the connection is accepted.
+          </div>
+          <div className="grid">
+            {pendingDrafts.map((draft) => (
+              <PendingConnectionCard key={draft.leadId} draft={draft} />
+            ))}
+          </div>
+        </div>
+      ) : null}
     </>
   );
 }
@@ -580,10 +614,13 @@ function DraftCard({
   const [pending, startTransition] = useTransition();
   const [message, setMessage] = useState<string | null>(null);
 
-  const preview = useMemo(
-    () => [localDraft.opener, localDraft.body, localDraft.cta].filter(Boolean).join("\n\n"),
-    [localDraft]
-  );
+  const preview = useMemo(() => {
+    const normalize = (segment: string) => segment.replace(/[\n\r]+/g, " ").replace(/\s{2,}/g, " ").trim();
+    return [localDraft.opener, localDraft.body, localDraft.cta]
+      .map((part) => normalize(part || ""))
+      .filter(Boolean)
+      .join(" ");
+  }, [localDraft]);
 
   const activity = draft.activity?.[0];
   const locked = pending || !!draft.regenerating;
@@ -611,11 +648,23 @@ function DraftCard({
     });
   };
 
+  const statusMeta = getStatusMeta(draft.status);
+  const isApprovedStatus = draft.status === "APPROVED" || draft.status === "MESSAGE_ONLY_APPROVED";
+  const canSendNow = isApprovedStatus;
+
   return (
     <section className="card">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <div>
-          <div className="pill">{draft.status === "APPROVED" ? "Approved (unsent)" : "Draft Ready"}</div>
+          <div
+            className="pill"
+            style={{
+              background: statusMeta.background,
+              color: statusMeta.color,
+            }}
+          >
+            {statusMeta.label}
+          </div>
           <h3 style={{ margin: "10px 0 4px 0" }}>{draft.name || "Unknown lead"}</h3>
           <div style={{ color: "#a5b4fc", marginBottom: 8 }}>{draft.headline}</div>
         </div>
@@ -701,7 +750,7 @@ function DraftCard({
       <div className="button-row">
         <button
           className="btn"
-          disabled={locked || draft.status === "APPROVED"}
+          disabled={locked || isApprovedStatus}
           onClick={() =>
             run(() =>
               approveDraft({
@@ -721,12 +770,12 @@ function DraftCard({
         <button className="btn secondary" disabled={locked} onClick={() => run(() => rejectDraft(draft.leadId))}>
           {pending ? "..." : draft.regenerating ? "Pending..." : "Reject"}
         </button>
-        {draft.status === "APPROVED" ? (
+        {canSendNow ? (
           <button
             className="btn warn"
             disabled={locked}
             onClick={() =>
-              run(() => sendLeadNow(draft.leadId))
+              run(() => sendLeadNow(draft.leadId, outreachMode))
             }
           >
             {pending ? "Sending..." : "Send Now"}

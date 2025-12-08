@@ -26,7 +26,7 @@ logger = get_logger("sender")
 
 # Reuse the scraper's persisted auth state to avoid drift between workers.
 AUTH_STATE_PATH = (Path(__file__).parent.parent / "scraper" / "auth.json").resolve()
-DAILY_SEND_DEFAULT = 42
+DAILY_SEND_DEFAULT = 100
 
 
 def get_supabase_client() -> Client:
@@ -141,22 +141,36 @@ def fetch_approved_leads(client: Client, limit: int) -> list[Dict[str, Any]]:
     return rows
 
 
-def fetch_connect_only_sent_leads(client: Client, limit: int) -> list[Dict[str, Any]]:
-    """Fetch leads with status CONNECT_ONLY_SENT and outreach_mode = 'connect_only'."""
-    logger.db_query("select", "leads", {"status": "CONNECT_ONLY_SENT", "outreach_mode": "connect_only", "limit": limit})
+MESSAGE_ONLY_PIPELINE_STATUSES = [
+    "CONNECT_ONLY_SENT",
+    "MESSAGE_ONLY_READY",
+    "MESSAGE_ONLY_APPROVED",
+]
+
+
+def fetch_message_only_leads(client: Client, limit: int) -> list[Dict[str, Any]]:
+    """Fetch leads eligible for message-only sending (pending or approved)."""
+    logger.db_query(
+        "select",
+        "leads",
+        {"status": MESSAGE_ONLY_PIPELINE_STATUSES, "outreach_mode": "connect_only", "limit": limit},
+    )
     resp = (
         client.table("leads")
-        .select("id, linkedin_url, first_name, last_name, company_name")
-        .eq("status", "CONNECT_ONLY_SENT")
+        .select("id, linkedin_url, first_name, last_name, company_name, status")
+        .in_("status", MESSAGE_ONLY_PIPELINE_STATUSES)
         .eq("outreach_mode", "connect_only")
         .order("updated_at", desc=True)
         .limit(limit)
         .execute()
     )
     rows = resp.data or []
-    logger.db_result("select", "leads", {"status": "CONNECT_ONLY_SENT"}, len(rows))
+    logger.db_result("select", "leads", {"status": MESSAGE_ONLY_PIPELINE_STATUSES}, len(rows))
     if rows:
-        logger.info(f"Fetched {len(rows)} CONNECT_ONLY_SENT leads for message-only mode")
+        logger.info(
+            "Fetched %d message-only leads",
+            data={"count": len(rows), "statuses": MESSAGE_ONLY_PIPELINE_STATUSES},
+        )
     return rows
 
 
@@ -1046,13 +1060,13 @@ async def main() -> None:
     try:
         client = get_supabase_client()
        
-        # Compute daily limit with a hard minimum of 42 to avoid getting stuck at 20
+        # Compute daily limit with a hard minimum of 100 to avoid getting stuck at 20
         env_limit = os.getenv("DAILY_SEND_LIMIT")
         try:
             parsed_limit = int(env_limit) if env_limit else DAILY_SEND_DEFAULT
         except Exception:
             parsed_limit = DAILY_SEND_DEFAULT
-        daily_limit = max(parsed_limit, 42)
+        daily_limit = max(parsed_limit, 100)
         logger.info("Daily send limit computed", data={"limit": daily_limit, "env": env_limit, "default": DAILY_SEND_DEFAULT})
         already_sent = sent_today_count(client)
 
@@ -1095,13 +1109,31 @@ async def main() -> None:
             return
 
         if args.message_only:
-            # Process CONNECT_ONLY_SENT leads - send messages to accepted connections
-            leads_to_process = fetch_connect_only_sent_leads(client, remaining)
-            if not leads_to_process:
-                logger.info("No CONNECT_ONLY_SENT leads to process")
-                return
+            # Process message-only pipeline (pending connections or approved drafts)
+            leads_to_process: list[Dict[str, Any]] = []
 
-            logger.info(f"Processing {len(leads_to_process)} CONNECT_ONLY_SENT leads in message-only mode")
+            if args.lead_id:
+                lead = fetch_lead_by_id(client, args.lead_id)
+                if not lead:
+                    logger.warn("Requested lead id not found for message-only send", {"leadId": args.lead_id})
+                    return
+                if lead.get("status") not in MESSAGE_ONLY_PIPELINE_STATUSES:
+                    logger.warn(
+                        "Requested lead is not in message-only statuses",
+                        {"leadId": args.lead_id, "status": lead.get("status")},
+                    )
+                    return
+                leads_to_process = [lead]
+            else:
+                leads_to_process = fetch_message_only_leads(client, remaining)
+                if not leads_to_process:
+                    logger.info("No message-only leads to process (CONNECT_ONLY_SENT/MESSAGE_ONLY_*)")
+                    return
+
+            logger.info(
+                f"Processing {len(leads_to_process)} message-only leads",
+                data={"leadIds": [l.get("id") for l in leads_to_process]},
+            )
             playwright, browser, context = await open_browser(headless=False)
             try:
                 logger.info("Browser opened, authenticating...")
@@ -1121,16 +1153,23 @@ async def main() -> None:
                         else:
                             failed_count += 1
                     except Exception as exc:
-                        logger.error(f"Failed to process message-only lead", {"leadId": lead.get('id')}, error=exc)
+                        logger.error(
+                            "Failed to process message-only lead",
+                            {"leadId": lead.get("id")},
+                            error=exc,
+                        )
                         failed_count += 1
                     await random_pause(2, 4)
 
-                logger.operation_complete("sender-message-only", result={
-                    "sent": sent_count,
-                    "pending": pending_count,
-                    "failed": failed_count,
-                    "total": len(leads_to_process)
-                })
+                logger.operation_complete(
+                    "sender-message-only",
+                    result={
+                        "sent": sent_count,
+                        "pending": pending_count,
+                        "failed": failed_count,
+                        "total": len(leads_to_process),
+                    },
+                )
             finally:
                 await shutdown(playwright, browser)
                 logger.info("Browser closed")
