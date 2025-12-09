@@ -79,20 +79,20 @@ function startDraftAgent(
 
 export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_message") {
   const correlationId = logger.actionStart("fetchDraftFeed", {}, { outreachMode });
-  
+
   // Message-only mode surfaces pending connections plus message-only draft stages
   // Connect+message mode shows standard DRAFT_READY/APPROVED leads
-  const statusList = outreachMode === "message_only" 
+  const statusList = outreachMode === "message_only"
     ? [...MESSAGE_ONLY_FEED_STATUSES]
     : [...CONNECT_MESSAGE_FEED_STATUSES];
-  
+
   const dbOutreachMode = OUTREACH_MODE_TO_DB[outreachMode];
-  
+
   try {
     const client = supabaseAdmin();
-    
+
     logger.dbQuery("select", "leads", { correlationId }, { status: statusList, outreachMode: dbOutreachMode, limit: 50 });
-    
+
     let query = client
       .from("leads")
       .select("id, linkedin_url, first_name, last_name, company_name, status, sent_at, profile_data, recent_activity, drafts(*)")
@@ -100,17 +100,17 @@ export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_messa
       .order("updated_at", { ascending: false })
       .limit(50)
       .eq("outreach_mode", dbOutreachMode);
-    
+
     const { data, error } = await query;
 
     if (error) {
       logger.error("Failed to fetch draft feed", { correlationId }, error);
       return [];
     }
-    
+
     logger.dbResult("select", "leads", { correlationId }, data);
     logger.debug("Raw leads data", { correlationId }, { count: data?.length, sample: data?.[0] });
-    
+
     const result = (data || []).flatMap((lead) => {
       const drafts = lead.drafts || [];
       logger.debug("Processing lead", { correlationId, leadId: lead.id }, {
@@ -162,7 +162,7 @@ export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_messa
 
       return [];
     });
-    
+
     logger.actionComplete("fetchDraftFeed", { correlationId }, { count: result.length });
     return result;
   } catch (error: any) {
@@ -216,14 +216,14 @@ export async function fetchLeadList(
   filters?: LeadFilters
 ): Promise<LeadListResult> {
   const correlationId = logger.actionStart("fetchLeadList", {}, { page, pageSize, filters });
-  
+
   try {
     const client = supabaseAdmin();
     const from = (page - 1) * pageSize;
     const to = from + pageSize - 1;
-    
+
     logger.dbQuery("select", "leads", { correlationId }, { page, pageSize, filters, range: `${from}-${to}` });
-    
+
     let query = client
       .from("leads")
       .select(
@@ -260,7 +260,7 @@ export async function fetchLeadList(
       logger.error("Failed to fetch lead list", { correlationId }, error, { page, pageSize, filters });
       return { leads: [], total: 0, page, pageSize, totalPages: 0 };
     }
-    
+
     logger.dbResult("select", "leads", { correlationId }, data);
 
     const leads = (data || []).map((lead) => ({
@@ -326,12 +326,12 @@ export type FollowupRow = {
 
 export async function fetchFollowups(statuses: Array<FollowupRow["status"]> = ["PENDING_REVIEW", "APPROVED"], limit = 50) {
   const correlationId = logger.actionStart("fetchFollowups", {}, { statuses, limit });
-  
+
   try {
     const client = supabaseAdmin();
-    
+
     logger.dbQuery("select", "followups", { correlationId }, { statuses, limit });
-    
+
     let query = client
       .from("followups")
       .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, last_reply_at, followup_count, profile_data)")
@@ -344,10 +344,10 @@ export async function fetchFollowups(statuses: Array<FollowupRow["status"]> = ["
       logger.error("Failed to fetch followups", { correlationId }, error, { statuses, limit });
       return [] as FollowupRow[];
     }
-    
+
     logger.dbResult("select", "followups", { correlationId }, data);
     logger.actionComplete("fetchFollowups", { correlationId }, { count: data?.length || 0 });
-    
+
     return (data || []) as FollowupRow[];
   } catch (error: any) {
     logger.actionError("fetchFollowups", { correlationId }, error, { statuses, limit });
@@ -404,22 +404,22 @@ export async function skipFollowup(followupId: string) {
 
 export async function generateFollowupDraft(followupId: string): Promise<{ success: boolean; draft?: string; error?: string }> {
   const correlationId = logger.actionStart("generateFollowupDraft", { followupId });
-  
+
   try {
     const client = supabaseAdmin();
-    
+
     // Fetch followup with lead data
     const { data: followup, error: fetchError } = await client
       .from("followups")
       .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, profile_data)")
       .eq("id", followupId)
       .single();
-    
+
     if (fetchError || !followup) {
       logger.error("Failed to fetch followup for draft generation", { correlationId, followupId }, fetchError || undefined);
       return { success: false, error: "Followup not found" };
     }
-    
+
     // Get previous sent messages for context
     const { data: previousFollowups } = await client
       .from("followups")
@@ -428,7 +428,7 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
       .eq("status", "SENT")
       .order("sent_at", { ascending: false })
       .limit(3);
-    
+
     // Get the original draft sent to this lead
     const { data: originalDraft } = await client
       .from("drafts")
@@ -437,7 +437,7 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
       .order("created_at", { ascending: false })
       .limit(1)
       .single();
-    
+
     // Spawn the followup agent
     const repoRoot = path.resolve(process.cwd(), "..", "..");
     const agentDir = path.resolve(repoRoot, "mcp-server");
@@ -445,7 +445,7 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
     const venvPython = path.join(agentDir, "venv", "bin", "python");
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
-    
+
     // Prepare context JSON for the agent
     const context = {
       followup_id: followupId,
@@ -459,17 +459,17 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
       previous_messages: previousFollowups?.map(f => f.sent_text).filter(Boolean) || [],
       original_message: originalDraft?.final_message || "",
     };
-    
+
     // Write context to temp file for the agent to read
     const fs = await import("fs/promises");
     const os = await import("os");
     const contextPath = path.join(os.tmpdir(), `followup_context_${followupId}.json`);
     await fs.writeFile(contextPath, JSON.stringify(context, null, 2));
-    
+
     logger.workerSpawn("followup-agent", [agentPath, "--context", contextPath], { correlationId, followupId });
-    
+
     const { execSync } = await import("child_process");
-    
+
     try {
       // Run synchronously to get the result
       const result = execSync(`${pythonExec} ${agentPath} --context "${contextPath}"`, {
@@ -478,23 +478,23 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
         timeout: 60000, // 60 second timeout
         env: { ...process.env, CORRELATION_ID: correlationId },
       });
-      
+
       // Parse the result (expected JSON with "message" field)
       const parsed = JSON.parse(result.trim());
       const draft = parsed.message || "";
-      
+
       if (draft) {
         // Update the followup with the generated draft
         await client
           .from("followups")
           .update({ draft_text: draft })
           .eq("id", followupId);
-        
+
         logger.actionComplete("generateFollowupDraft", { correlationId, followupId }, { draftLength: draft.length });
         revalidatePath("/followups");
         return { success: true, draft };
       }
-      
+
       return { success: false, error: "No draft generated" };
     } catch (execError: any) {
       logger.error("Followup agent execution failed", { correlationId, followupId }, execError);
@@ -503,11 +503,89 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
       // Clean up temp file
       try {
         await fs.unlink(contextPath);
-      } catch {}
+      } catch { }
     }
   } catch (error: any) {
     logger.actionError("generateFollowupDraft", { correlationId, followupId }, error);
     return { success: false, error: error.message || "Unknown error" };
+  }
+}
+
+/**
+ * Generate drafts for all PENDING_REVIEW followups that don't have a draft yet.
+ * Runs generation in parallel for better performance.
+ */
+export async function generateAllFollowupDrafts(): Promise<{
+  total: number;
+  generated: number;
+  failed: number;
+  errors: string[];
+}> {
+  const correlationId = logger.actionStart("generateAllFollowupDrafts", {});
+
+  try {
+    const client = supabaseAdmin();
+
+    // Fetch all PENDING_REVIEW followups without a draft
+    const { data: followups, error: fetchError } = await client
+      .from("followups")
+      .select("id, draft_text")
+      .eq("status", "PENDING_REVIEW");
+
+    if (fetchError) {
+      logger.error("Failed to fetch followups for bulk draft generation", { correlationId }, fetchError);
+      throw fetchError;
+    }
+
+    // Filter to only those without a draft
+    const needsDraft = (followups || []).filter(f => !f.draft_text || f.draft_text.trim() === "");
+
+    if (needsDraft.length === 0) {
+      logger.actionComplete("generateAllFollowupDrafts", { correlationId }, { total: 0, generated: 0, failed: 0 });
+      return { total: 0, generated: 0, failed: 0, errors: [] };
+    }
+
+    logger.info(`Starting bulk draft generation for ${needsDraft.length} followups`, { correlationId });
+
+    // Run all generations in parallel
+    const results = await Promise.allSettled(
+      needsDraft.map(f => generateFollowupDraft(f.id))
+    );
+
+    const errors: string[] = [];
+    let generated = 0;
+    let failed = 0;
+
+    results.forEach((result, index) => {
+      const followupId = needsDraft[index].id;
+      if (result.status === "fulfilled" && result.value.success) {
+        generated++;
+      } else {
+        failed++;
+        const errorMsg = result.status === "rejected"
+          ? result.reason?.message || "Unknown error"
+          : result.value.error || "Failed to generate";
+        errors.push(`Followup ${followupId}: ${errorMsg}`);
+      }
+    });
+
+    logger.actionComplete("generateAllFollowupDrafts", { correlationId }, {
+      total: needsDraft.length,
+      generated,
+      failed,
+    });
+
+    revalidatePath("/followups");
+
+    return {
+      total: needsDraft.length,
+      generated,
+      failed,
+      errors,
+    };
+  } catch (error: any) {
+    logger.actionError("generateAllFollowupDrafts", { correlationId }, error);
+    throw error;
   }
 }
 
@@ -583,6 +661,67 @@ export async function triggerDraftGeneration(promptType: PromptType = 1, outreac
   startDraftAgent(undefined, promptType, outreachMode);
 }
 
+/**
+ * Bulk approve all PENDING_REVIEW followups that have a draft.
+ * Then triggers the sender worker.
+ */
+export async function approveAndSendAllFollowups() {
+  const correlationId = logger.actionStart("approveAndSendAllFollowups", {});
+
+  try {
+    const client = supabaseAdmin();
+
+    // 1. Fetch all pending followups that HAVE draft text
+    const { data: pending, error: fetchError } = await client
+      .from("followups")
+      .select("id")
+      .eq("status", "PENDING_REVIEW")
+      .not("draft_text", "is", null)
+      .neq("draft_text", ""); // Ensure not empty string
+
+    if (fetchError) {
+      logger.error("Failed to fetch pending followups", { correlationId }, fetchError);
+      throw fetchError;
+    }
+
+    if (!pending || pending.length === 0) {
+      return { approved: 0, triggered: false };
+    }
+
+    const ids = pending.map(p => p.id);
+
+    // 2. Update status to APPROVED
+    const { data: updatedData, error: updateError } = await client
+      .from("followups")
+      .update({ status: "APPROVED" })
+      .in("id", ids)
+      .select("id");
+
+    if (updateError) {
+      logger.error("Failed to bulk approve followups", { correlationId }, updateError);
+      throw updateError;
+    }
+
+    const approvedCount = updatedData?.length || 0;
+
+    // 3. Trigger sender worker
+    let triggered = false;
+    if (approvedCount > 0) {
+      await triggerFollowupSender();
+      triggered = true;
+    }
+
+    revalidatePath("/followups");
+    logger.actionComplete("approveAndSendAllFollowups", { correlationId }, { approved: approvedCount, triggered });
+
+    return { approved: approvedCount, triggered };
+
+  } catch (error: any) {
+    logger.actionError("approveAndSendAllFollowups", { correlationId }, error);
+    throw error;
+  }
+}
+
 export async function triggerFollowupSender() {
   try {
     const repoRoot = path.resolve(process.cwd(), "..", "..");
@@ -649,9 +788,9 @@ export async function sendAllApproved(outreachMode: OutreachMode = "connect_mess
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-    
+
     // For message_only mode, pass --message-only flag to sender
-    const args = outreachMode === "message_only" 
+    const args = outreachMode === "message_only"
       ? [senderPath, "--message-only"]
       : [senderPath];
 
@@ -678,10 +817,10 @@ export async function approveDraft(input: DraftInput) {
   const correlationId = logger.actionStart("approveDraft", { leadId: input.leadId, draftId: input.draftId?.toString() }, input);
   const mode: OutreachMode = input.outreachMode ?? "connect_message";
   const approvedStatus = mode === "message_only" ? "MESSAGE_ONLY_APPROVED" : "APPROVED";
-  
+
   try {
     const client = supabaseAdmin();
-    
+
     // Check daily send limit (enforce minimum of 100 even if env is set lower)
     const parsedEnvLimit = parseInt(process.env.DAILY_SEND_LIMIT || "", 10);
     const dailyLimit = Number.isFinite(parsedEnvLimit) && parsedEnvLimit > 0 ? Math.max(parsedEnvLimit, 100) : 100;
@@ -693,7 +832,7 @@ export async function approveDraft(input: DraftInput) {
       .eq("status", "SENT")
       .gte("sent_at", today.toISOString());
     logger.info("Daily limit check", { correlationId, count: count || 0, dailyLimit });
-    
+
     if ((count || 0) >= dailyLimit) {
       const error = new Error(`Daily send limit reached (${count}/${dailyLimit}). No more messages can be sent today.`);
       logger.actionError("approveDraft", { correlationId, leadId: input.leadId }, error, input);
@@ -702,7 +841,7 @@ export async function approveDraft(input: DraftInput) {
     const finalMessage = buildFinalMessage(input.opener, input.body, input.cta);
 
     logger.dbQuery("update", "drafts", { correlationId, draftId: input.draftId?.toString() }, { finalMessage });
-    
+
     const { error: draftErr } = await client
       .from("drafts")
       .update({
@@ -718,7 +857,7 @@ export async function approveDraft(input: DraftInput) {
       logger.error("Failed to update draft", { correlationId, draftId: input.draftId?.toString() }, draftErr);
       throw draftErr;
     }
-    
+
     logger.dbResult("update", "drafts", { correlationId, draftId: input.draftId?.toString() });
     logger.dbQuery("update", "leads", { correlationId, leadId: input.leadId }, { status: approvedStatus });
 
@@ -726,12 +865,12 @@ export async function approveDraft(input: DraftInput) {
       .from("leads")
       .update({ status: approvedStatus })
       .eq("id", input.leadId);
-      
+
     if (leadErr) {
       logger.error("Failed to update lead status", { correlationId, leadId: input.leadId }, leadErr);
       throw leadErr;
     }
-    
+
     logger.dbResult("update", "leads", { correlationId, leadId: input.leadId });
 
     // Fire-and-forget: trigger the sender worker for connect+message approvals only.
@@ -745,9 +884,9 @@ export async function approveDraft(input: DraftInput) {
         const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
         const execToUse = pythonExec;
         const args = [senderPath, "--lead-id", input.leadId];
-        
+
         logger.workerSpawn("sender", args, { correlationId, leadId: input.leadId });
-        
+
         const proc = spawn(execToUse, args, {
           cwd: repoRoot,
           stdio: ["ignore", "inherit", "inherit"],
@@ -755,7 +894,7 @@ export async function approveDraft(input: DraftInput) {
           env: { ...process.env, CORRELATION_ID: correlationId },
         });
         proc.unref();
-        
+
         logger.info("Sender worker triggered", { correlationId, leadId: input.leadId, pid: proc.pid });
       } catch (err: any) {
         logger.error("Failed to trigger sender worker", { correlationId, leadId: input.leadId }, err);

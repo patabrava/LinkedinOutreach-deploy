@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowserClient } from "../lib/supabaseClient";
 import type { FollowupRow } from "../app/actions";
-import { approveFollowup, skipFollowup, generateFollowupDraft, stopFollowups, retryFollowup } from "../app/actions";
+import { approveFollowup, skipFollowup, generateFollowupDraft, generateAllFollowupDrafts, approveAndSendAllFollowups, triggerFollowupSender, stopFollowups, retryFollowup } from "../app/actions";
 
 type Props = {
   initial: FollowupRow[];
@@ -13,11 +13,11 @@ const formatDate = (iso?: string | null) => {
   if (!iso) return "—";
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleString("en-US", { 
-    month: "short", 
-    day: "numeric", 
-    hour: "2-digit", 
-    minute: "2-digit" 
+  return date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
   });
 };
 
@@ -40,6 +40,10 @@ export default function FollowupsList({ initial }: Props) {
   const [rows, setRows] = useState<FollowupRow[]>(() => initial || []);
   const [draftEdits, setDraftEdits] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const [genPending, setGenPending] = useState(false);
+  const [genMessage, setGenMessage] = useState<string | null>(null);
+  const [bulkPending, setBulkPending] = useState(false);
+  const [bulkMessage, setBulkMessage] = useState<string | null>(null);
 
   useEffect(() => {
     setRows(initial || []);
@@ -173,19 +177,105 @@ export default function FollowupsList({ initial }: Props) {
     }
   };
 
+  const onGenerateAllDrafts = async () => {
+    setGenMessage(null);
+    setGenPending(true);
+    try {
+      const result = await generateAllFollowupDrafts();
+      if (result.total === 0) {
+        setGenMessage("No followups need draft generation.");
+      } else if (result.failed === 0) {
+        setGenMessage(`Successfully generated ${result.generated} draft${result.generated === 1 ? "" : "s"}.`);
+      } else {
+        setGenMessage(`Generated ${result.generated}/${result.total} drafts. ${result.failed} failed.`);
+      }
+    } catch (err: any) {
+      setGenMessage(err?.message || "Failed to generate drafts.");
+    } finally {
+      setGenPending(false);
+    }
+  };
+
+  const onBulkApproveAndSend = async () => {
+    const readyCount = pending.filter(r => r.draft_text).length;
+    if (readyCount === 0) {
+      alert("No pending followups have drafts to approve.");
+      return;
+    }
+    if (!confirm(`Approve and send ${readyCount} drafts?`)) return;
+
+    setBulkMessage(null);
+    setBulkPending(true);
+    try {
+      const res = await approveAndSendAllFollowups();
+      setBulkMessage(`Approved ${res.approved} drafts. ${res.triggered ? "Sender triggered." : ""}`);
+    } catch (err: any) {
+      setBulkMessage(err.message || "Failed to bulk approve.");
+    } finally {
+      setBulkPending(false);
+    }
+  };
+
+  const onSendApproved = async () => {
+    setBulkMessage(null);
+    setBulkPending(true);
+    try {
+      await triggerFollowupSender();
+      setBulkMessage("Sender triggered for approved followups.");
+    } catch (err: any) {
+      setBulkMessage(err.message || "Failed to trigger sender.");
+    } finally {
+      setBulkPending(false);
+    }
+  };
+
   return (
     <section className="card">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <div>
           <div className="pill">Follow-ups</div>
           <h3 style={{ margin: "10px 0 6px 0" }}>Follow-ups needing review</h3>
           <div className="muted">Review replies and nudge opportunities, then draft and send your response.</div>
         </div>
-        <div className="muted" style={{ textAlign: "right" }}>
-          <div>Pending: {pending.length} • Approved: {approved.length}</div>
-          <div style={{ fontSize: 11, marginTop: 4 }}>
-            Replies: {replies.length} • Nudges: {nudges.length}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end" }}>
+          <div className="muted" style={{ textAlign: "right" }}>
+            <div>Pending: {pending.length} • Approved: {approved.length}</div>
+            <div style={{ fontSize: 11, marginTop: 4 }}>
+              Replies: {replies.length} • Nudges: {nudges.length}
+            </div>
           </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              className="btn warn"
+              onClick={onBulkApproveAndSend}
+              disabled={bulkPending || pending.filter(r => r.draft_text).length === 0}
+            >
+              {bulkPending ? "Sending..." : "Approve & Send All"}
+            </button>
+            <button
+              className="btn secondary"
+              onClick={onSendApproved}
+              disabled={bulkPending}
+            >
+              Send Approved
+            </button>
+            <button
+              className="btn"
+              onClick={onGenerateAllDrafts}
+              disabled={genPending || pending.length === 0}
+              style={{
+                background: "linear-gradient(135deg, #8b5cf6, #6366f1)",
+                minWidth: 140,
+              }}
+            >
+              {genPending ? "Generating..." : "Generate Drafts"}
+            </button>
+          </div>
+          {(genMessage || bulkMessage) && (
+            <span className="muted" style={{ fontSize: 12 }} aria-live="polite">
+              {genMessage || bulkMessage}
+            </span>
+          )}
         </div>
       </div>
 
@@ -253,7 +343,7 @@ export default function FollowupsList({ initial }: Props) {
                           {formatDate(row.reply_timestamp)}
                         </div>
                         <div style={{ lineHeight: 1.5, fontSize: 13 }}>
-                          {followupTypeKey === "NUDGE" 
+                          {followupTypeKey === "NUDGE"
                             ? <span className="muted" style={{ fontStyle: "italic" }}>No reply yet - consider a follow-up</span>
                             : (row.reply_snippet || "—")
                           }
@@ -300,9 +390,9 @@ export default function FollowupsList({ initial }: Props) {
                       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                         {row.status === "PENDING_REVIEW" && (
                           <>
-                            <button 
-                              className="btn" 
-                              disabled={busy[row.id]} 
+                            <button
+                              className="btn"
+                              disabled={busy[row.id]}
                               onClick={() => onGenerateDraft(row)}
                               style={{ background: "linear-gradient(135deg, #8b5cf6, #6366f1)", fontSize: 12 }}
                             >

@@ -7,6 +7,14 @@ import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
+const DEFAULT_DAILY_ENRICHMENT_CAP = 50;
+
+const getDailyEnrichmentCap = () => {
+  const parsedCap = parseInt(process.env.DAILY_ENRICHMENT_CAP || "", 10);
+  if (Number.isFinite(parsedCap) && parsedCap > 0) return parsedCap;
+  return DEFAULT_DAILY_ENRICHMENT_CAP;
+};
+
 const STATUSES = [
   "NEW",
   "PROCESSING",
@@ -49,6 +57,7 @@ export async function GET(request: Request) {
   const requestedMode = url.searchParams.get("mode") === "connect_only" ? "connect_only" : "message";
   const modeConfig = MODE_CONFIG[requestedMode];
   const correlationId = logger.apiRequest("GET", "/api/enrich/status");
+  const dailyCap = getDailyEnrichmentCap();
   
   try {
     const client = supabaseAdmin();
@@ -112,11 +121,56 @@ export async function GET(request: Request) {
     const remaining = (counts.NEW || 0) + (counts.PROCESSING || 0);
     const completed = modeConfig.completedStatuses.reduce((sum, status) => sum + (counts[status] || 0), 0);
 
+    // Track what actually happened today so we can cap the status bar to the daily quota
+    const startOfDay = new Date();
+    startOfDay.setUTCHours(0, 0, 0, 0);
+    const startIso = startOfDay.toISOString();
+
+    logger.dbQuery(
+      "select-count",
+      "leads",
+      { correlationId, status: modeConfig.completedStatuses, outreachMode: modeConfig.outreachMode },
+      { since: startIso }
+    );
+
+    const { count: completedToday, error: completedTodayError } = await client
+      .from("leads")
+      .select("id", { count: "exact", head: true })
+      .in("status", modeConfig.completedStatuses)
+      .eq("outreach_mode", modeConfig.outreachMode)
+      .gte("updated_at", startIso);
+
+    if (completedTodayError) {
+      logger.error("Failed to count today's completions", { correlationId }, completedTodayError);
+      throw completedTodayError;
+    }
+
+    logger.dbResult(
+      "select-count",
+      "leads",
+      { correlationId, status: modeConfig.completedStatuses },
+      completedToday ?? 0
+    );
+
+    // Remaining for today is bounded by both the quota and the queue
+    const remainingToday = Math.max(
+      0,
+      Math.min(dailyCap - (completedToday || 0), remaining)
+    );
+
     // Explicit ground-truth log of counts and computed values
     logger.debug(
       "Enrichment status snapshot",
       { correlationId },
-      { counts, remaining, completed, mode: requestedMode }
+      {
+        counts,
+        remaining,
+        completed,
+        mode: requestedMode,
+        dailyCap,
+        completedToday: completedToday || 0,
+        remainingToday,
+      }
     );
 
     const response = {
@@ -125,6 +179,9 @@ export async function GET(request: Request) {
       counts,
       remaining,
       completed,
+      dailyCap,
+      completedToday: completedToday || 0,
+      remainingToday,
       nextLead: nextLead || null,
     };
 

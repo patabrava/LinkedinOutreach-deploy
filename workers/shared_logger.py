@@ -97,7 +97,7 @@ class StructuredLogger:
         # Build log line
         log_line = f"[{timestamp}] {level}: {message}{context_part}"
         
-        # Print to appropriate stream
+        # Always send logs to stderr so stdout can be reserved for machine-readable output
         if level == "ERROR":
             print(log_line, file=sys.stderr)
             if "error" in entry:
@@ -105,13 +105,13 @@ class StructuredLogger:
                 if "traceback" in entry["error"]:
                     print(f"  Traceback:\n{entry['error']['traceback']}", file=sys.stderr)
         else:
-            print(log_line)
+            print(log_line, file=sys.stderr)
         
         # Print data if present and not too large
         if "data" in entry:
             data_str = json.dumps(entry["data"], indent=2, default=str)
             if len(data_str) < 500:
-                print(f"  Data: {data_str}")
+                print(f"  Data: {data_str}", file=sys.stderr)
     
     def _log(self, level: str, message: str, context: Optional[Dict[str, Any]] = None, data: Any = None, error: Optional[Exception] = None) -> None:
         """Internal log method"""

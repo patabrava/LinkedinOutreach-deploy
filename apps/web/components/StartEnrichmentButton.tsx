@@ -10,6 +10,9 @@ type StatusResponse = {
   counts: StatusCounts;
   remaining: number;
   completed: number;
+  dailyCap?: number;
+  completedToday?: number;
+  remainingToday?: number;
   nextLead: {
     id: string;
     linkedin_url: string;
@@ -76,8 +79,11 @@ export function StartEnrichmentButton({ mode = "message" }: StartEnrichmentButto
       }
       setStatus(data);
       setError("");
-      if (data.remaining > 0) {
+      const pending = typeof data.remainingToday === "number" ? data.remainingToday : data.remaining;
+      if (pending > 0) {
         setPolling(true);
+      } else {
+        setPolling(false);
       }
     } catch (err: any) {
       setError(err?.message || "Unable to load status.");
@@ -129,15 +135,25 @@ export function StartEnrichmentButton({ mode = "message" }: StartEnrichmentButto
     }
   }, [status]);
 
-  const totalTracked = useMemo(() => {
-    if (!status) return 0;
-    return status.remaining + status.completed;
+  const progress = useMemo(() => {
+    const completedForBar = status ? (status.completedToday ?? status.completed) : 0;
+    const remainingForBar = status ? (status.remainingToday ?? status.remaining) : 0;
+    const dailyCap = typeof status?.dailyCap === "number" ? status.dailyCap : null;
+    const baseTotal = completedForBar + remainingForBar;
+    const totalForBar = dailyCap !== null ? Math.min(dailyCap, baseTotal || dailyCap) : baseTotal;
+    return {
+      completedForBar,
+      remainingForBar,
+      totalForBar,
+      dailyCap,
+      backlogRemaining: status?.remaining ?? 0,
+    };
   }, [status]);
 
   const completionPercent = useMemo(() => {
-    if (!status || totalTracked === 0) return 0;
-    return Math.min(100, Math.round((status.completed / totalTracked) * 100));
-  }, [status, totalTracked]);
+    if (!status || !progress.totalForBar) return 0;
+    return Math.min(100, Math.round((progress.completedForBar / progress.totalForBar) * 100));
+  }, [status, progress.completedForBar, progress.totalForBar]);
 
   const nextLeadLabel = useMemo(() => {
     if (!status?.nextLead) return "";
@@ -252,8 +268,18 @@ export function StartEnrichmentButton({ mode = "message" }: StartEnrichmentButto
           />
         </div>
         <div style={{ marginTop: 8, fontSize: 13, color: "#cbd5e1" }}>
-          {status ? `${status.completed} completed • ${status.remaining} remaining` : "Loading status…"}
+          {status
+            ? `${progress.completedForBar} completed today • ${progress.remainingForBar} remaining today`
+            : "Loading status…"}
         </div>
+        {progress.dailyCap !== null ? (
+          <div style={{ marginTop: 4, fontSize: 12, color: "#9ca3af" }}>
+            Daily cap: {progress.dailyCap}
+            {progress.backlogRemaining > progress.remainingForBar
+              ? ` • Queue backlog: ${progress.backlogRemaining}`
+              : ""}
+          </div>
+        ) : null}
         {nextLeadLabel ? (
           <div style={{ marginTop: 6, fontSize: 12, color: "#9ca3af" }}>Next up: {nextLeadLabel}</div>
         ) : null}

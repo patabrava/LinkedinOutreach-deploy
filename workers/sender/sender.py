@@ -283,7 +283,26 @@ async def open_message_surface(page: Page) -> str:
             profile_container = page
             logger.warn("Using page-level selectors as last resort")
 
-    # PATH 1: Try Message link (for existing connections)
+    # PATH 1a: Explicit "Nachricht an <Name>" button (localized message button)
+    message_btn = profile_container.get_by_role("button", name=re.compile(r"(Nachricht an|Message to)", re.I))
+    message_btn_count = await message_btn.count()
+    logger.debug("Message button check", data={"count": message_btn_count})
+
+    if message_btn_count > 0:
+        logger.debug("Found localized message button - user is in network")
+        try:
+            await message_btn.first.click(timeout=8_000)
+            await page.wait_for_selector(
+                "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
+                timeout=10_000,
+            )
+            await random_pause()
+            logger.debug("Message button path successful")
+            return "message"
+        except Exception as e:
+            logger.debug("Message button path failed", error=e)
+
+    # PATH 1b: Try Message link (for existing connections)
     # Scoped to profile container to avoid inbox Message buttons
     message_link = profile_container.get_by_role("link", name=re.compile(r"(Message|Nachricht)", re.I))
     message_link_count = await message_link.count()
@@ -540,6 +559,8 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
         "section[role='dialog'] div[role='textbox'][contenteditable='true']",
         "div[aria-label*='Write a message'][contenteditable='true']",
         "div[role='textbox'][contenteditable='true']:not([id^='g-recaptcha'])",
+        # German “Nachricht verfassen …” input surfaced in user report
+        "div[id^='msg-form-ember'] div[role='textbox'][contenteditable='true']",
     ]
 
     editor = None
