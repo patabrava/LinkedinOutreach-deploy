@@ -261,7 +261,7 @@ async def open_message_surface(page: Page) -> str:
     """
     await wiggle_mouse(page)
 
-    logger.debug("Starting open_message_surface")
+    logger.info("Starting open_message_surface")
 
     # Scope all interactions to the profile page's main content area
     # Try lazy-column test ID first, with fallback to main profile section
@@ -269,16 +269,16 @@ async def open_message_surface(page: Page) -> str:
     try:
         profile_container = page.get_by_test_id("lazy-column")
         await profile_container.wait_for(state="visible", timeout=5_000)
-        logger.debug("Profile container found via lazy-column test ID")
+        logger.element_search("lazy-column", 1, context={"method": "test_id"})
     except Exception as e:
-        logger.warn("lazy-column test ID not found, trying fallback selectors", error=e)
+        logger.element_search("lazy-column", 0, context={"method": "test_id"})
         # Fallback to main profile section
         try:
             profile_container = page.locator("main.scaffold-layout__main, section.artdeco-card").first
             await profile_container.wait_for(state="visible", timeout=5_000)
-            logger.debug("Profile container found via fallback selector")
+            logger.selector_fallback("lazy-column", "main.scaffold-layout__main", success=True)
         except Exception as e2:
-            logger.error("No profile container found with any selector", error=e2)
+            logger.selector_fallback("lazy-column", "main.scaffold-layout__main", success=False)
             # Last resort: use page itself (risky but better than failing)
             profile_container = page
             logger.warn("Using page-level selectors as last resort")
@@ -286,68 +286,73 @@ async def open_message_surface(page: Page) -> str:
     # PATH 1a: Explicit "Nachricht an <Name>" button (localized message button)
     message_btn = profile_container.get_by_role("button", name=re.compile(r"(Nachricht an|Message to)", re.I))
     message_btn_count = await message_btn.count()
-    logger.debug("Message button check", data={"count": message_btn_count})
+    logger.element_search("Nachricht an / Message to button", message_btn_count, role="button", context={"path": "1a"})
 
     if message_btn_count > 0:
-        logger.debug("Found localized message button - user is in network")
         try:
             await message_btn.first.click(timeout=8_000)
+            logger.element_click("Message button", success=True)
             await page.wait_for_selector(
                 "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
                 timeout=10_000,
             )
             await random_pause()
-            logger.debug("Message button path successful")
+            logger.path_attempt("Message button (connected user)", 1, success=True)
             return "message"
         except Exception as e:
-            logger.debug("Message button path failed", error=e)
+            logger.element_click("Message button", success=False)
+            logger.path_attempt("Message button", 1, success=False)
 
     # PATH 1b: Try Message link (for existing connections)
     # Scoped to profile container to avoid inbox Message buttons
     message_link = profile_container.get_by_role("link", name=re.compile(r"(Message|Nachricht)", re.I))
     message_link_count = await message_link.count()
-    logger.debug(f"Message link check", data={"count": message_link_count})
+    logger.element_search("Message/Nachricht link", message_link_count, role="link", context={"path": "1b"})
 
     if message_link_count > 0:
-        logger.debug("Found Message link - user is in network")
         try:
             await message_link.first.click(timeout=8_000)
+            logger.element_click("Message link", success=True)
             # Wait for messaging overlay
             await page.wait_for_selector(
                 "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
                 timeout=10_000,
             )
             await random_pause()
-            logger.debug("Message link path successful")
+            logger.path_attempt("Message link (connected user)", 1, success=True)
             return "message"
         except Exception as e:
-            logger.debug(f"Message link path failed", error=e)
+            logger.element_click("Message link", success=False)
+            logger.path_attempt("Message link", 1, success=False)
 
     # PATH 2: Direct invite link inside profile container (Invite <Name> to ...)
     invite_link = profile_container.get_by_role("link", name=re.compile(r"(Invite .+ to|Einladen .+ zu)", re.I))
     invite_link_count = await invite_link.count()
-    logger.debug("Invite link check", data={"count": invite_link_count})
+    logger.element_search("Invite link", invite_link_count, role="link", context={"path": 2})
 
     if invite_link_count > 0:
-        logger.debug("Found invite link inside profile container")
         try:
             await invite_link.first.click(timeout=8_000)
+            logger.element_click("Invite link", success=True)
             await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
             await random_pause()
+            logger.dialog_detected("invite_dialog", context={"path": 2})
 
             add_note_btn = page.get_by_role("button", name=re.compile(r"(Nachricht hinzufügen|Add a note|Notiz hinzufügen)", re.I))
             add_note_count = await add_note_btn.count()
-            logger.debug("Add note button after invite link", data={"count": add_note_count})
+            logger.element_search("Add a note button", add_note_count, role="button", context={"path": 2})
 
             if add_note_count > 0:
                 await add_note_btn.first.click(timeout=6_000)
+                logger.element_click("Add a note button", success=True)
                 await page.wait_for_timeout(500)
-                logger.debug("Connect with note dialog opened via invite link")
+                logger.path_attempt("Invite link -> Add note", 2, success=True)
                 return "connect_note"
-            logger.debug("Invite link path with direct connect")
+            logger.path_attempt("Invite link (no note)", 2, success=True)
             return "connect"
         except Exception as e:
-            logger.debug("Invite link path failed", error=e)
+            logger.element_click("Invite link", success=False)
+            logger.path_attempt("Invite link", 2, success=False)
 
     # PATH 3: Direct Vernetzen / Als Kontakt button on profile card
     direct_connect_btn = profile_container.get_by_role(
@@ -355,72 +360,77 @@ async def open_message_surface(page: Page) -> str:
         name=re.compile(r"(Vernetzen|Als Kontakt|als Kontakt)", re.I),
     )
     direct_connect_count = await direct_connect_btn.count()
-    logger.debug("Direct connect button check", data={"count": direct_connect_count})
+    logger.element_search("Vernetzen/Connect button", direct_connect_count, role="button", context={"path": 3})
 
     if direct_connect_count > 0:
-        logger.debug("Clicking direct connect button on profile")
         try:
             await direct_connect_btn.first.click(timeout=8_000)
+            logger.element_click("Vernetzen button", success=True)
             await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
             await random_pause()
+            logger.dialog_detected("connect_dialog", context={"path": 3})
 
             add_note_btn = page.get_by_role("button", name=re.compile(r"(Nachricht hinzufügen|Add a note|Notiz hinzufügen)", re.I))
             add_note_count = await add_note_btn.count()
-            logger.debug("Add note button after direct connect", data={"count": add_note_count})
+            logger.element_search("Add a note button", add_note_count, role="button", context={"path": 3})
 
             if add_note_count > 0:
                 await add_note_btn.first.click(timeout=6_000)
+                logger.element_click("Add a note button", success=True)
                 await page.wait_for_timeout(500)
-                logger.debug("Connect with note dialog opened via direct connect button")
+                logger.path_attempt("Direct Connect -> Add note", 3, success=True)
                 return "connect_note"
-            logger.debug("Direct connect without note")
+            logger.path_attempt("Direct Connect (no note)", 3, success=True)
             return "connect"
         except Exception as e:
-            logger.debug("Direct connect path failed", error=e)
+            logger.element_click("Vernetzen button", success=False)
+            logger.path_attempt("Direct Connect", 3, success=False)
 
     # PATH 4: Try More button -> Invite flow (fallback)
     # Scoped to profile container - allow partial match for "Mehr" or "More"
     more_button = profile_container.get_by_role("button", name=re.compile(r"(More|Mehr)", re.I))
     more_button_count = await more_button.count()
-    logger.debug(f"More button check", data={"count": more_button_count})
+    logger.element_search("More/Mehr button", more_button_count, role="button", context={"path": 4})
 
     if more_button_count > 0:
-        logger.debug("Found More button - attempting invite flow")
         try:
             await more_button.first.click(timeout=8_000)
+            logger.element_click("More button", success=True)
             await page.wait_for_timeout(300)
 
             # Look for Invite/Connect menuitem (can include name like "Invite Antonio-Jean")
             invite_menuitem = page.get_by_role("menuitem", name=re.compile(r"(Invite|Einladen|Connect|Vernetzen)", re.I))
             invite_count = await invite_menuitem.count()
-            logger.debug(f"Invite menuitem check", data={"count": invite_count})
+            logger.element_search("Invite/Connect menuitem", invite_count, role="menuitem", context={"path": 4})
 
             if invite_count > 0:
-                logger.debug("Clicking Invite menuitem")
                 await invite_menuitem.first.click(timeout=8_000)
+                logger.element_click("Invite menuitem", success=True)
 
                 # Wait for connection dialog
                 await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
                 await random_pause()
+                logger.dialog_detected("connect_via_more_menu", context={"path": 4})
 
                 # Click "Add a note" button
                 add_note_btn = page.get_by_role("button", name=re.compile(r"(Nachricht hinzufügen|Add a note|Notiz hinzufügen)", re.I))
                 add_note_count = await add_note_btn.count()
-                logger.debug(f"Add a note button check", data={"count": add_note_count})
+                logger.element_search("Add a note button", add_note_count, role="button", context={"path": 4})
 
                 if add_note_count > 0:
-                    logger.debug("Clicking Add a note button")
                     await add_note_btn.first.click(timeout=6_000)
+                    logger.element_click("Add a note button", success=True)
                     await page.wait_for_timeout(500)
-                    logger.debug("Connect with note dialog opened")
+                    logger.path_attempt("More -> Invite -> Add note", 4, success=True)
                     return "connect_note"
                 else:
-                    logger.debug("No Add a note button - sending without note")
+                    logger.path_attempt("More -> Invite (no note)", 4, success=True)
                     return "connect"
             else:
-                logger.warn("No Invite menuitem found in More dropdown")
+                logger.path_attempt("More -> Invite (menuitem not found)", 4, success=False)
         except Exception as e:
-            logger.debug(f"More button path failed", error=e)
+            logger.element_click("More button flow", success=False)
+            logger.path_attempt("More -> Invite", 4, success=False)
 
     logger.error("All messaging surface paths exhausted")
     raise RuntimeError("No messaging surface found. Check if profile is 3rd-degree or has restrictions.")
@@ -438,43 +448,44 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
 
     if surface == "connect_note":
         # Add-a-note modal: Use the specific textbox selector
-        logger.debug("Sending connection request with note")
+        logger.info("Sending connection request with note", data={"surface": surface})
 
         # LinkedIn limits note to 300 characters
         safe_message = (message or "").strip()
 
         if len(safe_message) > 300:
-            logger.warn(f"Message too long ({len(safe_message)} chars), truncating to 300")
+            logger.warn(f"Message too long, truncating", data={"original": len(safe_message), "limit": 300})
             # Intelligently truncate at sentence/word boundary
             safe_message = safe_message[:297] + "..."
         else:
-            logger.debug(f"Message fits in connection note limit ({len(safe_message)}/300 chars)")
+            logger.debug(f"Message fits in limit", data={"length": len(safe_message), "limit": 300})
 
         # Use the exact selector provided by user (support English & German labels)
         note_box_selectors = [
-            lambda: page.get_by_role("textbox", name=re.compile(r"Please limit personal note to", re.I)),
-            lambda: page.get_by_role("textbox", name=re.compile(r"Ihre persönliche Nachricht", re.I)),
-            lambda: page.get_by_role("textbox", name=re.compile(r"Nachricht hinzufügen", re.I)),
-            lambda: page.locator("textarea[name='message']"),
-            lambda: page.locator("textarea[id='custom-message']"),
-            lambda: page.locator("div[role='dialog'] textarea"),
+            ("textbox:Personal note limit", lambda: page.get_by_role("textbox", name=re.compile(r"Please limit personal note to", re.I))),
+            ("textbox:Ihre persönliche Nachricht", lambda: page.get_by_role("textbox", name=re.compile(r"Ihre persönliche Nachricht", re.I))),
+            ("textbox:Nachricht hinzufügen", lambda: page.get_by_role("textbox", name=re.compile(r"Nachricht hinzufügen", re.I))),
+            ("textarea[name=message]", lambda: page.locator("textarea[name='message']")),
+            ("textarea[id=custom-message]", lambda: page.locator("textarea[id='custom-message']")),
+            ("dialog textarea", lambda: page.locator("div[role='dialog'] textarea")),
         ]
         note_box = None
         note_box_count = 0
-        for builder in note_box_selectors:
+        used_selector = ""
+        for selector_name, builder in note_box_selectors:
             try:
                 candidate = builder()
                 count = await candidate.count()
                 if count > 0:
                     note_box = candidate
                     note_box_count = count
+                    used_selector = selector_name
                     break
             except Exception:
                 continue
-        logger.debug(f"Note textbox check", data={"count": note_box_count})
+        logger.element_search(used_selector or "note textbox", note_box_count, context={"surface": "connect_note"})
 
         if note_box and note_box_count > 0:
-            logger.debug(f"Typing note textbox with {len(safe_message)} characters")
             target = note_box.first
             await target.click()
             # Clear any pre-filled text in a human-like way
@@ -492,6 +503,7 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
             except Exception:
                 pass
             await human_type(page, safe_message)
+            logger.element_type(used_selector, len(safe_message), text_preview=safe_message[:40])
             await random_pause(0.5, 1.0)
 
             # CRITICAL: Verify the full message was typed before clicking send
@@ -517,7 +529,7 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
             else:
                 logger.warn("Could not verify full text was entered, proceeding anyway")
         else:
-            logger.error("Note textbox not found in connect dialog")
+            logger.element_search("note textbox (all selectors)", 0, context={"surface": "connect_note"})
             raise RuntimeError("Could not find note textbox in connection request dialog")
 
         # Find and click Send button in the dialog
@@ -530,11 +542,12 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
         # Wait for button to be enabled
         try:
             await send_btn.wait_for(state="visible", timeout=10_000)
+            logger.element_search("Send button (dialog)", 1, role="button")
 
             # Wait for button to be enabled AND give extra time for any final DOM updates
             for attempt in range(30):
                 if await send_btn.is_enabled():
-                    logger.debug(f"Send button enabled after {attempt} attempts")
+                    logger.debug(f"Send button enabled", data={"attempts": attempt})
                     break
                 await page.wait_for_timeout(300)
 
@@ -542,44 +555,46 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
             await page.wait_for_timeout(800)
 
             await send_btn.click()
-            logger.debug("Send button clicked")
+            logger.element_click("Send button (dialog)", success=True)
             await random_pause()
             return
         except Exception as e:
-            logger.error("Failed to click Send button in connect dialog", error=e)
+            logger.element_click("Send button (dialog)", success=False)
             raise
 
     # Direct message composer path (for existing connections)
-    logger.debug("Sending direct message")
+    logger.info("Sending direct message", data={"surface": surface})
 
     # Find message input box
     editor_candidates = [
-        "div.msg-form__contenteditable[contenteditable='true']",
-        "div.msg-form__textarea",
-        "section[role='dialog'] div[role='textbox'][contenteditable='true']",
-        "div[aria-label*='Write a message'][contenteditable='true']",
-        "div[role='textbox'][contenteditable='true']:not([id^='g-recaptcha'])",
-        # German “Nachricht verfassen …” input surfaced in user report
-        "div[id^='msg-form-ember'] div[role='textbox'][contenteditable='true']",
+        ("msg-form contenteditable", "div.msg-form__contenteditable[contenteditable='true']"),
+        ("msg-form textarea", "div.msg-form__textarea"),
+        ("dialog textbox", "section[role='dialog'] div[role='textbox'][contenteditable='true']"),
+        ("Write a message", "div[aria-label*='Write a message'][contenteditable='true']"),
+        ("generic textbox", "div[role='textbox'][contenteditable='true']:not([id^='g-recaptcha'])"),
+        ("msg-form-ember", "div[id^='msg-form-ember'] div[role='textbox'][contenteditable='true']"),
     ]
 
     editor = None
-    for sel in editor_candidates:
+    used_selector = ""
+    for name, sel in editor_candidates:
         try:
             loc = page.locator(sel).first
             await loc.wait_for(state="visible", timeout=3_000)
             editor = loc
-            logger.debug(f"Found message editor using selector: {sel}")
+            used_selector = name
+            logger.element_search(name, 1, context={"surface": "message"})
             break
         except Exception:
             continue
 
     if editor is None:
-        logger.error("No message editor found")
+        logger.element_search("message editor (all selectors)", 0, context={"surface": "message"})
         raise RuntimeError("Could not find message input box")
 
     await editor.click()
     await human_type(page, message)
+    logger.element_type(used_selector, len(message), text_preview=message[:40])
     await random_pause()
 
     # CRITICAL: Verify the full message was typed before clicking send
@@ -594,13 +609,13 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
             expected_length = len(message.strip())
 
             if actual_length >= expected_length - 2:  # Allow 1-2 char margin for encoding
-                logger.debug(f"Direct message text verification passed", data={"expected": expected_length, "actual": actual_length})
+                logger.debug(f"Text verification passed", data={"expected": expected_length, "actual": actual_length})
                 break
             else:
-                logger.debug(f"Direct message text still being entered", data={"expected": expected_length, "actual": actual_length, "attempt": verification_attempt})
+                logger.debug(f"Text still being entered", data={"expected": expected_length, "actual": actual_length, "attempt": verification_attempt})
                 await page.wait_for_timeout(200)
         except Exception as e:
-            logger.warn(f"Direct message text verification attempt {verification_attempt} failed", error=e)
+            logger.warn(f"Text verification attempt {verification_attempt} failed", error=e)
             await page.wait_for_timeout(200)
     else:
         logger.warn("Could not verify full direct message text was entered, proceeding anyway")
@@ -609,15 +624,16 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
     send_btn = page.locator("button:has-text('Send'), button:has-text('Senden'), button[aria-label*='Send']").first
     try:
         await send_btn.wait_for(state="visible", timeout=10_000)
+        logger.element_search("Send button (message)", 1, role="button")
 
         # Additional safety pause before clicking to ensure typing is truly complete
         await page.wait_for_timeout(800)
 
         await send_btn.click()
-        logger.debug("Direct message sent")
+        logger.element_click("Send button (message)", success=True)
         await random_pause()
     except Exception as e:
-        logger.error("Failed to click Send button for direct message", error=e)
+        logger.element_click("Send button (message)", success=False)
         raise
 
 

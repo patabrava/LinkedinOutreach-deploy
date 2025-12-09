@@ -13,6 +13,7 @@ type StatusResponse = {
   dailyCap?: number;
   completedToday?: number;
   remainingToday?: number;
+  queueRemaining?: number;
   nextLead: {
     id: string;
     linkedin_url: string;
@@ -137,16 +138,22 @@ export function StartEnrichmentButton({ mode = "message" }: StartEnrichmentButto
 
   const progress = useMemo(() => {
     const completedForBar = status ? (status.completedToday ?? status.completed) : 0;
-    const remainingForBar = status ? (status.remainingToday ?? status.remaining) : 0;
     const dailyCap = typeof status?.dailyCap === "number" ? status.dailyCap : null;
-    const baseTotal = completedForBar + remainingForBar;
-    const totalForBar = dailyCap !== null ? Math.min(dailyCap, baseTotal || dailyCap) : baseTotal;
+    const remainingForBar = dailyCap !== null
+      ? Math.max(0, dailyCap - completedForBar)
+      : status
+        ? (status.remainingToday ?? status.remaining)
+        : 0;
+    const totalForBar = dailyCap !== null
+      ? dailyCap
+      : completedForBar + remainingForBar;
+    const backlogRemaining = status?.queueRemaining ?? status?.remaining ?? 0;
     return {
       completedForBar,
       remainingForBar,
       totalForBar,
       dailyCap,
-      backlogRemaining: status?.remaining ?? 0,
+      backlogRemaining,
     };
   }, [status]);
 
@@ -275,8 +282,8 @@ export function StartEnrichmentButton({ mode = "message" }: StartEnrichmentButto
         {progress.dailyCap !== null ? (
           <div style={{ marginTop: 4, fontSize: 12, color: "#9ca3af" }}>
             Daily cap: {progress.dailyCap}
-            {progress.backlogRemaining > progress.remainingForBar
-              ? ` • Queue backlog: ${progress.backlogRemaining}`
+            {progress.backlogRemaining
+              ? ` • In queue: ${progress.backlogRemaining}`
               : ""}
           </div>
         ) : null}

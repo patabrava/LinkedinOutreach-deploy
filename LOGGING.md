@@ -93,6 +93,12 @@ logger.dbResult("update", "leads", { correlationId, leadId }, rowCount);
 - Scraping progress tracking
 - Message sending tracking
 - AI API request/response logging
+- **Headless Scraping Visibility** (NEW):
+  - Page navigation tracking
+  - Element search/click/type logging
+  - Selector fallback tracking
+  - Dialog detection
+  - Connection flow path logging
 
 **Example Usage:**
 ```python
@@ -115,7 +121,37 @@ logger.db_result("select", "leads", {"status": "NEW"}, count=5)
 # Messaging
 logger.message_send_start(lead_id, message_preview=message[:100])
 logger.message_send_complete(lead_id)
+
+# NEW: Headless scraping visibility
+logger.page_navigation("https://linkedin.com/in/john-doe", from_url="https://linkedin.com/feed")
+logger.element_search("main h1.text-heading-xlarge", found_count=1, extracted="John Doe")
+logger.element_click("Connect button", success=True)
+logger.element_type("note textbox", char_count=150, text_preview="Hi John...")
+logger.path_attempt("Message button (connected user)", path_number=1, success=True)
+logger.dialog_detected("connection_invite", buttons_found=["Send", "Add note"])
+logger.connection_flow("send_button", "CLICKED", data={"url": "..."})
 ```
+
+### Headless Scraping Visibility (SCRAPE_VERBOSE)
+
+For detailed debugging during headless deployment, enable verbose scraping logs:
+
+```bash
+SCRAPE_VERBOSE=true python scraper.py --run --limit 1
+```
+
+This will output every element search, click, and type action to the console, replacing the need to watch the browser live.
+
+**Example verbose output:**
+```
+[2025-01-26T14:30:00.123Z] INFO: Navigation ✓: https://linkedin.com/in/john-doe...
+[2025-01-26T14:30:01.456Z] DEBUG: Element search ✓: main h1.text-heading-xlarge... [1 found]
+[2025-01-26T14:30:01.789Z] DEBUG: Scroll down: 6 steps
+[2025-01-26T14:30:02.123Z] DEBUG: Element search ✓: section#about button:has-text('more')... [1 found]
+[2025-01-26T14:30:02.456Z] DEBUG: Element click ✓: section#about button:has-text('more')...
+[2025-01-26T14:30:03.789Z] INFO: Profile scrape complete [hasName=true, hasHeadline=true, experienceCount=3]
+```
+
 
 ### 3. MCP Agent
 

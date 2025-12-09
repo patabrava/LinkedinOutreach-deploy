@@ -152,11 +152,8 @@ export async function GET(request: Request) {
       completedToday ?? 0
     );
 
-    // Remaining for today is bounded by both the quota and the queue
-    const remainingToday = Math.max(
-      0,
-      Math.min(dailyCap - (completedToday || 0), remaining)
-    );
+    // Remaining for today is driven purely by the daily cap; queue/backlog is reported separately
+    const remainingToday = Math.max(0, dailyCap - (completedToday || 0));
 
     // Explicit ground-truth log of counts and computed values
     logger.debug(
@@ -170,6 +167,7 @@ export async function GET(request: Request) {
         dailyCap,
         completedToday: completedToday || 0,
         remainingToday,
+        queueRemaining: remaining,
       }
     );
 
@@ -182,6 +180,7 @@ export async function GET(request: Request) {
       dailyCap,
       completedToday: completedToday || 0,
       remainingToday,
+      queueRemaining: remaining,
       nextLead: nextLead || null,
     };
 

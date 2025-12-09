@@ -228,24 +228,35 @@ async def safe_inner_text(page: Page, selector: str, timeout: int = 6_000) -> st
     return ""
 
 
-async def first_match_text(page: Page, selectors: List[str], timeout: int = 6_000) -> str:
+async def first_match_text(page: Page, selectors: List[str], timeout: int = 6_000, field_name: str = "") -> str:
     """Return the first non-empty text for the provided selectors."""
-    for selector in selectors:
+    for idx, selector in enumerate(selectors):
         # Try inner_text first (better for multi-line content)
         text = await safe_inner_text(page, selector, timeout=timeout)
         if text:
+            logger.element_search(selector, 1, extracted=text[:50], context={"field": field_name} if field_name else None)
             return text
         # Fallback to text_content
         text = await safe_text_content(page, selector, timeout=timeout)
         if text:
+            logger.element_search(selector, 1, extracted=text[:50], context={"field": field_name} if field_name else None)
             return text
+        # Log failed attempts only in very verbose mode
+        if idx == len(selectors) - 1:  # Last selector
+            logger.element_search(f"{len(selectors)} selectors tried", 0, context={"field": field_name} if field_name else None)
     return ""
 
 
 async def gentle_nav(page: Page, url: str) -> None:
     """Navigate with forgiving waits to avoid networkidle timeouts."""
-    await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-    await page.wait_for_timeout(1_200)
+    from_url = page.url if page.url and page.url != "about:blank" else None
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        await page.wait_for_timeout(1_200)
+        logger.page_navigation(url, from_url=from_url, wait_until="domcontentloaded", success=True)
+    except Exception as e:
+        logger.page_navigation(url, from_url=from_url, wait_until="domcontentloaded", success=False)
+        raise
 
 
 async def slow_scroll(page: Page, steps: int = 6) -> None:
@@ -253,6 +264,7 @@ async def slow_scroll(page: Page, steps: int = 6) -> None:
     for _ in range(steps):
         await page.mouse.wheel(0, random.randint(500, 900))
         await asyncio.sleep(random.uniform(0.2, 0.5))
+    logger.scroll_action(steps, direction="down")
 
 
 async def expand_about(page: Page) -> None:
@@ -266,11 +278,15 @@ async def expand_about(page: Page) -> None:
     for selector in selectors:
         try:
             button = page.locator(selector)
-            if await button.count() > 0:
+            count = await button.count()
+            logger.element_search(selector, count, context={"action": "expand_about"})
+            if count > 0:
                 await button.first.click(timeout=5_000)
+                logger.element_click(selector, success=True, element_text="See more")
                 await page.wait_for_timeout(500)
                 break
-        except Exception:
+        except Exception as e:
+            logger.element_click(selector, success=False)
             continue
 
 
@@ -314,16 +330,25 @@ async def scrape_experience(page: Page, max_items: int = 3) -> List[Dict[str, st
 
 async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
     normalized = url.replace("http://", "https://")
-    logger.debug(f"Starting profile scrape", data={"url": normalized})
+    logger.info(f"Profile scrape starting", data={"url": normalized})
     page.set_default_timeout(20_000)
     page.set_default_navigation_timeout(60_000)
 
     await gentle_nav(page, normalized)
-    await page.wait_for_selector("main", timeout=20_000)
+    
+    # Check page state after navigation
+    try:
+        await page.wait_for_selector("main", timeout=20_000)
+        logger.element_search("main", 1, context={"phase": "page_load"})
+    except Exception as e:
+        logger.element_search("main", 0, context={"phase": "page_load"})
+        raise
+    
     await slow_scroll(page)
     await expand_about(page)
 
     # Extract name
+    logger.debug("Extracting: name")
     name = await first_match_text(
         page,
         [
@@ -332,9 +357,11 @@ async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
             "header h1",
             "div.pv-text-details__left-panel h1",
         ],
+        field_name="name",
     )
 
     # Extract headline - the classes you provided
+    logger.debug("Extracting: headline")
     headline = await first_match_text(
         page,
         [
@@ -344,9 +371,11 @@ async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
             "main div.pv-text-details__left-panel div.text-body-medium",
             "main p",
         ],
+        field_name="headline",
     )
 
     # Extract about - MUST be scoped to the About section only to avoid grabbing activity posts
+    logger.debug("Extracting: about")
     about = await first_match_text(
         page,
         [
@@ -358,9 +387,11 @@ async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
             "section#about div.display-flex.ph5.pv3",
             "section#about div.pv-shared-text-with-see-more span",
         ],
+        field_name="about",
     )
 
     # Extract current company and title from experience section
+    logger.debug("Extracting: experience")
     experience = await scrape_experience(page)
     current_company = ""
     current_title = ""
@@ -378,11 +409,15 @@ async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
         "experience": experience,
     }
     
-    logger.debug("Profile data extracted", data={
+    # Summary log with all extracted fields
+    logger.info("Profile scrape complete", data={
         "hasName": bool(name),
+        "namePreview": name[:30] if name else None,
         "hasHeadline": bool(headline),
         "hasAbout": bool(about),
+        "aboutLength": len(about) if about else 0,
         "experienceCount": len(experience),
+        "currentTitle": current_title[:40] if current_title else None,
     })
     
     return profile_data
@@ -510,20 +545,21 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
     profile_url = lead.linkedin_url or ""
     normalized = profile_url.replace("http://", "https://").split("?")[0]
     
-    logger.debug("connect-only: starting connection request", data={"url": normalized})
+    logger.connection_flow("start", "navigating to profile", data={"url": normalized})
     
     # Navigate back to profile (activity scraping may have left us on /recent-activity/)
     try:
         await gentle_nav(page, normalized)
         await page.wait_for_selector("main", timeout=15_000)
         await random_pause(1.0, 2.0)
+        logger.element_search("main", 1, context={"phase": "connect_profile_load"})
     except Exception as exc:
-        logger.warn("connect-only: failed to navigate to profile", data={"url": normalized}, error=exc)
+        logger.connection_flow("navigate", "FAILED", data={"url": normalized}, error=exc)
         return False
 
     await wiggle_mouse(page)
     
-    logger.debug("connect-only: starting open_message_surface equivalent")
+    logger.connection_flow("profile_loaded", "searching for connect buttons")
     
     # Scope all interactions to the profile page's main content area
     # Try lazy-column test ID first, with fallback to main profile section
@@ -548,18 +584,20 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
     # PATH 1: Direct invite link inside profile container (Invite <Name> to ...)
     invite_link = profile_container.get_by_role("link", name=re.compile(r"(Invite .+ to|Einladen .+ zu)", re.I))
     invite_link_count = await invite_link.count()
-    logger.debug("connect-only: invite link check", data={"count": invite_link_count})
+    logger.element_search("Invite link", invite_link_count, role="link", context={"path": 1})
     
     if invite_link_count > 0:
-        logger.debug("connect-only: found invite link inside profile container")
         try:
             await invite_link.first.click(timeout=8_000)
+            logger.element_click("Invite link", success=True)
             await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
             await random_pause()
-            logger.debug("connect-only: invite link clicked, dialog opened")
+            logger.dialog_detected("connection_invite", context={"path": 1})
+            logger.path_attempt("Invite link", 1, success=True)
             return await _click_send_without_note(page, normalized)
         except Exception as e:
-            logger.debug("connect-only: invite link path failed", error=e)
+            logger.element_click("Invite link", success=False)
+            logger.path_attempt("Invite link", 1, success=False)
     
     # PATH 2: Direct Vernetzen / Als Kontakt button on profile card
     direct_connect_btn = profile_container.get_by_role(
@@ -567,50 +605,54 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
         name=re.compile(r"(Vernetzen|Als Kontakt|als Kontakt)", re.I),
     )
     direct_connect_count = await direct_connect_btn.count()
-    logger.debug("connect-only: direct connect button check", data={"count": direct_connect_count})
+    logger.element_search("Vernetzen/Connect button", direct_connect_count, role="button", context={"path": 2})
     
     if direct_connect_count > 0:
-        logger.debug("connect-only: clicking direct connect button on profile")
         try:
             await direct_connect_btn.first.click(timeout=8_000)
+            logger.element_click("Vernetzen button", success=True)
             await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
             await random_pause()
-            logger.debug("connect-only: direct connect clicked, dialog opened")
+            logger.dialog_detected("connection_direct", context={"path": 2})
+            logger.path_attempt("Direct Connect button", 2, success=True)
             return await _click_send_without_note(page, normalized)
         except Exception as e:
-            logger.debug("connect-only: direct connect path failed", error=e)
+            logger.element_click("Vernetzen button", success=False)
+            logger.path_attempt("Direct Connect button", 2, success=False)
     
     # PATH 3: Try More button -> Invite flow (fallback)
     more_button = profile_container.get_by_role("button", name=re.compile(r"(More|Mehr)", re.I))
     more_button_count = await more_button.count()
-    logger.debug("connect-only: more button check", data={"count": more_button_count})
+    logger.element_search("More/Mehr button", more_button_count, role="button", context={"path": 3})
     
     if more_button_count > 0:
-        logger.debug("connect-only: found More button - attempting invite flow")
         try:
             await more_button.first.click(timeout=8_000)
+            logger.element_click("More button", success=True)
             await page.wait_for_timeout(300)
             
             # Look for Invite/Connect menuitem
             invite_menuitem = page.get_by_role("menuitem", name=re.compile(r"(Invite|Einladen|Connect|Vernetzen)", re.I))
             invite_count = await invite_menuitem.count()
-            logger.debug("connect-only: invite menuitem check", data={"count": invite_count})
+            logger.element_search("Invite/Connect menuitem", invite_count, role="menuitem", context={"path": 3})
             
             if invite_count > 0:
-                logger.debug("connect-only: clicking Invite menuitem")
                 await invite_menuitem.first.click(timeout=8_000)
+                logger.element_click("Invite menuitem", success=True)
                 
                 # Wait for connection dialog
                 await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
                 await random_pause()
-                logger.debug("connect-only: More menu invite clicked, dialog opened")
+                logger.dialog_detected("connection_more_menu", context={"path": 3})
+                logger.path_attempt("More -> Invite", 3, success=True)
                 return await _click_send_without_note(page, normalized)
             else:
-                logger.warn("connect-only: no Invite menuitem found in More dropdown")
+                logger.path_attempt("More -> Invite", 3, success=False)
         except Exception as e:
-            logger.debug("connect-only: More button path failed", error=e)
+            logger.element_click("More button flow", success=False)
+            logger.path_attempt("More -> Invite", 3, success=False)
     
-    logger.warn("connect-only: all connection paths exhausted", data={"url": normalized})
+    logger.connection_flow("all_paths", "EXHAUSTED", data={"url": normalized})
     return False
 
 
@@ -619,12 +661,12 @@ async def _click_send_without_note(page: Page, url: str) -> bool:
     # Try exact German buttons first, then fallback to regex
     send_label = page.get_by_role("button", name="Ohne Notiz senden")
     send_count = await send_label.count()
-    logger.debug("connect-only: 'Ohne Notiz senden' button check", data={"count": send_count})
+    logger.element_search("Ohne Notiz senden", send_count, role="button")
     
     if send_count == 0:
         send_label = page.get_by_role("button", name="Ohne Nachricht senden")
         send_count = await send_label.count()
-        logger.debug("connect-only: 'Ohne Nachricht senden' button check", data={"count": send_count})
+        logger.element_search("Ohne Nachricht senden", send_count, role="button")
     
     if send_count == 0:
         send_label = page.get_by_role(
@@ -632,10 +674,10 @@ async def _click_send_without_note(page: Page, url: str) -> bool:
             name=re.compile(r"(Send without a note|Send now|Send|Einladung senden|Senden)", re.I),
         )
         send_count = await send_label.count()
-        logger.debug("connect-only: fallback send button check", data={"count": send_count})
+        logger.element_search("Send button (fallback regex)", send_count, role="button")
 
     if send_count == 0:
-        logger.warn("connect-only: send button not found in dialog", data={"url": url})
+        logger.connection_flow("send_button", "NOT_FOUND", data={"url": url})
         return False
 
     try:
@@ -643,10 +685,12 @@ async def _click_send_without_note(page: Page, url: str) -> bool:
         await send_label.first.wait_for(state="visible", timeout=5_000)
         await send_label.first.click(timeout=8_000)
         await random_pause(0.8, 1.3)
-        logger.info("connect-only: connection sent via dialog", data={"url": url})
+        logger.element_click("Send button", success=True)
+        logger.connection_flow("send_button", "CLICKED", data={"url": url})
         return True
     except Exception as exc:
-        logger.error("connect-only: failed to click send button", data={"url": url}, error=exc)
+        logger.element_click("Send button", success=False)
+        logger.connection_flow("send_button", "CLICK_FAILED", data={"url": url}, error=exc)
         return False
 
 
