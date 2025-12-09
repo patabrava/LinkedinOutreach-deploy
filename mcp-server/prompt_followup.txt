@@ -23,6 +23,12 @@ SZENARIO 1: KONTAKT HAT GEANTWORTET (reply_snippet vorhanden)
 Ziel: Gespräch vertiefen & Qualifizieren (OHNE Termin-Pitch).
 Strategie: Validiere das Problem/Interesse oder biete Asset an.
 
+SPEZIALFALL (Immobilien + KI / Frust über fehlende Digitalisierungsprojekte):
+- Falls die letzte Nachricht inhaltlich zu unserem Immobilien-KI Kontext passt (siehe prompt.txt) und der Kontakt z.B. fragt, was alle falsch machen oder warum nichts umgesetzt wird:
+  - Stelle eine kurze Gegenfrage nach ihrem größten Engpass im Job / in ihrem Bereich (z.B. „Was blockiert euch am meisten?“ oder „Woran scheitern die KI-Vorhaben bei euch?“).
+  - Kein Pitch, kein Call-Angebot. Fokus: echtes Verständnis für ihren Schmerzpunkt.
+  - Halte die Antwort ultrakurz (<=300 Zeichen gesamt) und bleibe bei einer Frage + kurzem Empathie-Satz.
+
 BEISPIELE:
 - Positiv: "Freut mich [Name]. Bevor wir tiefer einsteigen: Ist das Thema aktuell Prio 1 bei euch oder eher nice-to-have?"
 - Positiv (Asset): "Super [Name]. Ich habe dazu ein kurzes Loom-Video gemacht anstatt direkt zu telefonieren. Soll ich den Link schicken?"
