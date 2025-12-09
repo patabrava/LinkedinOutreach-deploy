@@ -72,9 +72,23 @@ def build_followup_prompt(context: Dict[str, Any], prompt_text: str) -> str:
     previous_messages = context.get("previous_messages", [])
     profile_data = context.get("profile_data", {})
     
-    # Determine scenario
-    has_reply = bool(reply_snippet and reply_snippet.strip())
-    scenario = "REPLY" if has_reply else "NO_REPLY"
+    # New: last message tracking for proper sender attribution
+    last_message_text = context.get("last_message_text") or ""
+    last_message_from = context.get("last_message_from") or ""
+    
+    # Determine scenario based on last_message_from (preferred) or fallback to reply_snippet
+    # If last_message_from == 'lead', they replied to us -> REPLY scenario
+    # If last_message_from == 'us', we sent last -> NUDGE scenario
+    if last_message_from == "lead":
+        scenario = "REPLY"
+        has_reply = True
+    elif last_message_from == "us":
+        scenario = "NO_REPLY"
+        has_reply = False
+    else:
+        # Fallback to legacy behavior using reply_snippet
+        has_reply = bool(reply_snippet and reply_snippet.strip())
+        scenario = "REPLY" if has_reply else "NO_REPLY"
     
     # Build context section
     context_parts = [
@@ -87,7 +101,30 @@ def build_followup_prompt(context: Dict[str, Any], prompt_text: str) -> str:
         f"SZENARIO: {scenario}",
     ]
     
-    if has_reply:
+    # Add last message with explicit sender attribution
+    if last_message_text:
+        sender_label = "Kontakt" if last_message_from == "lead" else "Du (wir)"
+        context_parts.extend([
+            f"",
+            f"LETZTE NACHRICHT IM THREAD (Absender: {sender_label}):",
+            f'"{last_message_text[:400]}..."' if len(last_message_text) > 400 else f'"{last_message_text}"',
+        ])
+        
+        # Clarify who should write the response
+        if last_message_from == "us":
+            context_parts.extend([
+                f"",
+                f"⚠️ WICHTIG: Die letzte Nachricht war von UNS. Der Kontakt hat noch nicht geantwortet.",
+                f"Du schreibst jetzt eine Follow-up Nachricht UM den Kontakt erneut zu erreichen.",
+            ])
+        else:
+            context_parts.extend([
+                f"",
+                f"⚠️ WICHTIG: Die letzte Nachricht war vom KONTAKT. Sie haben auf unsere Nachricht geantwortet.",
+                f"Du schreibst jetzt eine Antwort AUF ihre Nachricht.",
+            ])
+    elif has_reply and reply_snippet:
+        # Fallback: show reply_snippet if no last_message_text
         context_parts.extend([
             f"",
             f"ANTWORT DES KONTAKTS:",
@@ -104,7 +141,7 @@ def build_followup_prompt(context: Dict[str, Any], prompt_text: str) -> str:
     if previous_messages:
         context_parts.extend([
             f"",
-            f"VORHERIGE FOLLOW-UPS:",
+            f"VORHERIGE FOLLOW-UPS (von uns gesendet):",
         ])
         for i, msg in enumerate(previous_messages[:3], 1):
             context_parts.append(f"{i}. {msg[:150]}...")
@@ -125,7 +162,8 @@ def build_followup_prompt(context: Dict[str, Any], prompt_text: str) -> str:
         f"===== KONTEXT FÜR DIESE NACHRICHT =====\n"
         f"{context_section}\n"
         f"===== ENDE KONTEXT =====\n\n"
-        f"Generiere jetzt eine passende Follow-up Nachricht basierend auf dem Szenario und Kontext."
+        f"Generiere jetzt eine passende Follow-up Nachricht basierend auf dem Szenario und Kontext. "
+        f"Du schreibst IMMER als wir/uns (der Absender), niemals als der Kontakt."
     )
 
 

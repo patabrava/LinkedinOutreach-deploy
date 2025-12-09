@@ -1476,6 +1476,8 @@ def upsert_followup_for_reply(
     reply_snippet: str,
     reply_timestamp: Optional[str],
     followup_type: str = "REPLY",
+    last_message_text: Optional[str] = None,
+    last_message_from: Optional[str] = None,
 ) -> None:
     """Create a new followup row as PENDING_REVIEW.
     
@@ -1486,18 +1488,29 @@ def upsert_followup_for_reply(
         reply_snippet: Text snippet of the reply (empty for nudges)
         reply_timestamp: Timestamp of the reply/detection
         followup_type: "REPLY" if lead responded, "NUDGE" if we need to follow up
+        last_message_text: The actual text of the last message in the thread
+        last_message_from: Who sent the last message ("us" or "lead")
     """
+    # Determine last_message values if not provided
+    if last_message_text is None:
+        if reply_snippet:
+            last_message_text = reply_snippet
+            last_message_from = "lead"
+        # For NUDGE, the caller should provide last_message_text/from
+    
+    insert_data = {
+        "lead_id": lead_id,
+        "reply_id": reply_id,
+        "reply_snippet": reply_snippet[:2000] if reply_snippet else None,
+        "reply_timestamp": reply_timestamp,
+        "status": "PENDING_REVIEW",
+        "followup_type": followup_type,
+        "last_message_text": last_message_text[:2000] if last_message_text else None,
+        "last_message_from": last_message_from,
+    }
+    
     insert_resp = execute_with_retry(
-        client.table("followups").insert(
-            {
-                "lead_id": lead_id,
-                "reply_id": reply_id,
-                "reply_snippet": reply_snippet[:2000] if reply_snippet else None,
-                "reply_timestamp": reply_timestamp,
-                "status": "PENDING_REVIEW",
-                "followup_type": followup_type,
-            }
-        ),
+        client.table("followups").insert(insert_data),
         desc="Insert followup",
     )
     if getattr(insert_resp, "error", None):
@@ -1714,6 +1727,8 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
                     reply_snippet=text[:500] if text else "",
                     reply_timestamp=reply_ts,
                     followup_type="REPLY",
+                    last_message_text=text[:2000] if text else "",
+                    last_message_from="lead",
                 )
                 replies_detected += 1
                 logger.info(f"✓ Created followup for REPLY from {lead_full_name}", {"leadId": lead_id})
@@ -1770,6 +1785,7 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
                     )
                 
                 # Create nudge followup
+                # For nudges, the last message is from us (the outbound message)
                 upsert_followup_for_reply(
                     client,
                     lead_id=lead_id,
@@ -1777,6 +1793,8 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
                     reply_snippet="",  # Empty = no reply, this is a nudge
                     reply_timestamp=reply_ts,
                     followup_type="NUDGE",
+                    last_message_text=text[:2000] if text else "",
+                    last_message_from="us",
                 )
                 nudges_detected += 1
                 logger.info(f"✓ Created NUDGE for {lead_full_name} (no reply yet)", {"leadId": lead_id})

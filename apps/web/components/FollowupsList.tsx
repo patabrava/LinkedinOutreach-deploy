@@ -342,12 +342,39 @@ export default function FollowupsList({ initial }: Props) {
                         <div className="pill" style={{ background: "rgba(255,255,255,0.06)", color: "#cbd5e1", width: "fit-content" }}>
                           {formatDate(row.reply_timestamp)}
                         </div>
-                        <div style={{ lineHeight: 1.5, fontSize: 13 }}>
-                          {followupTypeKey === "NUDGE"
-                            ? <span className="muted" style={{ fontStyle: "italic" }}>No reply yet - consider a follow-up</span>
-                            : (row.reply_snippet || "—")
-                          }
-                        </div>
+                        {/* Show last message with sender badge */}
+                        {row.last_message_text ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <span
+                              className="status-chip"
+                              style={{
+                                background: row.last_message_from === "lead"
+                                  ? "rgba(34, 197, 94, 0.18)"
+                                  : "rgba(59, 130, 246, 0.18)",
+                                color: row.last_message_from === "lead"
+                                  ? "#86efac"
+                                  : "#93c5fd",
+                                fontSize: 10,
+                                padding: "2px 6px",
+                                width: "fit-content",
+                              }}
+                            >
+                              {row.last_message_from === "lead" ? name : "You"}
+                            </span>
+                            <div style={{ lineHeight: 1.5, fontSize: 13 }}>
+                              {row.last_message_text.length > 150
+                                ? `${row.last_message_text.slice(0, 150)}...`
+                                : row.last_message_text}
+                            </div>
+                          </div>
+                        ) : (
+                          <div style={{ lineHeight: 1.5, fontSize: 13 }}>
+                            {followupTypeKey === "NUDGE"
+                              ? <span className="muted" style={{ fontStyle: "italic" }}>No reply yet - consider a follow-up</span>
+                              : (row.reply_snippet || "—")
+                            }
+                          </div>
+                        )}
                       </div>
                     </td>
                     <td>

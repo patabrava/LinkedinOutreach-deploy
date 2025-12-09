@@ -322,6 +322,9 @@ export type FollowupRow = {
   };
   // History of previous messages for context
   previous_sent_text?: string | null;
+  // Last message tracking for sender attribution
+  last_message_text?: string | null;
+  last_message_from?: "us" | "lead" | null;
 };
 
 export async function fetchFollowups(statuses: Array<FollowupRow["status"]> = ["PENDING_REVIEW", "APPROVED"], limit = 50) {
@@ -458,6 +461,9 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
       profile_data: followup.lead?.profile_data || {},
       previous_messages: previousFollowups?.map(f => f.sent_text).filter(Boolean) || [],
       original_message: originalDraft?.final_message || "",
+      // New: last message tracking for proper sender attribution
+      last_message_text: followup.last_message_text || null,
+      last_message_from: followup.last_message_from || null,
     };
 
     // Write context to temp file for the agent to read
