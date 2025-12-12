@@ -21,7 +21,8 @@ export async function POST(request: Request) {
     }
 
     const venvPython = path.join(scraperDir, "venv", "bin", "python");
-    const pythonCmd = fs.existsSync(venvPython) ? venvPython : "python3";
+    const systemPython = "/opt/local/bin/python3";
+    const pythonCmd = fs.existsSync(venvPython) ? venvPython : (fs.existsSync(systemPython) ? systemPython : "python3");
 
     const pidFile = path.join(scraperDir, "enrichment.pid");
 
@@ -31,10 +32,13 @@ export async function POST(request: Request) {
     const args = ["scraper.py", "--run", ...limitArg];
     logger.workerSpawn("scraper", args, { correlationId, limit });
 
+    const logPath = path.join(repoRoot, ".logs", "scraper-spawn.log");
+    const logFd = fs.openSync(logPath, "a");
+    
     const child = spawn(pythonCmd, args, {
       cwd: scraperDir,
       env: { ...process.env, CORRELATION_ID: correlationId },
-      stdio: "inherit",
+      stdio: ["ignore", logFd, logFd],
       detached: true,
     });
     child.unref();
