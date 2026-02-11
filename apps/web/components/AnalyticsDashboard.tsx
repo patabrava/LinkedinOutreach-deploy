@@ -56,20 +56,20 @@ function ConversionFunnel({ stages }: { stages: FunnelStats["stages"] }) {
     // Labels for what each percentage means
     const percentageLabels = [
         "",  // Leads Added - base, no percentage
-        "of leads",  // Outreach Sent
-        "of leads",  // Connection Requests
-        "of requests",  // Connections Accepted
-        "reply rate",  // Replied
+        "OF LEADS",  // Outreach Sent
+        "OF LEADS",  // Connection Requests
+        "OF REQUESTS",  // Connections Accepted
+        "REPLY RATE",  // Replied
     ];
 
     return (
         <div className="funnel">
             <div className="funnel__header">
-                <h3 className="section-title">Conversion Funnel</h3>
+                <h3 className="section-title">CONVERSION FUNNEL</h3>
                 {outreachSent > 0 && (
                     <div className="funnel__summary">
                         <span className="funnel__summary-value">{formatPercent(overallConversion)}</span>
-                        <span className="funnel__summary-label">overall reply rate</span>
+                        <span className="funnel__summary-label">OVERALL REPLY RATE</span>
                     </div>
                 )}
             </div>
@@ -161,7 +161,7 @@ function DailyChart({
         <div className="daily-chart">
             <div className="daily-chart__header">
                 <h4 className="daily-chart__title">{label}</h4>
-                <span className="daily-chart__total">{total} total</span>
+                <span className="daily-chart__total">{total} TOTAL</span>
             </div>
             <div className="daily-chart__bars">
                 {chartData.map((d, i) => {
@@ -208,7 +208,7 @@ export function AnalyticsDashboard({ analytics, dailyMetrics, funnel, days }: Pr
                         className={`period-btn ${days === d ? "period-btn--active" : ""}`}
                         onClick={() => handleDaysChange(d)}
                     >
-                        {d} days
+                        {d} DAYS
                     </button>
                 ))}
             </div>
@@ -216,22 +216,22 @@ export function AnalyticsDashboard({ analytics, dailyMetrics, funnel, days }: Pr
             {/* Key Metrics Grid */}
             <div className="metrics-grid">
                 <MetricCard
-                    label="Total Leads"
+                    label="TOTAL LEADS"
                     value={formatNumber(analytics.totalLeads)}
-                    subtext={`${formatNumber(analytics.statusCounts["NEW"] || 0)} pending`}
+                    subtext={`${formatNumber(analytics.statusCounts["NEW"] || 0)} PENDING`}
                 />
                 <MetricCard
-                    label="Messages Sent"
+                    label="MESSAGES SENT"
                     value={formatNumber(analytics.messagesSent)}
-                    subtext={`+${todayMessages} today`}
+                    subtext={`+${todayMessages} TODAY`}
                 />
                 <MetricCard
-                    label="Replies Received"
+                    label="REPLIES RECEIVED"
                     value={formatNumber(analytics.repliesReceived)}
-                    subtext={`+${todayReplies} today`}
+                    subtext={`+${todayReplies} TODAY`}
                 />
                 <MetricCard
-                    label="Response Rate"
+                    label="RESPONSE RATE"
                     value={formatPercent(analytics.messageResponseRate)}
                     highlight={analytics.messageResponseRate > 10}
                 />
@@ -240,20 +240,20 @@ export function AnalyticsDashboard({ analytics, dailyMetrics, funnel, days }: Pr
             {/* Secondary Metrics */}
             <div className="metrics-grid metrics-grid--secondary">
                 <MetricCard
-                    label="Connection Requests"
+                    label="CONNECTION REQUESTS"
                     value={formatNumber(analytics.connectionRequestsSent)}
                 />
                 <MetricCard
-                    label="Connections Accepted"
+                    label="CONNECTIONS ACCEPTED"
                     value={formatNumber(analytics.connectionsAccepted)}
-                    subtext={formatPercent(analytics.connectionAcceptanceRate) + " accept rate"}
+                    subtext={formatPercent(analytics.connectionAcceptanceRate) + " ACCEPT RATE"}
                 />
                 <MetricCard
-                    label="Follow-ups Sent"
+                    label="FOLLOW-UPS SENT"
                     value={formatNumber(analytics.followupsSent)}
                 />
                 <MetricCard
-                    label="Response Follow-ups"
+                    label="RESPONSE FOLLOW-UPS"
                     value={formatNumber(analytics.followupReplies)}
                 />
             </div>
@@ -264,25 +264,25 @@ export function AnalyticsDashboard({ analytics, dailyMetrics, funnel, days }: Pr
             {/* Daily Charts */}
             <div className="charts-section">
                 <h3 className="section-title">
-                    {days <= 14 ? `Daily Activity (Last ${days} Days)` : `Weekly Activity (Last ${days} Days)`}
+                    {days <= 14 ? `DAILY ACTIVITY (LAST ${days} DAYS)` : `WEEKLY ACTIVITY (LAST ${days} DAYS)`}
                 </h3>
                 <div className="charts-grid">
-                    <DailyChart data={dailyMetrics} metric="messagesSent" label="Messages Sent" days={days} />
-                    <DailyChart data={dailyMetrics} metric="replies" label="Replies" days={days} />
-                    <DailyChart data={dailyMetrics} metric="connectionsSent" label="Connections Sent" days={days} />
+                    <DailyChart data={dailyMetrics} metric="messagesSent" label="MESSAGES SENT" days={days} />
+                    <DailyChart data={dailyMetrics} metric="replies" label="REPLIES" days={days} />
+                    <DailyChart data={dailyMetrics} metric="connectionsSent" label="CONNECTIONS SENT" days={days} />
                 </div>
             </div>
 
             {/* Status Breakdown */}
             <div className="status-breakdown">
-                <h3 className="section-title">Lead Status Breakdown</h3>
+                <h3 className="section-title">LEAD STATUS BREAKDOWN</h3>
                 <div className="status-grid">
                     {Object.entries(analytics.statusCounts)
                         .filter(([, count]) => count > 0)
                         .sort(([, a], [, b]) => b - a)
                         .map(([status, count]) => (
                             <div key={status} className="status-item">
-                                <span className={`status-badge status-badge--${status.toLowerCase()}`}>
+                                <span className="status-badge">
                                     {status.replace(/_/g, " ")}
                                 </span>
                                 <span className="status-count">{formatNumber(count)}</span>

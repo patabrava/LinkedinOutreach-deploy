@@ -28,12 +28,16 @@ type Props = {
 
 type SortKey = "name" | "company" | "status" | "followupCount" | "createdAt" | "updatedAt";
 
-const statusStyle: Record<string, { bg: string; color: string }> = {
-  NEW: { bg: "rgba(34, 211, 238, 0.18)", color: "#67e8f9" },
-  ENRICHED: { bg: "rgba(168, 85, 247, 0.18)", color: "#e9d5ff" },
-  DRAFT_READY: { bg: "rgba(132, 204, 22, 0.18)", color: "#d9f99d" },
-  APPROVED: { bg: "rgba(52, 211, 153, 0.18)", color: "#a7f3d0" },
-  REJECTED: { bg: "rgba(248, 113, 113, 0.18)", color: "#fecdd3" },
+const statusClasses: Record<string, string> = {
+  NEW: "status-new",
+  ENRICHED: "status-enriched",
+  DRAFT_READY: "status-draft",
+  APPROVED: "status-approved",
+  REJECTED: "status-rejected",
+  SENT: "status-sent",
+  PENDING_REVIEW: "status-pending",
+  PROCESSING: "status-processing",
+  FAILED: "status-failed",
 };
 
 const statusOrder: Record<string, number> = {
@@ -105,7 +109,6 @@ export function LeadList({
 
   const mapLeadToRow = (lead: LeadListRow) => {
     const statusKey = (lead.status || "NEW").toUpperCase();
-    const style = statusStyle[statusKey] || { bg: "rgba(255,255,255,0.08)", color: "#cbd5e1" };
     const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim() || "Name pending";
     const company = lead.company_name || lead.profile_data?.current_company || "Company pending";
     const headline =
@@ -122,26 +125,13 @@ export function LeadList({
       headline: headline || null,
       linkedinUrl: lead.linkedin_url || "",
       status: statusKey,
-      style,
+      statusClass: statusClasses[statusKey] || "status-new",
       followupCount: typeof lead.followup_count === "number" ? lead.followup_count : 0,
       lastReplyAt: lead.last_reply_at || null,
       createdAt: lead.created_at,
       updatedAt: lead.updated_at,
       recentActivity,
     };
-  };
-
-  const [rows, setRows] = useState(() => (Array.isArray(leads) ? leads.map(mapLeadToRow) : []));
-  const matchesFilters = (row: ReturnType<typeof mapLeadToRow>) => {
-    if (filters.status && row.status !== filters.status.toUpperCase()) return false;
-    if (filters.company && !row.company.toLowerCase().includes(filters.company.toLowerCase())) return false;
-    if (filters.linkedin && !row.linkedinUrl.toLowerCase().includes(filters.linkedin.toLowerCase())) return false;
-    if (filters.name) {
-      const target = filters.name.toLowerCase();
-      const fullName = row.name.toLowerCase();
-      if (!fullName.includes(target)) return false;
-    }
-    return true;
   };
 
   const headerButtonStyle = {
@@ -177,7 +167,7 @@ export function LeadList({
         aria-pressed={isActive}
       >
         {label}
-        <span aria-hidden style={{ fontSize: 11, opacity: isActive ? 1 : 0.5, lineHeight: 1 }}>
+        <span aria-hidden style={{ fontSize: 10, opacity: isActive ? 1 : 0.5, lineHeight: 1 }}>
           {icon}
         </span>
       </button>
@@ -206,6 +196,20 @@ export function LeadList({
         return 0;
     }
   };
+
+  const matchesFilters = (row: ReturnType<typeof mapLeadToRow>) => {
+    if (filters.status && row.status !== filters.status.toUpperCase()) return false;
+    if (filters.company && !row.company.toLowerCase().includes(filters.company.toLowerCase())) return false;
+    if (filters.linkedin && !row.linkedinUrl.toLowerCase().includes(filters.linkedin.toLowerCase())) return false;
+    if (filters.name) {
+      const target = filters.name.toLowerCase();
+      const fullName = row.name.toLowerCase();
+      if (!fullName.includes(target)) return false;
+    }
+    return true;
+  };
+
+  const [rows, setRows] = useState(() => (Array.isArray(leads) ? leads.map(mapLeadToRow) : []));
 
   // Keep local state in sync when server data changes
   useEffect(() => {
@@ -276,7 +280,7 @@ export function LeadList({
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <div>
           <div className="pill">Lead Intake</div>
-          <h3 style={{ margin: "10px 0 6px 0" }}>Latest Leads</h3>
+          <h3 style={{ margin: "12px 0 8px 0" }}>LATEST LEADS</h3>
           <div className="muted">Newest uploads appear at the top.</div>
         </div>
         <div className="muted">
@@ -295,30 +299,30 @@ export function LeadList({
           className="table-wrapper"
           style={
             condensed
-              ? { maxHeight: 320, overflowY: "auto", marginTop: 12 }
-              : { marginTop: 12 }
+              ? { maxHeight: 320, overflowY: "auto", marginTop: 16 }
+              : { marginTop: 16 }
           }
         >
-          <table className="lead-table" style={condensed ? { fontSize: 13, lineHeight: 1.4 } : undefined}>
+          <table className="lead-table" style={condensed ? { fontSize: 12, lineHeight: 1.4 } : undefined}>
             <thead>
               <tr>
                 <th>
-                  {renderSortButton("Lead", "name", "lead name")}
+                  {renderSortButton("LEAD", "name", "lead name")}
                 </th>
                 <th>
-                  {renderSortButton("Company", "company")}
+                  {renderSortButton("COMPANY", "company")}
                 </th>
                 <th>
-                  {renderSortButton("Status", "status")}
+                  {renderSortButton("STATUS", "status")}
                 </th>
                 <th>
-                  {renderSortButton("Follow-ups", "followupCount", "follow-ups")}
+                  {renderSortButton("FOLLOW-UPS", "followupCount", "follow-ups")}
                 </th>
                 <th>
-                  {renderSortButton("Added", "createdAt", "added date")}
+                  {renderSortButton("ADDED", "createdAt", "added date")}
                 </th>
                 <th>
-                  {renderSortButton("Updated", "updatedAt", "updated date")}
+                  {renderSortButton("UPDATED", "updatedAt", "updated date")}
                 </th>
               </tr>
             </thead>
@@ -333,7 +337,7 @@ export function LeadList({
                         gap: condensed ? 2 : 4,
                       }}
                     >
-                      <strong style={condensed ? { fontSize: 14 } : undefined}>{row.name}</strong>
+                      <strong style={condensed ? { fontSize: 13 } : undefined}>{row.name}</strong>
                       <a
                         className="muted"
                         href={row.linkedinUrl?.trim() || undefined}
@@ -343,17 +347,17 @@ export function LeadList({
                         {row.linkedinUrl?.trim() || "LinkedIn pending"}
                       </a>
                       {row.headline ? (
-                        <span className="muted" style={{ fontSize: condensed ? 12 : 13 }}>
+                        <span className="muted" style={{ fontSize: condensed ? 11 : 12 }}>
                           {row.headline}
                         </span>
                       ) : null}
                       {row.lastReplyAt ? (
-                        <span className="muted" style={{ fontSize: condensed ? 12 : 13 }}>
+                        <span className="muted" style={{ fontSize: condensed ? 11 : 12 }}>
                           Last reply: {formatDate(row.lastReplyAt)}
                         </span>
                       ) : null}
                       {row.recentActivity?.[0]?.text ? (
-                        <span className="muted" style={{ fontSize: condensed ? 12 : 13 }}>
+                        <span className="muted" style={{ fontSize: condensed ? 11 : 12 }}>
                           Recent: {row.recentActivity[0].text.slice(0, 140)}
                           {row.recentActivity[0].text.length > 140 ? "…" : ""}
                         </span>
@@ -362,16 +366,13 @@ export function LeadList({
                   </td>
                   <td>{row.company}</td>
                   <td>
-                    <span
-                      className="status-chip"
-                      style={{ background: row.style.bg, color: row.style.color }}
-                    >
+                    <span className={`status-chip ${row.statusClass}`}>
                       {formatStatus(row.status)}
                     </span>
                   </td>
                   <td>
                     {row.followupCount > 0 ? (
-                      <span className="status-chip" style={{ background: "rgba(59,130,246,0.15)", color: "#bfdbfe" }}>
+                      <span className="status-chip">
                         {row.followupCount}
                       </span>
                     ) : (
@@ -386,7 +387,7 @@ export function LeadList({
           </table>
         </div>
       ) : (
-        <div className="muted" style={{ marginTop: 12 }}>
+        <div className="muted" style={{ marginTop: 16 }}>
           Upload a CSV to see leads populate instantly.
         </div>
       )}
@@ -408,10 +409,10 @@ export function LeadList({
               prefetch
               aria-disabled={page <= 1}
             >
-              ← Prev
+              ← PREV
             </Link>
-            <span className="muted">
-              Page {page} / {totalPages || 1}
+            <span className="muted" style={{ padding: "0 16px" }}>
+              PAGE {page} / {totalPages || 1}
             </span>
             <Link
               className={`pager-btn${page >= (totalPages || 1) ? " disabled" : ""}`}
@@ -419,7 +420,7 @@ export function LeadList({
               prefetch
               aria-disabled={page >= (totalPages || 1)}
             >
-              Next →
+              NEXT →
             </Link>
           </div>
         </div>

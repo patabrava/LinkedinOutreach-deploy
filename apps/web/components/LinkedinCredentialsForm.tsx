@@ -16,7 +16,7 @@ function SubmitButton() {
   const { pending } = useFormStatus();
   return (
     <button className="btn" type="submit" disabled={pending}>
-      {pending ? "Saving..." : "Save credentials"}
+      {pending ? "SAVING…" : "SAVE CREDENTIALS"}
     </button>
   );
 }
@@ -27,13 +27,13 @@ export function LinkedinCredentialsForm({ existing, useCard = true }: Props) {
   const content = (
     <>
       <div className="pill">LinkedIn Auth</div>
-      <h3 style={{ margin: "10px 0 6px 0" }}>Credentials</h3>
-      <div className="muted" style={{ marginBottom: 12 }}>
+      <h3 style={{ margin: "12px 0 8px 0" }}>CREDENTIALS</h3>
+      <div className="muted" style={{ marginBottom: 16 }}>
         Stored securely in Supabase settings. Used by the Playwright scraper to log in and cache auth.json.
       </div>
 
-      <label className="muted" htmlFor="email">
-        Email
+      <label htmlFor="email">
+        EMAIL
       </label>
       <input
         className="input"
@@ -44,11 +44,11 @@ export function LinkedinCredentialsForm({ existing, useCard = true }: Props) {
         placeholder="you@example.com"
         required
         autoComplete="username"
-        style={{ marginBottom: 10 }}
+        style={{ marginBottom: 16 }}
       />
 
-      <label className="muted" htmlFor="password">
-        Password
+      <label htmlFor="password">
+        PASSWORD
       </label>
       <input
         className="input"
@@ -58,14 +58,14 @@ export function LinkedinCredentialsForm({ existing, useCard = true }: Props) {
         placeholder={existing.hasPassword ? "Password stored. Enter to replace." : "LinkedIn password"}
         required
         autoComplete="current-password"
-        style={{ marginBottom: 12 }}
+        style={{ marginBottom: 20 }}
       />
 
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
         <SubmitButton />
-        {state?.success ? <span className="muted">Saved.</span> : null}
+        {state?.success ? <span className="muted">SAVED.</span> : null}
         {state?.error ? (
-          <span className="muted" style={{ color: "#fca5a5" }}>
+          <span className="muted" style={{ color: "var(--accent)" }}>
             {state.error}
           </span>
         ) : null}
@@ -75,7 +75,7 @@ export function LinkedinCredentialsForm({ existing, useCard = true }: Props) {
 
   if (useCard === false) {
     return (
-      <form action={formAction} style={{ marginTop: 8 }}>
+      <form action={formAction} style={{ marginTop: 12 }}>
         {content}
       </form>
     );

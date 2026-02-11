@@ -1,6 +1,7 @@
 import { LeadList } from "../../components/LeadList";
 import { StartEnrichmentButton } from "../../components/StartEnrichmentButton";
 import { fetchLeadList } from "../actions";
+
 export default async function LeadsPage({
   searchParams,
 }: {
@@ -21,25 +22,25 @@ export default async function LeadsPage({
         style={{
           display: "grid",
           gridTemplateColumns: "minmax(0, 1fr) 380px",
-          gap: 18,
+          gap: 0,
           alignItems: "flex-start",
-          marginBottom: 18,
+          marginBottom: 24,
         }}
       >
         <div style={{ minWidth: 0 }}>
           <div className="pill">Leads</div>
-          <h1 style={{ margin: "12px 0 6px 0", fontSize: 32, letterSpacing: "-0.5px" }}>Lead Intake</h1>
+          <h1 style={{ margin: "16px 0 8px 0" }}>LEAD INTAKE</h1>
           <div className="muted">Upload a CSV and review everything that landed.</div>
-          <div style={{ marginTop: 6 }}>
+          <div style={{ marginTop: 8 }}>
             <a className="muted" href="/settings">
               Set LinkedIn credentials →
             </a>
           </div>
         </div>
-        <div className="card" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+        <div className="card" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16, borderLeft: "none", borderTop: "none", borderBottom: "none" }}>
           <div>
             <div className="pill">Automation Control</div>
-            <h3 style={{ margin: "12px 0 6px 0" }}>Lead enrichment</h3>
+            <h3 style={{ margin: "12px 0 8px 0" }}>LEAD ENRICHMENT</h3>
             <div className="muted">
               Run enrichment in two modes: prepare message drafts (standard) or send a connection request without a
               note for leads flagged as connect-only.
@@ -51,13 +52,12 @@ export default async function LeadsPage({
               display: "flex",
               flexDirection: "column",
               gap: 12,
-              border: "1px solid rgba(148, 163, 184, 0.3)",
-              borderRadius: 12,
-              padding: 12,
+              border: "3px solid #000",
+              padding: 16,
             }}
           >
             <div>
-              <strong>Standard enrichment + drafts</strong>
+              <strong>STANDARD ENRICHMENT + DRAFTS</strong>
               <div className="muted" style={{ marginTop: 4 }}>
                 Enrich NEW leads and move them toward draft generation.
               </div>
@@ -70,15 +70,14 @@ export default async function LeadsPage({
               display: "flex",
               flexDirection: "column",
               gap: 12,
-              border: "1px solid rgba(59, 130, 246, 0.3)",
-              borderRadius: 12,
-              padding: 12,
+              border: "3px solid #000",
+              padding: 16,
             }}
           >
             <div>
-              <strong>Enrich + connect (no note)</strong>
+              <strong>ENRICH + CONNECT (NO NOTE)</strong>
               <div className="muted" style={{ marginTop: 4 }}>
-                Targets leads whose <code>outreach_mode</code> is set to connect_only. After enrichment, a connection
+                Targets leads whose outreach_mode is set to connect_only. After enrichment, a connection
                 request is sent without drafting a message.
               </div>
             </div>

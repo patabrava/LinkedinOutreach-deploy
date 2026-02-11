@@ -18,13 +18,13 @@ type Props = {
 
 export function CSVUploader({ afterImport }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const [status, setStatus] = useState<string>("Drop CSV or click to upload");
+  const [status, setStatus] = useState<string>("DROP CSV OR CLICK TO UPLOAD");
   const [loading, setLoading] = useState(false);
 
   const handleFiles = (file?: File | null) => {
     if (!file) return;
     setLoading(true);
-    setStatus("Parsing...");
+    setStatus("PARSING…");
     Papa.parse<Row>(file, {
       header: true,
       skipEmptyLines: true,
@@ -42,20 +42,20 @@ export function CSVUploader({ afterImport }: Props) {
               r["organization"],
           }));
           const response = await importLeads(rows);
-          setStatus(`Inserted ${response.inserted} leads`);
+          setStatus(`INSERTED ${response.inserted} LEADS`);
           if (afterImport) {
             afterImport();
           } else if (typeof window !== "undefined") {
             window.location.reload();
           }
         } catch (err: any) {
-          setStatus(`Failed: ${err?.message || "Unknown error"}`);
+          setStatus(`FAILED: ${err?.message || "Unknown error"}`);
         } finally {
           setLoading(false);
         }
       },
       error: (err) => {
-        setStatus(`Parse error: ${err.message}`);
+        setStatus(`PARSE ERROR: ${err.message}`);
         setLoading(false);
       },
     });
@@ -72,7 +72,6 @@ export function CSVUploader({ afterImport }: Props) {
       onDragOver={(e) => e.preventDefault()}
       onDrop={onDrop}
       onClick={() => inputRef.current?.click()}
-      style={{ cursor: "pointer" }}
     >
       {status}
       <input
@@ -82,10 +81,10 @@ export function CSVUploader({ afterImport }: Props) {
         style={{ display: "none" }}
         onChange={(e) => handleFiles(e.target.files?.[0])}
       />
-      <div style={{ marginTop: 8, fontSize: 12, color: "#cbd5e1" }}>
-        Columns: linkedin_url, first_name, last_name, company_name
+      <div style={{ marginTop: 12, fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>
+        COLUMNS: linkedin_url, first_name, last_name, company_name
       </div>
-      {loading ? <div className="muted" style={{ marginTop: 6 }}>Working...</div> : null}
+      {loading ? <div className="muted" style={{ marginTop: 8 }}>WORKING…</div> : null}
     </div>
   );
 }

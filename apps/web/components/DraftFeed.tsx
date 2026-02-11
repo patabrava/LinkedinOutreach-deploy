@@ -37,14 +37,14 @@ type Props = {
 const POLL_INTERVAL_MS = 5000;
 const POLL_TIMEOUT_MS = 2 * 60 * 1000;
 
-const STATUS_PILL_META: Record<string, { label: string; background: string; color: string }> = {
-  APPROVED: { label: "Approved (unsent)", background: "rgba(34,197,94,0.18)", color: "#bbf7d0" },
-  DRAFT_READY: { label: "Draft Ready", background: "rgba(129,140,248,0.18)", color: "#c7d2fe" },
-  MESSAGE_ONLY_READY: { label: "Message Draft Ready", background: "rgba(59,130,246,0.15)", color: "#bfdbfe" },
-  MESSAGE_ONLY_APPROVED: { label: "Message Approved", background: "rgba(16,185,129,0.18)", color: "#a7f3d0" },
-  CONNECT_ONLY_SENT: { label: "Pending Connection", background: "rgba(248,250,252,0.04)", color: "#f8fafc" },
-  SENT: { label: "Sent", background: "rgba(148,163,184,0.2)", color: "#e2e8f0" },
-  DEFAULT: { label: "Draft", background: "rgba(148,163,184,0.2)", color: "#e2e8f0" },
+const STATUS_PILL_META: Record<string, { label: string; className: string }> = {
+  APPROVED: { label: "Approved (unsent)", className: "status-approved" },
+  DRAFT_READY: { label: "Draft Ready", className: "status-draft" },
+  MESSAGE_ONLY_READY: { label: "Message Draft Ready", className: "status-draft" },
+  MESSAGE_ONLY_APPROVED: { label: "Message Approved", className: "status-approved" },
+  CONNECT_ONLY_SENT: { label: "Pending Connection", className: "status-pending" },
+  SENT: { label: "Sent", className: "status-sent" },
+  DEFAULT: { label: "Draft", className: "status-new" },
 };
 
 const MESSAGE_ONLY_STATUSES = ["CONNECT_ONLY_SENT", "MESSAGE_ONLY_READY", "MESSAGE_ONLY_APPROVED"];
@@ -360,99 +360,69 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
 
   if (!localDrafts.length && !loading) {
     return (
-      <div className="card" style={{ marginTop: 20 }}>
+      <div className="card" style={{ marginTop: 24 }}>
         <div className="pill">Draft Feed</div>
-        <h3 style={{ margin: "10px 0 6px 0" }}>
-          {outreachMode === "message_only" ? "No pending connections." : "No drafts ready."}
+        <h3 style={{ margin: "12px 0 8px 0" }}>
+          {outreachMode === "message_only" ? "NO PENDING CONNECTIONS" : "NO DRAFTS READY"}
         </h3>
         <div className="muted">
           {outreachMode === "message_only" 
             ? "When connections are accepted, leads will appear here for messaging."
             : "When the agent generates drafts, they will appear here."}
         </div>
-        <div style={{ marginTop: 12, marginBottom: 12, display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <div style={{ marginTop: 16, marginBottom: 12, display: "flex", gap: 16, flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <label className="muted" style={{ fontSize: 13 }}>Outreach Style:</label>
+            <label style={{ fontSize: 12, margin: 0 }}>Outreach Style:</label>
             <select
               value={outreachMode}
               onChange={(e) => handleOutreachModeChange(e.target.value as OutreachMode)}
               disabled={isGenerating}
-              style={{
-                maxWidth: 200,
-                padding: "8px 12px",
-                fontSize: 13,
-                backgroundColor: outreachMode === "message_only" ? "rgba(59, 130, 246, 0.2)" : "rgba(30, 41, 59, 0.95)",
-                color: "#e2e8f0",
-                border: outreachMode === "message_only" ? "1px solid rgba(59, 130, 246, 0.5)" : "1px solid rgba(148, 163, 184, 0.2)",
-                borderRadius: 6,
-                cursor: "pointer",
-                outline: "none",
-                appearance: "none",
-                WebkitAppearance: "none",
-                backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E")`,
-                backgroundRepeat: "no-repeat",
-                backgroundPosition: "right 10px center",
-                paddingRight: 32,
-              }}
+              className="input"
+              style={{ maxWidth: 200, padding: "8px 12px", fontSize: 12 }}
             >
-              <option value="connect_message" style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{OUTREACH_MODE_LABELS.connect_message}</option>
-              <option value="message_only" style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{OUTREACH_MODE_LABELS.message_only}</option>
+              <option value="connect_message">{OUTREACH_MODE_LABELS.connect_message}</option>
+              <option value="message_only">{OUTREACH_MODE_LABELS.message_only}</option>
             </select>
           </div>
           {outreachMode === "connect_message" && (
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <label className="muted" style={{ fontSize: 13 }}>Message Style:</label>
+              <label style={{ fontSize: 12, margin: 0 }}>Message Style:</label>
               <select
                 value={promptType}
                 onChange={(e) => setPromptType(Number(e.target.value) as PromptType)}
                 disabled={isGenerating}
-                style={{
-                  maxWidth: 200,
-                  padding: "8px 12px",
-                  fontSize: 13,
-                  backgroundColor: "rgba(30, 41, 59, 0.95)",
-                  color: "#e2e8f0",
-                  border: "1px solid rgba(148, 163, 184, 0.2)",
-                  borderRadius: 6,
-                  cursor: "pointer",
-                  outline: "none",
-                  appearance: "none",
-                  WebkitAppearance: "none",
-                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E")`,
-                  backgroundRepeat: "no-repeat",
-                  backgroundPosition: "right 10px center",
-                  paddingRight: 32,
-                }}
+                className="input"
+                style={{ maxWidth: 200, padding: "8px 12px", fontSize: 12 }}
               >
-                <option value={1} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[1]}</option>
-                <option value={2} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[2]}</option>
-                <option value={3} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[3]}</option>
+                <option value={1}>{PROMPT_TYPE_LABELS[1]}</option>
+                <option value={2}>{PROMPT_TYPE_LABELS[2]}</option>
+                <option value={3}>{PROMPT_TYPE_LABELS[3]}</option>
               </select>
             </div>
           )}
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 0, flexWrap: "wrap" }}>
           <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
-            {genPending ? "Starting…" : isPolling ? "Generating…" : generateButtonLabel}
+            {genPending ? "STARTING…" : isPolling ? "GENERATING…" : generateButtonLabel}
           </button>
           <button className="btn warn" onClick={handleBulkApproveSend} disabled={disableBulkSend}>
-            {bulkPending ? "Sending…" : "Approve & Send All"}
+            {bulkPending ? "SENDING…" : "Approve & Send All"}
           </button>
           <button className="btn secondary" onClick={handleSendAllApproved} disabled={bulkPending}>
-            {bulkPending ? "Triggering…" : outreachMode === "message_only" ? "Send to Accepted" : "Send All Approved"}
+            {bulkPending ? "TRIGGERING…" : outreachMode === "message_only" ? "Send to Accepted" : "Send All Approved"}
           </button>
           {genMessage ? (
-            <span className="muted" style={{ marginLeft: 6 }} aria-live="polite">
+            <span className="muted" style={{ marginLeft: 12, alignSelf: "center" }} aria-live="polite">
               {genMessage}
             </span>
           ) : null}
           {bulkMessage ? (
-            <span className="muted" style={{ marginLeft: 6 }} aria-live="polite">
+            <span className="muted" style={{ marginLeft: 12, alignSelf: "center" }} aria-live="polite">
               {bulkMessage}
             </span>
           ) : null}
           {isGenerating && !genMessage ? (
-            <span className="muted" style={{ marginLeft: 6 }} aria-live="polite">
+            <span className="muted" style={{ marginLeft: 12, alignSelf: "center" }} aria-live="polite">
               Drafts are being generated…
             </span>
           ) : null}
@@ -463,88 +433,58 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
 
   return (
     <>
-      <div className="card" style={{ marginTop: 20, marginBottom: 12 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+      <div className="card" style={{ marginTop: 24, marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
           <div>
             <div className="pill">Draft Feed</div>
-            <h3 style={{ margin: "10px 0 6px 0" }}>Review and approve drafts</h3>
+            <h3 style={{ margin: "12px 0 8px 0" }}>REVIEW AND APPROVE DRAFTS</h3>
             <div className="muted">Manually trigger draft generation for ENRICHED leads when you are ready.</div>
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "flex-end" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <label className="muted" style={{ fontSize: 13 }}>Outreach Style:</label>
+                <label style={{ fontSize: 11, margin: 0 }}>Outreach Style:</label>
                 <select
                   value={outreachMode}
                   onChange={(e) => handleOutreachModeChange(e.target.value as OutreachMode)}
                   disabled={isGenerating}
-                  style={{
-                    maxWidth: 200,
-                    padding: "8px 12px",
-                    fontSize: 13,
-                    backgroundColor: outreachMode === "message_only" ? "rgba(59, 130, 246, 0.2)" : "rgba(30, 41, 59, 0.95)",
-                    color: "#e2e8f0",
-                    border: outreachMode === "message_only" ? "1px solid rgba(59, 130, 246, 0.5)" : "1px solid rgba(148, 163, 184, 0.2)",
-                    borderRadius: 6,
-                    cursor: "pointer",
-                    outline: "none",
-                    appearance: "none",
-                    WebkitAppearance: "none",
-                    backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E")`,
-                    backgroundRepeat: "no-repeat",
-                    backgroundPosition: "right 10px center",
-                    paddingRight: 32,
-                  }}
+                  className="input"
+                  style={{ maxWidth: 200, padding: "8px 12px", fontSize: 11 }}
                 >
-                  <option value="connect_message" style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{OUTREACH_MODE_LABELS.connect_message}</option>
-                  <option value="message_only" style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{OUTREACH_MODE_LABELS.message_only}</option>
+                  <option value="connect_message">{OUTREACH_MODE_LABELS.connect_message}</option>
+                  <option value="message_only">{OUTREACH_MODE_LABELS.message_only}</option>
                 </select>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <label className="muted" style={{ fontSize: 13 }}>Message Style:</label>
+                <label style={{ fontSize: 11, margin: 0 }}>Message Style:</label>
                 <select
                   value={promptType}
                   onChange={(e) => setPromptType(Number(e.target.value) as PromptType)}
                   disabled={isGenerating || outreachMode === "message_only"}
-                  style={{
-                    maxWidth: 200,
-                    padding: "8px 12px",
-                    fontSize: 13,
-                    backgroundColor: "rgba(30, 41, 59, 0.95)",
-                    color: outreachMode === "message_only" ? "#64748b" : "#e2e8f0",
-                    border: "1px solid rgba(148, 163, 184, 0.2)",
-                    borderRadius: 6,
-                    cursor: outreachMode === "message_only" ? "not-allowed" : "pointer",
-                    outline: "none",
-                    appearance: "none",
-                    WebkitAppearance: "none",
-                    backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E")`,
-                    backgroundRepeat: "no-repeat",
-                    backgroundPosition: "right 10px center",
-                    paddingRight: 32,
-                  }}
+                  className="input"
+                  style={{ maxWidth: 200, padding: "8px 12px", fontSize: 11 }}
                 >
-                  <option value={1} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[1]}</option>
-                  <option value={2} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[2]}</option>
-                  <option value={3} style={{ backgroundColor: "#1e293b", color: "#e2e8f0" }}>{PROMPT_TYPE_LABELS[3]}</option>
+                  <option value={1}>{PROMPT_TYPE_LABELS[1]}</option>
+                  <option value={2}>{PROMPT_TYPE_LABELS[2]}</option>
+                  <option value={3}>{PROMPT_TYPE_LABELS[3]}</option>
                 </select>
               </div>
             </div>
-            <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ display: "flex", gap: 0 }}>
               <button className="btn warn" onClick={handleBulkApproveSend} disabled={disableBulkSend}>
-                {bulkPending ? "Sending…" : "Approve & Send All"}
+                {bulkPending ? "SENDING…" : "Approve & Send All"}
               </button>
               <button className="btn secondary" onClick={handleSendAllApproved} disabled={bulkPending}>
-                {bulkPending ? "Triggering…" : "Send All Approved"}
+                {bulkPending ? "TRIGGERING…" : "Send All Approved"}
               </button>
               <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
-                {genPending ? "Starting…" : isPolling ? "Generating…" : generateButtonLabel}
+                {genPending ? "STARTING…" : isPolling ? "GENERATING…" : generateButtonLabel}
               </button>
             </div>
           </div>
         </div>
         {(genMessage || bulkMessage || isGenerating || bulkPending) ? (
-          <div className="muted" style={{ marginTop: 8 }} aria-live="polite">
+          <div className="muted" style={{ marginTop: 12, padding: 8, border: "2px solid #000" }} aria-live="polite">
             {bulkPending
               ? "Approving & sending all drafts…"
               : bulkMessage
@@ -575,15 +515,25 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
       </div>
 
       {isMessageOnly && pendingDrafts.length ? (
-        <div className="card" style={{ marginTop: 20 }}>
-          <div className="pill" style={{ marginBottom: 8 }}>Pending Connections</div>
-          <h3 style={{ margin: "0 0 6px 0" }}>Waiting for acceptance</h3>
+        <div className="card" style={{ marginTop: 24 }}>
+          <div className="pill" style={{ marginBottom: 12 }}>Pending Connections</div>
+          <h3 style={{ margin: "0 0 8px 0" }}>WAITING FOR ACCEPTANCE</h3>
           <div className="muted" style={{ marginBottom: 16 }}>
             These leads still show "Ausstehend" on LinkedIn. We will automatically attempt messaging as soon as the connection is accepted.
           </div>
           <div className="grid">
             {pendingDrafts.map((draft) => (
-              <PendingConnectionCard key={draft.leadId} draft={draft} />
+              <div key={draft.leadId} className="card" style={{ opacity: 0.7 }}>
+                <div className="pill status-pending">Pending Connection</div>
+                <h3 style={{ margin: "12px 0 4px 0" }}>{draft.name || "Unknown lead"}</h3>
+                <div className="muted" style={{ fontSize: 12 }}>{draft.headline}</div>
+                <div className="muted" style={{ marginTop: 8 }}>
+                  {draft.company || draft.profile?.current_company || "Company N/A"}
+                </div>
+                <a className="muted" href={draft.linkedinUrl} target="_blank" rel="noreferrer" style={{ display: "block", marginTop: 8 }}>
+                  View profile ↗
+                </a>
+              </div>
             ))}
           </div>
         </div>
@@ -654,19 +604,13 @@ function DraftCard({
 
   return (
     <section className="card">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
         <div>
-          <div
-            className="pill"
-            style={{
-              background: statusMeta.background,
-              color: statusMeta.color,
-            }}
-          >
+          <div className={`pill ${statusMeta.className}`}>
             {statusMeta.label}
           </div>
-          <h3 style={{ margin: "10px 0 4px 0" }}>{draft.name || "Unknown lead"}</h3>
-          <div style={{ color: "#a5b4fc", marginBottom: 8 }}>{draft.headline}</div>
+          <h3 style={{ margin: "12px 0 4px 0" }}>{draft.name || "Unknown lead"}</h3>
+          <div style={{ color: "var(--muted)", marginBottom: 8, fontSize: 12 }}>{draft.headline}</div>
         </div>
         <a className="muted" href={draft.linkedinUrl} target="_blank" rel="noreferrer">
           View profile ↗
@@ -677,26 +621,22 @@ function DraftCard({
         {draft.company || draft.profile?.current_company || "Company N/A"}
       </div>
 
-      <div className="muted" style={{ marginBottom: 6 }}>
-        Bio
-      </div>
-      <div style={{ marginBottom: 14, lineHeight: 1.5 }}>
+      <label>Bio</label>
+      <div style={{ marginBottom: 16, lineHeight: 1.5, padding: 12, border: "2px solid #000" }}>
         {draft.profile?.about || "No about section scraped yet."}
       </div>
 
       {activity ? (
-        <div style={{ marginBottom: 14 }}>
-          <div className="pill" style={{ background: "rgba(168, 85, 247, 0.16)", color: "#f3e8ff" }}>
-            Quoted Post
-          </div>
-          <div style={{ marginTop: 8 }}>{activity.text}</div>
-          <div className="muted" style={{ marginTop: 4 }}>
+        <div style={{ marginBottom: 16 }}>
+          <div className="pill">Quoted Post</div>
+          <div style={{ marginTop: 8, padding: 12, border: "2px solid #000" }}>{activity.text}</div>
+          <div className="muted" style={{ marginTop: 4, fontSize: 11 }}>
             {activity.date} • {activity.likes || "0"} likes
           </div>
         </div>
       ) : null}
 
-      <label className="muted">Opener</label>
+      <label>Opener</label>
       <textarea
         className="textarea"
         value={localDraft.opener}
@@ -704,7 +644,7 @@ function DraftCard({
         onChange={(e) => setLocalDraft((d) => ({ ...d, opener: e.target.value }))}
       />
 
-      <label className="muted">Body</label>
+      <label>Body</label>
       <textarea
         className="textarea"
         value={localDraft.body}
@@ -712,13 +652,11 @@ function DraftCard({
         onChange={(e) => setLocalDraft((d) => ({ ...d, body: e.target.value }))}
       />
 
-      <div style={{ marginTop: 12, marginBottom: 6 }} className="muted">
-        CTA
-      </div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+      <label>CTA</label>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         <select
           className="input"
-          style={{ maxWidth: 240 }}
+          style={{ maxWidth: 200 }}
           value={localDraft.ctaType}
           disabled={draft.regenerating}
           onChange={(e) => setLocalDraft((d) => ({ ...d, ctaType: e.target.value }))}
@@ -736,13 +674,11 @@ function DraftCard({
         />
       </div>
 
-      <div className="muted" style={{ margin: "10px 0 6px 0" }}>
-        Preview
-      </div>
+      <label>Preview</label>
       <div className="preview">{preview || "Your preview will appear here."}</div>
 
       {draft.regenerating ? (
-        <div className="muted" style={{ marginTop: 8 }}>
+        <div className="muted" style={{ marginTop: 12, padding: 8, border: "2px solid #000" }}>
           Regenerating draft… We will refresh this card when the new draft arrives.
         </div>
       ) : null}
@@ -765,10 +701,10 @@ function DraftCard({
             )
           }
         >
-          {pending ? "Saving..." : draft.regenerating ? "Pending..." : "Approve"}
+          {pending ? "SAVING…" : draft.regenerating ? "PENDING…" : "APPROVE"}
         </button>
         <button className="btn secondary" disabled={locked} onClick={() => run(() => rejectDraft(draft.leadId))}>
-          {pending ? "..." : draft.regenerating ? "Pending..." : "Reject"}
+          {pending ? "…" : draft.regenerating ? "PENDING…" : "REJECT"}
         </button>
         {canSendNow ? (
           <button
@@ -778,7 +714,7 @@ function DraftCard({
               run(() => sendLeadNow(draft.leadId, outreachMode))
             }
           >
-            {pending ? "Sending..." : "Send Now"}
+            {pending ? "SENDING…" : "SEND NOW"}
           </button>
         ) : (
           <button
@@ -794,11 +730,11 @@ function DraftCard({
               );
             }}
           >
-            {pending || draft.regenerating ? "Regenerating..." : "Regenerate"}
+            {pending || draft.regenerating ? "REGENERATING…" : "REGENERATE"}
           </button>
         )}
         {message ? (
-          <span className="muted" style={{ marginLeft: 8 }}>
+          <span className="muted" style={{ marginLeft: 12, alignSelf: "center" }}>
             {message}
           </span>
         ) : null}
@@ -806,3 +742,5 @@ function DraftCard({
     </section>
   );
 }
+
+

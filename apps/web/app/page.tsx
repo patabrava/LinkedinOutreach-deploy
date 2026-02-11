@@ -25,14 +25,14 @@ export default async function MissionControlPage({ searchParams }: PageProps) {
 
   return (
     <div className="page">
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 18, gap: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 24, gap: 14 }}>
         <div>
           <div className="pill">Draft Feed</div>
-          <h1 style={{ margin: "12px 0 6px 0", fontSize: 32, letterSpacing: "-0.5px" }}>
-            Mission Control
+          <h1 style={{ margin: "16px 0 8px 0" }}>
+            MISSION CONTROL
           </h1>
           <div className="muted">Review, edit, and approve AI-generated outreach.</div>
-          <div style={{ marginTop: 6 }}>
+          <div style={{ marginTop: 8 }}>
             <a className="muted" href="/leads">
               View all leads →
             </a>

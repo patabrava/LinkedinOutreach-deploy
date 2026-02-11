@@ -7,13 +7,13 @@ export default async function FollowupsPage() {
   const initial = await fetchFollowups(["PENDING_REVIEW", "APPROVED"], 100);
   return (
     <main className="container">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, gap: 0 }}>
         {/* Server Actions forms */}
         <form action={triggerInboxScan}>
-          <button className="btn" type="submit">Check Inbox</button>
+          <button className="btn" type="submit">CHECK INBOX</button>
         </form>
         <form action={triggerFollowupSender}>
-          <button className="btn secondary" type="submit">Send Approved</button>
+          <button className="btn secondary" type="submit">SEND APPROVED</button>
         </form>
       </div>
       <FollowupsList initial={initial} />

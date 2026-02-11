@@ -4,7 +4,7 @@ export default function UploadPage() {
   return (
     <div className="page">
       <div className="pill">Import</div>
-      <h1 style={{ margin: "12px 0 6px 0" }}>CSV Uploader</h1>
+      <h1 style={{ margin: "16px 0 8px 0" }}>CSV UPLOADER</h1>
       <div className="muted" style={{ marginBottom: 16 }}>
         Drag & drop leads. Dedupe runs on linkedin_url.
       </div>

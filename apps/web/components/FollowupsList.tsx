@@ -21,19 +21,19 @@ const formatDate = (iso?: string | null) => {
   });
 };
 
-const statusStyle: Record<string, { bg: string; color: string }> = {
-  PENDING_REVIEW: { bg: "rgba(245, 158, 11, 0.16)", color: "#fcd34d" },
-  APPROVED: { bg: "rgba(52, 211, 153, 0.18)", color: "#a7f3d0" },
-  PROCESSING: { bg: "rgba(59, 130, 246, 0.18)", color: "#93c5fd" },
-  SENT: { bg: "rgba(79, 70, 229, 0.18)", color: "#c7d2fe" },
-  SKIPPED: { bg: "rgba(148, 163, 184, 0.16)", color: "#cbd5e1" },
-  FAILED: { bg: "rgba(239, 68, 68, 0.18)", color: "#fca5a5" },
-  RETRY_LATER: { bg: "rgba(251, 146, 60, 0.18)", color: "#fdba74" },
+const statusClasses: Record<string, string> = {
+  PENDING_REVIEW: "status-draft",
+  APPROVED: "status-approved",
+  PROCESSING: "status-processing",
+  SENT: "status-sent",
+  SKIPPED: "status-pending",
+  FAILED: "status-rejected",
+  RETRY_LATER: "status-draft",
 };
 
-const typeStyle: Record<string, { bg: string; color: string; label: string }> = {
-  REPLY: { bg: "rgba(34, 197, 94, 0.18)", color: "#86efac", label: "Reply" },
-  NUDGE: { bg: "rgba(168, 85, 247, 0.18)", color: "#d8b4fe", label: "Nudge" },
+const typeClasses: Record<string, { className: string; label: string }> = {
+  REPLY: { className: "status-approved", label: "REPLY" },
+  NUDGE: { className: "status-draft", label: "NUDGE" },
 };
 
 export default function FollowupsList({ initial }: Props) {
@@ -231,44 +231,40 @@ export default function FollowupsList({ initial }: Props) {
 
   return (
     <section className="card">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
         <div>
           <div className="pill">Follow-ups</div>
-          <h3 style={{ margin: "10px 0 6px 0" }}>Follow-ups needing review</h3>
+          <h3 style={{ margin: "12px 0 8px 0" }}>FOLLOW-UPS NEEDING REVIEW</h3>
           <div className="muted">Review replies and nudge opportunities, then draft and send your response.</div>
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "flex-end" }}>
           <div className="muted" style={{ textAlign: "right" }}>
-            <div>Pending: {pending.length} • Approved: {approved.length}</div>
+            <div>PENDING: {pending.length} • APPROVED: {approved.length}</div>
             <div style={{ fontSize: 11, marginTop: 4 }}>
-              Replies: {replies.length} • Nudges: {nudges.length}
+              REPLIES: {replies.length} • NUDGES: {nudges.length}
             </div>
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 0, alignItems: "center" }}>
             <button
               className="btn warn"
               onClick={onBulkApproveAndSend}
               disabled={bulkPending || pending.filter(r => r.draft_text).length === 0}
             >
-              {bulkPending ? "Sending..." : "Approve & Send All"}
+              {bulkPending ? "SENDING…" : "APPROVE & SEND ALL"}
             </button>
             <button
               className="btn secondary"
               onClick={onSendApproved}
               disabled={bulkPending}
             >
-              Send Approved
+              SEND APPROVED
             </button>
             <button
               className="btn"
               onClick={onGenerateAllDrafts}
               disabled={genPending || pending.length === 0}
-              style={{
-                background: "linear-gradient(135deg, #8b5cf6, #6366f1)",
-                minWidth: 140,
-              }}
             >
-              {genPending ? "Generating..." : "Generate Drafts"}
+              {genPending ? "GENERATING…" : "GENERATE DRAFTS"}
             </button>
           </div>
           {(genMessage || bulkMessage) && (
@@ -280,28 +276,27 @@ export default function FollowupsList({ initial }: Props) {
       </div>
 
       {rows.length === 0 ? (
-        <div className="muted" style={{ marginTop: 12 }}>
+        <div className="muted" style={{ marginTop: 16 }}>
           No follow-ups yet.
         </div>
       ) : (
         <div
           className="table-wrapper"
           style={{
-            marginTop: 12,
+            marginTop: 16,
             maxHeight: 520,
             overflowY: "auto",
-            borderRadius: 12,
           }}
         >
           <table className="lead-table" style={{ minWidth: 900 }}>
             <thead>
               <tr>
-                <th>Lead</th>
-                <th>Type</th>
-                <th>Message</th>
-                <th>Status</th>
-                <th>Draft</th>
-                <th style={{ width: 160 }}>Actions</th>
+                <th>LEAD</th>
+                <th>TYPE</th>
+                <th>MESSAGE</th>
+                <th>STATUS</th>
+                <th>DRAFT</th>
+                <th style={{ width: 180 }}>ACTIONS</th>
               </tr>
             </thead>
             <tbody>
@@ -312,9 +307,9 @@ export default function FollowupsList({ initial }: Props) {
                 const link = lead.linkedin_url || "";
                 const draft = draftEdits[row.id] ?? row.draft_text ?? "";
                 const statusKey = (row.status || "").toUpperCase();
-                const style = statusStyle[statusKey] || { bg: "rgba(255,255,255,0.1)", color: "#cbd5e1" };
+                const statusClass = statusClasses[statusKey] || "status-new";
                 const followupTypeKey = (row.followup_type || "REPLY").toUpperCase();
-                const typeInfo = typeStyle[followupTypeKey] || typeStyle.REPLY;
+                const typeInfo = typeClasses[followupTypeKey] || typeClasses.REPLY;
 
                 return (
                   <tr key={row.id}>
@@ -330,45 +325,29 @@ export default function FollowupsList({ initial }: Props) {
                       </div>
                     </td>
                     <td>
-                      <span
-                        className="status-chip"
-                        style={{ background: typeInfo.bg, color: typeInfo.color, minWidth: 60, textAlign: "center" }}
-                      >
+                      <span className={`status-chip ${typeInfo.className}`} style={{ minWidth: 60, textAlign: "center" }}>
                         {typeInfo.label}
                       </span>
                     </td>
                     <td>
                       <div style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: 320 }}>
-                        <div className="pill" style={{ background: "rgba(255,255,255,0.06)", color: "#cbd5e1", width: "fit-content" }}>
+                        <div className="pill" style={{ width: "fit-content" }}>
                           {formatDate(row.reply_timestamp)}
                         </div>
                         {/* Show last message with sender badge */}
                         {row.last_message_text ? (
                           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            <span
-                              className="status-chip"
-                              style={{
-                                background: row.last_message_from === "lead"
-                                  ? "rgba(34, 197, 94, 0.18)"
-                                  : "rgba(59, 130, 246, 0.18)",
-                                color: row.last_message_from === "lead"
-                                  ? "#86efac"
-                                  : "#93c5fd",
-                                fontSize: 10,
-                                padding: "2px 6px",
-                                width: "fit-content",
-                              }}
-                            >
-                              {row.last_message_from === "lead" ? name : "You"}
+                            <span className="status-chip" style={{ fontSize: 10, padding: "2px 6px", width: "fit-content" }}>
+                              {row.last_message_from === "lead" ? name : "YOU"}
                             </span>
-                            <div style={{ lineHeight: 1.5, fontSize: 13 }}>
+                            <div style={{ lineHeight: 1.5, fontSize: 12 }}>
                               {row.last_message_text.length > 150
                                 ? `${row.last_message_text.slice(0, 150)}...`
                                 : row.last_message_text}
                             </div>
                           </div>
                         ) : (
-                          <div style={{ lineHeight: 1.5, fontSize: 13 }}>
+                          <div style={{ lineHeight: 1.5, fontSize: 12 }}>
                             {followupTypeKey === "NUDGE"
                               ? <span className="muted" style={{ fontStyle: "italic" }}>No reply yet - consider a follow-up</span>
                               : (row.reply_snippet || "—")
@@ -378,23 +357,20 @@ export default function FollowupsList({ initial }: Props) {
                       </div>
                     </td>
                     <td>
-                      <span
-                        className="status-chip"
-                        style={{ background: style.bg, color: style.color, minWidth: 110, textAlign: "center" }}
-                      >
+                      <span className={`status-chip ${statusClass}`} style={{ minWidth: 110, textAlign: "center" }}>
                         {row.status.replace(/_/g, " ")}
                       </span>
-                      <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>
-                        Attempt {row.attempt || 1}
+                      <div className="muted" style={{ marginTop: 6, fontSize: 11 }}>
+                        ATTEMPT {row.attempt || 1}
                       </div>
                       {row.last_error && (
-                        <div className="muted" style={{ marginTop: 4, fontSize: 11, color: "#fca5a5", maxWidth: 140 }}>
+                        <div className="muted" style={{ marginTop: 4, fontSize: 10, color: "var(--accent)", maxWidth: 140 }}>
                           {row.last_error.slice(0, 60)}...
                         </div>
                       )}
                       {row.next_send_at && (
-                        <div className="muted" style={{ marginTop: 4, fontSize: 11 }}>
-                          Next: {formatDate(row.next_send_at)}
+                        <div className="muted" style={{ marginTop: 4, fontSize: 10 }}>
+                          NEXT: {formatDate(row.next_send_at)}
                         </div>
                       )}
                     </td>
@@ -406,10 +382,10 @@ export default function FollowupsList({ initial }: Props) {
                           onChange={(e) => setDraftEdits((m) => ({ ...m, [row.id]: e.target.value }))}
                           placeholder="Enter follow-up message..."
                           rows={4}
-                          style={{ width: 340 }}
+                          style={{ width: 320, minHeight: 80 }}
                         />
-                        <div className="muted" style={{ fontSize: 11 }}>
-                          {draft.length}/300 chars
+                        <div className="muted" style={{ fontSize: 10 }}>
+                          {draft.length}/300 CHARS
                         </div>
                       </div>
                     </td>
@@ -421,43 +397,43 @@ export default function FollowupsList({ initial }: Props) {
                               className="btn"
                               disabled={busy[row.id]}
                               onClick={() => onGenerateDraft(row)}
-                              style={{ background: "linear-gradient(135deg, #8b5cf6, #6366f1)", fontSize: 12 }}
+                              style={{ fontSize: 11, padding: "8px 12px" }}
                             >
-                              {busy[row.id] ? "Generating..." : "Draft with AI"}
+                              {busy[row.id] ? "GENERATING…" : "DRAFT WITH AI"}
                             </button>
                             <button className="btn" disabled={busy[row.id]} onClick={() => onApprove(row)}>
-                              {busy[row.id] ? "Sending..." : "Approve & Send"}
+                              {busy[row.id] ? "SENDING…" : "APPROVE & SEND"}
                             </button>
                             <button className="btn secondary" disabled={busy[row.id]} onClick={() => onSkip(row)}>
-                              Skip
+                              SKIP
                             </button>
                           </>
                         )}
                         {row.status === "APPROVED" && (
                           <>
                             <button className="btn" disabled={busy[row.id]} onClick={() => onApprove(row)}>
-                              {busy[row.id] ? "Sending..." : "Send Now"}
+                              {busy[row.id] ? "SENDING…" : "SEND NOW"}
                             </button>
                             <button className="btn secondary" disabled={busy[row.id]} onClick={() => onSkip(row)}>
-                              Cancel
+                              CANCEL
                             </button>
                           </>
                         )}
                         {(row.status === "FAILED" || row.status === "RETRY_LATER") && (
                           <>
                             <button className="btn" disabled={busy[row.id]} onClick={() => onRetry(row)}>
-                              {busy[row.id] ? "Retrying..." : "Retry"}
+                              {busy[row.id] ? "RETRYING…" : "RETRY"}
                             </button>
                             <button className="btn secondary" disabled={busy[row.id]} onClick={() => onStopFollowups(row)}>
-                              Stop
+                              STOP
                             </button>
                           </>
                         )}
                         {row.status === "PROCESSING" && (
-                          <span className="muted" style={{ fontSize: 12 }}>Processing...</span>
+                          <span className="muted" style={{ fontSize: 11 }}>PROCESSING…</span>
                         )}
                         {(row.status === "SENT" || row.status === "SKIPPED") && (
-                          <span className="muted" style={{ fontSize: 12 }}>Completed</span>
+                          <span className="muted" style={{ fontSize: 11 }}>COMPLETED</span>
                         )}
                       </div>
                     </td>

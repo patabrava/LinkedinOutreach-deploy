@@ -34,12 +34,11 @@ export function StartLoginButton({ onStart }: Props) {
         onClick={start}
         disabled={running}
         className="btn"
-        style={{ background: running ? "#374151" : "#3b82f6", color: "white" }}
       >
-        {running ? "Launching..." : "Login to LinkedIn (opens browser)"}
+        {running ? "LAUNCHING…" : "LOGIN TO LINKEDIN (OPENS BROWSER)"}
       </button>
       {msg ? (
-        <div style={{ marginTop: 8, fontSize: 13, color: "#cbd5e1" }}>{msg}</div>
+        <div style={{ marginTop: 12, fontSize: 12, color: "var(--muted)" }}>{msg}</div>
       ) : null}
     </div>
   );

@@ -37,23 +37,23 @@ const MODE_CONFIG: Record<EnrichmentMode, {
   startEndpoint: string;
   startLabel: string;
   runningLabel: string;
-  buttonColor: string;
+  buttonClass: string;
   defaultStartMessage: string;
 }> = {
   message: {
     statusUrl: "/api/enrich/status",
     startEndpoint: "/api/enrich",
-    startLabel: "Start Enrichment",
-    runningLabel: "Starting...",
-    buttonColor: "#10b981",
+    startLabel: "START ENRICHMENT",
+    runningLabel: "STARTING…",
+    buttonClass: "btn",
     defaultStartMessage: "Scraper started. A browser window should appear.",
   },
   connect_only: {
     statusUrl: "/api/enrich/status?mode=connect_only",
     startEndpoint: "/api/enrich/connect-only",
-    startLabel: "Enrich + Connect (no note)",
-    runningLabel: "Starting connect-only...",
-    buttonColor: "#3b82f6",
+    startLabel: "ENRICH + CONNECT (NO NOTE)",
+    runningLabel: "STARTING CONNECT-ONLY…",
+    buttonClass: "btn secondary",
     defaultStartMessage: "Connect-only run started. A browser window should appear.",
   },
 };
@@ -217,51 +217,43 @@ export function StartEnrichmentButton({ mode = "message" }: StartEnrichmentButto
 
   return (
     <div style={{ width: "100%" }}>
-      <div style={{ display: "flex", gap: 8 }}>
+      <div style={{ display: "flex", gap: 0 }}>
         <button
           onClick={start}
           disabled={running}
-          className="btn"
-          style={{
-            background: running ? "#374151" : modeConfig.buttonColor,
-            color: "white",
-            flex: 1,
-          }}
+          className={modeConfig.buttonClass}
+          style={{ flex: 1 }}
         >
           {running ? modeConfig.runningLabel : modeConfig.startLabel}
         </button>
         <button
           onClick={stop}
           disabled={stopping}
-          className="btn"
-          style={{
-            background: stopping ? "#374151" : "#ef4444",
-            color: "white",
-            flex: 1,
-          }}
+          className="btn warn"
+          style={{ flex: 1 }}
         >
-          {stopping ? "Stopping..." : "Stop Enrichment"}
+          {stopping ? "STOPPING…" : "STOP ENRICHMENT"}
         </button>
       </div>
 
       {message ? (
-        <div style={{ marginTop: 8, fontSize: 13, color: "#cbd5e1" }}>{message}</div>
+        <div style={{ marginTop: 12, fontSize: 12, color: "var(--muted)" }}>{message}</div>
       ) : null}
       {error ? (
-        <div style={{ marginTop: 8, fontSize: 13, color: "#f87171" }}>{error}</div>
+        <div style={{ marginTop: 12, fontSize: 12, color: "var(--accent)" }}>{error}</div>
       ) : null}
 
-      <div style={{ marginTop: 14 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#9ca3af" }}>
-          <span>Status</span>
-          <span>{statusLoading ? "Updating…" : `${completionPercent}%`}</span>
+      <div style={{ marginTop: 20 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+          <span>STATUS</span>
+          <span>{statusLoading ? "UPDATING…" : `${completionPercent}%`}</span>
         </div>
         <div
           style={{
-            marginTop: 4,
-            height: 10,
-            borderRadius: 999,
-            background: "#1f2937",
+            marginTop: 8,
+            height: 16,
+            border: "3px solid #000",
+            background: "var(--bg)",
             overflow: "hidden",
           }}
         >
@@ -269,26 +261,26 @@ export function StartEnrichmentButton({ mode = "message" }: StartEnrichmentButto
             style={{
               height: "100%",
               width: `${completionPercent}%`,
-              background: "#10b981",
+              background: "var(--fg)",
               transition: "width 0.4s ease",
             }}
           />
         </div>
-        <div style={{ marginTop: 8, fontSize: 13, color: "#cbd5e1" }}>
+        <div style={{ marginTop: 12, fontSize: 12, color: "var(--fg)", fontWeight: 700 }}>
           {status
-            ? `${progress.completedForBar} completed today • ${progress.remainingForBar} remaining today`
-            : "Loading status…"}
+            ? `${progress.completedForBar} COMPLETED TODAY • ${progress.remainingForBar} REMAINING TODAY`
+            : "LOADING STATUS…"}
         </div>
         {progress.dailyCap !== null ? (
-          <div style={{ marginTop: 4, fontSize: 12, color: "#9ca3af" }}>
-            Daily cap: {progress.dailyCap}
+          <div style={{ marginTop: 4, fontSize: 11, color: "var(--muted)" }}>
+            DAILY CAP: {progress.dailyCap}
             {progress.backlogRemaining
-              ? ` • In queue: ${progress.backlogRemaining}`
+              ? ` • IN QUEUE: ${progress.backlogRemaining}`
               : ""}
           </div>
         ) : null}
         {nextLeadLabel ? (
-          <div style={{ marginTop: 6, fontSize: 12, color: "#9ca3af" }}>Next up: {nextLeadLabel}</div>
+          <div style={{ marginTop: 8, fontSize: 11, color: "var(--muted)" }}>NEXT UP: {nextLeadLabel}</div>
         ) : null}
       </div>
     </div>

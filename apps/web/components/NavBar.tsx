@@ -18,10 +18,10 @@ export function NavBar() {
   return (
     <nav className="top-nav">
       <div className="nav-inner">
-        <Link href="/" className="brand" aria-label="Digital Spine LinkedIn Agents home">
+        <Link href="/" className="brand" aria-label="Linkedin Scraper home">
           <div className="brand-text">
-            <span className="brand-name">Digital Spine</span>
-            <span className="brand-tagline">LinkedIn Agents</span>
+            <span className="brand-name">LINKEDIN</span>
+            <span className="brand-tagline">Scraper</span>
           </div>
         </Link>
         <div className="nav-links">
