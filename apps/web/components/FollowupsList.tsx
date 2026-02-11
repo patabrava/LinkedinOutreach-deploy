@@ -365,7 +365,7 @@ export default function FollowupsList({ initial }: Props) {
                       </div>
                       {row.last_error && (
                         <div className="muted" style={{ marginTop: 4, fontSize: 10, color: "var(--accent)", maxWidth: 140 }}>
-                          {row.last_error.slice(0, 60)}...
+                          {row.last_error.length > 60 ? `${row.last_error.slice(0, 60)}...` : row.last_error}
                         </div>
                       )}
                       {row.next_send_at && (
