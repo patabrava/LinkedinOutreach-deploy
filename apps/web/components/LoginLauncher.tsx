@@ -11,7 +11,7 @@ type Props = {
 };
 
 export function LoginLauncher({ existingCreds }: Props) {
-  const [showForm, setShowForm] = useState(false);
+  const [showForm, setShowForm] = useState(true);
 
   return (
     <div className="card" style={{ alignSelf: "flex-start" }}>
