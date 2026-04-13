@@ -34,8 +34,17 @@ type Props = {
   initialOutreachMode?: OutreachMode;
 };
 
+type SequenceDefinition = {
+  id: string;
+  name: string;
+};
+
 const POLL_INTERVAL_MS = 5000;
 const POLL_TIMEOUT_MS = 2 * 60 * 1000;
+const SEQUENCES_STORAGE_KEY = "outreach_sequences_v1";
+const BATCH_ASSIGNMENTS_STORAGE_KEY = "csv_batch_sequence_assignments_v1";
+const UPDATE_EVENT = "outreach-sequences-updated";
+const UNASSIGNED_BATCH = "unassigned";
 
 const STATUS_PILL_META: Record<string, { label: string; className: string }> = {
   APPROVED: { label: "Approved (unsent)", className: "status-approved" },
@@ -54,6 +63,37 @@ function getStatusMeta(status?: string) {
     return STATUS_PILL_META.DEFAULT;
   }
   return STATUS_PILL_META[status] ?? STATUS_PILL_META.DEFAULT;
+}
+
+function safeParseJson<T>(value: string | null, fallback: T): T {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function getBatchKey(profile?: Record<string, any>): string {
+  const raw =
+    profile?.csv_batch_id ||
+    profile?.csv_batch_name ||
+    profile?.import_batch_id ||
+    profile?.import_batch ||
+    profile?.upload_batch_id ||
+    profile?.upload_batch ||
+    profile?.source_csv ||
+    profile?.csv_filename;
+
+  if (typeof raw !== "string" || !raw.trim()) {
+    return UNASSIGNED_BATCH;
+  }
+  return raw.trim();
+}
+
+function formatBatchLabel(batchKey: string): string {
+  if (batchKey === UNASSIGNED_BATCH) return "Unassigned";
+  return batchKey;
 }
 
 export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: Props) {
@@ -75,6 +115,8 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
   const lastDraftCountRef = useRef<number>(drafts.length || 0);
   const isPollingRef = useRef(false);
   const regeneratingRef = useRef(regenerating);
+  const [sequenceById, setSequenceById] = useState<Record<string, SequenceDefinition>>({});
+  const [assignmentByBatch, setAssignmentByBatch] = useState<Record<string, string>>({});
 
   const isMessageOnly = outreachMode === "message_only";
 
@@ -178,6 +220,34 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
       }
     };
   }, [fetchDrafts, isPolling]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const syncSequenceConfig = () => {
+      const sequences = safeParseJson<SequenceDefinition[]>(
+        window.localStorage.getItem(SEQUENCES_STORAGE_KEY),
+        []
+      );
+      const assignments = safeParseJson<Record<string, string>>(
+        window.localStorage.getItem(BATCH_ASSIGNMENTS_STORAGE_KEY),
+        {}
+      );
+
+      setSequenceById(
+        Object.fromEntries(sequences.map((sequence) => [sequence.id, sequence]))
+      );
+      setAssignmentByBatch(assignments);
+    };
+
+    syncSequenceConfig();
+    window.addEventListener("storage", syncSequenceConfig);
+    window.addEventListener(UPDATE_EVENT, syncSequenceConfig);
+    return () => {
+      window.removeEventListener("storage", syncSequenceConfig);
+      window.removeEventListener(UPDATE_EVENT, syncSequenceConfig);
+    };
+  }, []);
 
   // Subscribe to real-time updates on leads/drafts table
   useEffect(() => {
@@ -502,14 +572,24 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
           </div>
         ) : (
           actionableDrafts.map((draft) => (
-            <DraftCard
-              key={draft.draftId || draft.leadId}
-              draft={draft}
-              outreachMode={outreachMode}
-              onAction={fetchDrafts}
-              onRegenerateStart={handleRegenerateStart}
-              onRegenerateError={handleRegenerateError}
-            />
+            (() => {
+              const batchKey = getBatchKey(draft.profile);
+              const assignedSequenceId = assignmentByBatch[batchKey];
+              const assignedSequenceName = assignedSequenceId ? sequenceById[assignedSequenceId]?.name : undefined;
+
+              return (
+                <DraftCard
+                  key={draft.draftId || draft.leadId}
+                  draft={draft}
+                  outreachMode={outreachMode}
+                  batchLabel={formatBatchLabel(batchKey)}
+                  sequenceLabel={assignedSequenceName}
+                  onAction={fetchDrafts}
+                  onRegenerateStart={handleRegenerateStart}
+                  onRegenerateError={handleRegenerateError}
+                />
+              );
+            })()
           ))
         )}
       </div>
@@ -526,6 +606,23 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
               <div key={draft.leadId} className="card" style={{ opacity: 0.7 }}>
                 <div className="pill status-pending">Pending Connection</div>
                 <h3 style={{ margin: "12px 0 4px 0" }}>{draft.name || "Unknown lead"}</h3>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                  {(() => {
+                    const batchKey = getBatchKey(draft.profile);
+                    const assignedSequenceId = assignmentByBatch[batchKey];
+                    const assignedSequenceName = assignedSequenceId ? sequenceById[assignedSequenceId]?.name : undefined;
+                    return (
+                      <>
+                        <span className="status-chip">Batch: {formatBatchLabel(batchKey)}</span>
+                        {assignedSequenceName ? (
+                          <span className="status-chip status-approved">Sequence: {assignedSequenceName}</span>
+                        ) : (
+                          <span className="status-chip status-pending">No sequence</span>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
                 <div className="muted" style={{ fontSize: 12 }}>{draft.headline}</div>
                 <div className="muted" style={{ marginTop: 8 }}>
                   {draft.company || draft.profile?.current_company || "Company N/A"}
@@ -545,12 +642,16 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
 function DraftCard({
   draft,
   outreachMode,
+  batchLabel,
+  sequenceLabel,
   onAction,
   onRegenerateStart,
   onRegenerateError,
 }: {
   draft: DraftWithLead;
   outreachMode: OutreachMode;
+  batchLabel: string;
+  sequenceLabel?: string;
   onAction?: () => void;
   onRegenerateStart?: (leadId: string, draft: DraftWithLead) => void;
   onRegenerateError?: (leadId: string) => void;
@@ -619,6 +720,14 @@ function DraftCard({
 
       <div className="muted" style={{ marginTop: 4, marginBottom: 12 }}>
         {draft.company || draft.profile?.current_company || "Company N/A"}
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+        <span className="status-chip">Batch: {batchLabel}</span>
+        {sequenceLabel ? (
+          <span className="status-chip status-approved">Sequence: {sequenceLabel}</span>
+        ) : (
+          <span className="status-chip status-pending">No sequence assigned</span>
+        )}
       </div>
 
       <label>Bio</label>
@@ -742,5 +851,4 @@ function DraftCard({
     </section>
   );
 }
-
 

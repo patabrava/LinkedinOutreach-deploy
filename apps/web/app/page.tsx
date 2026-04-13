@@ -1,6 +1,7 @@
 import { DraftFeed } from "../components/DraftFeed";
 import { LeadList } from "../components/LeadList";
-import { fetchDraftFeed, fetchLeadList } from "./actions";
+import { SequenceEditor } from "../components/SequenceEditor";
+import { fetchDraftFeed, fetchLeadList, fetchLeadBatches, fetchOutreachSequences } from "./actions";
 import type { OutreachMode } from "../lib/outreachModes";
 
 export const dynamic = "force-dynamic";
@@ -18,9 +19,11 @@ export default async function MissionControlPage({ searchParams }: PageProps) {
     ? ["CONNECT_ONLY_SENT"]
     : ["ENRICHED", "DRAFT_READY", "APPROVED"];
 
-  const [drafts, leadResult] = await Promise.all([
+  const [drafts, leadResult, sequences, batches] = await Promise.all([
     fetchDraftFeed(outreachMode),
     fetchLeadList(1, 50, { statuses: leadStatuses }),
+    fetchOutreachSequences(),
+    fetchLeadBatches(),
   ]);
 
   return (
@@ -44,6 +47,8 @@ export default async function MissionControlPage({ searchParams }: PageProps) {
           </div>
         </div>
       </div>
+
+      <SequenceEditor leads={leadResult.leads} sequences={sequences} batches={batches} />
 
       <LeadList
         leads={leadResult.leads}

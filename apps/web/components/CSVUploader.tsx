@@ -31,17 +31,26 @@ export function CSVUploader({ afterImport }: Props) {
       complete: async (results) => {
         try {
           const rows = (results.data || []).map((r) => ({
-            linkedin_url: r.linkedin_url || r["LinkedIn"] || r["linkedin"] || "",
+            linkedin_url:
+              r.linkedin_url ||
+              r["LinkedIn URL"] ||
+              r["Legacy LinkedIn URL"] ||
+              r["LinkedIn"] ||
+              r["linkedin_url"] ||
+              r["linkedin"] ||
+              "",
             first_name: r.first_name || r["firstName"] || r["First Name"],
             last_name: r.last_name || r["lastName"] || r["Last Name"],
             company_name:
               r.company_name ||
+              r["Current Company"] ||
+              r["Legacy Current Company"] ||
               r["Company"] ||
               r["company"] ||
               r["organization_name"] ||
               r["organization"],
           }));
-          const response = await importLeads(rows);
+          const response = await importLeads(rows, file.name);
           setStatus(`INSERTED ${response.inserted} LEADS`);
           if (afterImport) {
             afterImport();
@@ -71,9 +80,16 @@ export function CSVUploader({ afterImport }: Props) {
       className="csv-drop"
       onDragOver={(e) => e.preventDefault()}
       onDrop={onDrop}
-      onClick={() => inputRef.current?.click()}
     >
       {status}
+      <button
+        className="btn"
+        type="button"
+        onClick={() => inputRef.current?.click()}
+        style={{ marginTop: 12 }}
+      >
+        Choose CSV
+      </button>
       <input
         ref={inputRef}
         type="file"

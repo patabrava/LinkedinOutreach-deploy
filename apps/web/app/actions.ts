@@ -186,6 +186,11 @@ export type LeadListRow = {
   last_name: string | null;
   company_name: string | null;
   status: string | null;
+  batch_id?: number | null;
+  batch_name?: string | null;
+  sequence_id?: number | null;
+  sequence_name?: string | null;
+  sequence_step?: number | null;
   followup_count?: number | null;
   last_reply_at?: string | null;
   created_at?: string | null;
@@ -227,7 +232,7 @@ export async function fetchLeadList(
     let query = client
       .from("leads")
       .select(
-        "id, linkedin_url, first_name, last_name, company_name, status, followup_count, last_reply_at, created_at, updated_at, profile_data, recent_activity",
+        "id, linkedin_url, first_name, last_name, company_name, status, batch_id, sequence_id, sequence_step, followup_count, last_reply_at, created_at, updated_at, profile_data, recent_activity, batch:lead_batches(id, name), sequence:outreach_sequences(id, name)",
         { count: "exact" }
       )
       .order("created_at", { ascending: false });
@@ -270,6 +275,11 @@ export async function fetchLeadList(
       last_name: lead.last_name || null,
       company_name: lead.company_name || null,
       status: lead.status || "NEW",
+      batch_id: lead.batch_id ?? lead.batch?.id ?? null,
+      batch_name: lead.batch?.name || null,
+      sequence_id: lead.sequence_id ?? lead.sequence?.id ?? null,
+      sequence_name: lead.sequence?.name || null,
+      sequence_step: lead.sequence_step ?? 0,
       followup_count: lead.followup_count ?? 0,
       last_reply_at: lead.last_reply_at || null,
       created_at: lead.created_at,
@@ -287,6 +297,98 @@ export async function fetchLeadList(
     logger.actionError("fetchLeadList", { correlationId }, error, { page, pageSize, filters });
     return { leads: [], total: 0, page, pageSize, totalPages: 0 };
   }
+}
+
+export type OutreachSequenceRow = {
+  id: number;
+  name: string;
+  first_message: string;
+  second_message: string;
+  third_message: string;
+  followup_interval_days: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type LeadBatchRow = {
+  id: number;
+  name: string;
+  source: string;
+  sequence_id: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export async function fetchOutreachSequences(): Promise<OutreachSequenceRow[]> {
+  const client = supabaseAdmin();
+  const { data, error } = await client
+    .from("outreach_sequences")
+    .select("id, name, first_message, second_message, third_message, followup_interval_days, is_active, created_at, updated_at")
+    .order("created_at", { ascending: true });
+  if (error) {
+    throw error;
+  }
+  return (data || []) as OutreachSequenceRow[];
+}
+
+export async function fetchLeadBatches(): Promise<LeadBatchRow[]> {
+  const client = supabaseAdmin();
+  const { data, error } = await client
+    .from("lead_batches")
+    .select("id, name, source, sequence_id, created_at, updated_at")
+    .order("created_at", { ascending: true });
+  if (error) {
+    throw error;
+  }
+  return (data || []) as LeadBatchRow[];
+}
+
+export async function saveOutreachSequence(input: {
+  id?: number;
+  name: string;
+  first_message: string;
+  second_message: string;
+  third_message: string;
+  followup_interval_days: number;
+}) {
+  const client = supabaseAdmin();
+  const payload = {
+    name: input.name.trim(),
+    first_message: input.first_message.trim(),
+    second_message: input.second_message.trim(),
+    third_message: input.third_message.trim(),
+    followup_interval_days: input.followup_interval_days,
+  };
+  const { data, error } = await client
+    .from("outreach_sequences")
+    .upsert(input.id ? { id: input.id, ...payload } : payload)
+    .select("id, name, first_message, second_message, third_message, followup_interval_days, is_active, created_at, updated_at")
+    .single();
+  if (error) throw error;
+  revalidatePath("/");
+  revalidatePath("/leads");
+  return data as OutreachSequenceRow;
+}
+
+export async function assignBatchToSequence(batchId: number, sequenceId: number) {
+  const client = supabaseAdmin();
+  const { data, error } = await client
+    .from("lead_batches")
+    .update({ sequence_id: sequenceId })
+    .eq("id", batchId)
+    .select("id, name, source, sequence_id, created_at, updated_at")
+    .single();
+  if (error) throw error;
+
+  await client
+    .from("leads")
+    .update({ sequence_id: sequenceId })
+    .eq("batch_id", batchId);
+
+  revalidatePath("/");
+  revalidatePath("/leads");
+  return data as LeadBatchRow;
 }
 
 // Follow-ups data model
@@ -1096,7 +1198,7 @@ type LeadCsvRow = {
   company_name?: string;
 };
 
-export async function importLeads(rows: LeadCsvRow[]) {
+export async function importLeads(rows: LeadCsvRow[], fileName?: string) {
   if (!rows?.length) return { inserted: 0 };
   const sanitized = rows
     .map((row) => ({
@@ -1107,9 +1209,43 @@ export async function importLeads(rows: LeadCsvRow[]) {
       status: "NEW",
     }))
     .filter((row) => row.linkedin_url);
+  if (!sanitized.length) return { inserted: 0 };
 
   const client = supabaseAdmin();
-  const { error, count } = await client.from("leads").upsert(sanitized, {
+  const batchName = fileName?.trim() || `CSV batch ${new Date().toISOString()}`;
+  const { data: defaultSequence, error: defaultSequenceError } = await client
+    .from("outreach_sequences")
+    .select("id")
+    .eq("name", "Default Sequence")
+    .maybeSingle();
+
+  if (defaultSequenceError) {
+    console.error("importLeads default sequence error", defaultSequenceError);
+    throw defaultSequenceError;
+  }
+  if (!defaultSequence?.id) {
+    throw new Error("Default Sequence not found.");
+  }
+
+  const { data: batchData, error: batchError } = await client
+    .from("lead_batches")
+    .insert({ name: batchName, source: "csv_upload", sequence_id: defaultSequence.id })
+    .select("id")
+    .single();
+
+  if (batchError || !batchData) {
+    console.error("importLeads batch error", batchError);
+    throw batchError || new Error("Could not create lead batch.");
+  }
+
+  const batchId = batchData.id;
+  const batched = sanitized.map((row) => ({
+    ...row,
+    batch_id: batchId,
+    sequence_id: defaultSequence.id,
+  }));
+
+  const { error, count } = await client.from("leads").upsert(batched, {
     onConflict: "linkedin_url",
     ignoreDuplicates: true,
     count: "exact",
@@ -1118,9 +1254,17 @@ export async function importLeads(rows: LeadCsvRow[]) {
     console.error("importLeads error", error);
     throw error;
   }
-  revalidatePath("/");
-  revalidatePath("/leads");
-  return { inserted: count || sanitized.length };
+  await client.from("leads").update({ batch_id: batchId, sequence_id: defaultSequence.id }).in(
+    "linkedin_url",
+    sanitized.map((row) => row.linkedin_url)
+  );
+  try {
+    revalidatePath("/");
+    revalidatePath("/leads");
+  } catch (error) {
+    console.warn("importLeads revalidate skipped", error);
+  }
+  return { inserted: count || sanitized.length, batchId };
 }
 
 export async function fetchLinkedinCredentials(): Promise<LinkedinCredentialSummary> {

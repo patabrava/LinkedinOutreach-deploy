@@ -6,7 +6,7 @@ import asyncio
 import os
 import random
 import sys
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta, timezone
 import re
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -27,6 +27,12 @@ logger = get_logger("sender")
 # Reuse the scraper's persisted auth state to avoid drift between workers.
 AUTH_STATE_PATH = (Path(__file__).parent.parent / "scraper" / "auth.json").resolve()
 DAILY_SEND_DEFAULT = 100
+SEQUENCE_INTERVAL_DEFAULT_DAYS = 3
+SEQUENCE_DEFAULT_MESSAGES = {
+    "first_message": "Freut mich auf den Austausch.",
+    "second_message": "Kurzer Ping falls es untergegangen ist. Ist das Thema aktuell relevant fuer dich?",
+    "third_message": "Letzter kurzer Ping von mir. Wenn es gerade nicht passt ist das auch ok.",
+}
 
 
 def get_supabase_client() -> Client:
@@ -150,20 +156,41 @@ MESSAGE_ONLY_PIPELINE_STATUSES = [
 
 def fetch_message_only_leads(client: Client, limit: int) -> list[Dict[str, Any]]:
     """Fetch leads eligible for message-only sending (pending or approved)."""
+    select_fields_extended = (
+        "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
+        "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
+        "sequence_id, csv_batch_id, outreach_mode, profile_data, ai_tags"
+    )
+    select_fields_legacy = (
+        "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
+        "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
+        "outreach_mode, profile_data, ai_tags"
+    )
     logger.db_query(
         "select",
         "leads",
         {"status": MESSAGE_ONLY_PIPELINE_STATUSES, "outreach_mode": "connect_only", "limit": limit},
     )
-    resp = (
-        client.table("leads")
-        .select("id, linkedin_url, first_name, last_name, company_name, status")
-        .in_("status", MESSAGE_ONLY_PIPELINE_STATUSES)
-        .eq("outreach_mode", "connect_only")
-        .order("updated_at", desc=True)
-        .limit(limit)
-        .execute()
-    )
+    try:
+        resp = (
+            client.table("leads")
+            .select(select_fields_extended)
+            .in_("status", MESSAGE_ONLY_PIPELINE_STATUSES)
+            .eq("outreach_mode", "connect_only")
+            .order("updated_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+    except Exception:
+        resp = (
+            client.table("leads")
+            .select(select_fields_legacy)
+            .in_("status", MESSAGE_ONLY_PIPELINE_STATUSES)
+            .eq("outreach_mode", "connect_only")
+            .order("updated_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
     rows = resp.data or []
     logger.db_result("select", "leads", {"status": MESSAGE_ONLY_PIPELINE_STATUSES}, len(rows))
     if rows:
@@ -181,13 +208,32 @@ def fetch_next_lead(client: Client) -> Optional[Dict[str, Any]]:
 
 
 def fetch_lead_by_id(client: Client, lead_id: str) -> Optional[Dict[str, Any]]:
-    resp = (
-        client.table("leads")
-        .select("id, linkedin_url, first_name, last_name, company_name, status")
-        .eq("id", lead_id)
-        .limit(1)
-        .execute()
+    select_fields_extended = (
+        "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
+        "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
+        "sequence_id, csv_batch_id, outreach_mode, profile_data, ai_tags"
     )
+    select_fields_legacy = (
+        "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
+        "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
+        "outreach_mode, profile_data, ai_tags"
+    )
+    try:
+        resp = (
+            client.table("leads")
+            .select(select_fields_extended)
+            .eq("id", lead_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        resp = (
+            client.table("leads")
+            .select(select_fields_legacy)
+            .eq("id", lead_id)
+            .limit(1)
+            .execute()
+        )
     rows = resp.data or []
     return rows[0] if rows else None
 
@@ -252,6 +298,142 @@ def build_message(draft: Dict[str, Any]) -> str:
     if len(capped) != len(message):
         logger.warn("Assembled message exceeded limit and was capped", data={"original": len(message), "final": len(capped)})
     return capped
+
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _safe_int(value: Any, fallback: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return fallback
+
+
+def _render_template_message(template: str, lead: Dict[str, Any]) -> str:
+    first_name = (lead.get("first_name") or "").strip()
+    last_name = (lead.get("last_name") or "").strip()
+    company = (lead.get("company_name") or "").strip()
+    full_name = " ".join([p for p in [first_name, last_name] if p]).strip()
+    replacements = {
+        "{first_name}": first_name,
+        "{last_name}": last_name,
+        "{full_name}": full_name,
+        "{company_name}": company,
+        "[Name]": first_name or full_name,
+        "[name]": first_name or full_name,
+    }
+    rendered = (template or "").strip()
+    for key, val in replacements.items():
+        rendered = rendered.replace(key, val or "")
+    rendered = re.sub(r"\s{2,}", " ", rendered).strip()
+    return _hard_cap_text(rendered, 300)
+
+
+def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve sequence messages for a lead, preferring DB templates over defaults."""
+    result: Dict[str, Any] = {
+        "first_message": SEQUENCE_DEFAULT_MESSAGES["first_message"],
+        "second_message": SEQUENCE_DEFAULT_MESSAGES["second_message"],
+        "third_message": SEQUENCE_DEFAULT_MESSAGES["third_message"],
+        "followup_interval_days": SEQUENCE_INTERVAL_DEFAULT_DAYS,
+        "source": "defaults",
+    }
+
+    sequence_id = lead.get("sequence_id")
+    rows: list[Dict[str, Any]] = []
+    try:
+        query = client.table("outreach_sequences").select(
+            "id, first_message, second_message, third_message, followup_interval_days, is_active, created_at"
+        )
+        if sequence_id is not None:
+            query = query.eq("id", sequence_id)
+        else:
+            query = query.eq("is_active", True).order("created_at", desc=False).limit(1)
+        resp = query.execute()
+        rows = resp.data or []
+    except Exception:
+        rows = []
+
+    if rows:
+        row = rows[0]
+        result.update(
+            {
+                "first_message": row.get("first_message") or result["first_message"],
+                "second_message": row.get("second_message") or result["second_message"],
+                "third_message": row.get("third_message") or result["third_message"],
+                "followup_interval_days": _safe_int(
+                    row.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS
+                ),
+                "source": "outreach_sequences",
+            }
+        )
+    else:
+        for key in ["outreach_sequences", "outreach_sequence", "sequence_templates"]:
+            try:
+                settings_resp = (
+                    client.table("settings")
+                    .select("value")
+                    .eq("key", key)
+                    .limit(1)
+                    .execute()
+                )
+                payload = ((settings_resp.data or [{}])[0].get("value") or {})
+                template = None
+                if isinstance(payload, list) and payload:
+                    template = payload[0]
+                elif isinstance(payload, dict):
+                    if isinstance(payload.get("templates"), list) and payload.get("templates"):
+                        template = payload["templates"][0]
+                    else:
+                        template = payload
+                if isinstance(template, dict):
+                    result.update(
+                        {
+                            "first_message": template.get("first_message")
+                            or template.get("message_1")
+                            or result["first_message"],
+                            "second_message": template.get("second_message")
+                            or template.get("message_2")
+                            or result["second_message"],
+                            "third_message": template.get("third_message")
+                            or template.get("message_3")
+                            or result["third_message"],
+                            "followup_interval_days": _safe_int(
+                                template.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS
+                            ),
+                            "source": f"settings:{key}",
+                        }
+                    )
+                    break
+            except Exception:
+                continue
+
+    result["first_message"] = _render_template_message(str(result["first_message"]), lead)
+    result["second_message"] = _render_template_message(str(result["second_message"]), lead)
+    result["third_message"] = _render_template_message(str(result["third_message"]), lead)
+    if result["followup_interval_days"] < 1:
+        result["followup_interval_days"] = SEQUENCE_INTERVAL_DEFAULT_DAYS
+    return result
 
 async def open_message_surface(page: Page) -> str:
     """Open a messaging surface on a LinkedIn profile page.
@@ -783,31 +965,66 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
 
 
 # ------------------------- FOLLOW-UP FLOW -------------------------
-def fetch_approved_followups(client: Client, limit: int = 10) -> list[Dict[str, Any]]:
-    """Fetch a batch of APPROVED followups and mark them PROCESSING atomically."""
+def _followup_is_due(row: Dict[str, Any], now_utc: datetime) -> bool:
+    next_send_at = _parse_iso_datetime(row.get("next_send_at"))
+    if not next_send_at:
+        return True
+    return next_send_at <= now_utc
+
+
+def fetch_approved_followups(
+    client: Client,
+    limit: int = 10,
+    followup_type_filter: Optional[str] = None,
+) -> list[Dict[str, Any]]:
+    """Fetch APPROVED followups that are due and mark them PROCESSING."""
+    now_utc = _utc_now()
     logger.db_query("select", "followups", {"status": "APPROVED", "limit": limit})
     resp = (
         client.table("followups")
-        .select("*, lead:leads(id, linkedin_url, first_name, last_name)")
+        .select(
+            "id, lead_id, status, followup_type, attempt, draft_text, sent_text, next_send_at, "
+            "last_message_text, last_message_from, updated_at, "
+            "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at)"
+        )
         .eq("status", "APPROVED")
         .order("updated_at", desc=True)
-        .limit(limit)
+        .limit(max(limit * 5, limit))
         .execute()
     )
     rows = resp.data or []
     logger.db_result("select", "followups", {"status": "APPROVED"}, len(rows))
-    
-    # Mark each as PROCESSING immediately to prevent double-fetch
+
+    selected: list[Dict[str, Any]] = []
     for row in rows:
+        if followup_type_filter and (row.get("followup_type") or "").upper() != followup_type_filter.upper():
+            continue
+        if not _followup_is_due(row, now_utc):
+            continue
+
+        lead = row.get("lead") or {}
+        if (row.get("followup_type") or "").upper() == "NUDGE" and lead.get("last_reply_at"):
+            mark_followup_skipped(client, row["id"], "Lead replied before scheduled nudge.")
+            continue
+
+        selected.append(row)
+        if len(selected) >= limit:
+            break
+
+    # Mark selected rows as PROCESSING immediately to prevent double-fetch
+    for row in selected:
         client.table("followups").update({
             "status": "PROCESSING",
             "processing_started_at": datetime.utcnow().isoformat(),
         }).eq("id", row["id"]).execute()
         logger.debug(f"Followup marked as PROCESSING", {"followupId": row["id"]})
-    
-    if rows:
-        logger.info(f"Fetched {len(rows)} APPROVED followups")
-    return rows
+
+    if selected:
+        logger.info(
+            f"Fetched {len(selected)} APPROVED followups ready to send",
+            data={"followupTypeFilter": followup_type_filter},
+        )
+    return selected
 
 
 def fetch_next_followup(client: Client) -> Optional[Dict[str, Any]]:
@@ -856,6 +1073,19 @@ def mark_followup_sent(client: Client, followup_id: str, message: str) -> None:
     logger.info(f"Followup marked as SENT", {"followupId": followup_id})
 
 
+def mark_followup_skipped(client: Client, followup_id: str, reason: str) -> None:
+    logger.db_query("update", "followups", {"followupId": followup_id}, {"status": "SKIPPED"})
+    client.table("followups").update(
+        {
+            "status": "SKIPPED",
+            "last_error": reason[:500] if reason else None,
+            "processing_started_at": None,
+        }
+    ).eq("id", followup_id).execute()
+    logger.db_result("update", "followups", {"followupId": followup_id}, 1)
+    logger.info("Followup marked as SKIPPED", {"followupId": followup_id, "reason": reason})
+
+
 def mark_followup_failed(client: Client, followup_id: str, error_message: str, permanent: bool = False) -> None:
     """Mark followup as FAILED (permanent) or RETRY_LATER (transient)."""
     status = "FAILED" if permanent else "RETRY_LATER"
@@ -878,6 +1108,62 @@ def revert_followup_to_approved(client: Client, followup_id: str) -> None:
     }).eq("id", followup_id).execute()
     logger.db_result("update", "followups", {"followupId": followup_id}, 1)
     logger.info(f"Followup reverted to APPROVED for retry", {"followupId": followup_id})
+
+
+def schedule_nudge_followup(
+    client: Client,
+    lead: Dict[str, Any],
+    attempt: int,
+    sequence_messages: Dict[str, Any],
+    base_time: datetime,
+    previous_message: str,
+) -> None:
+    """Create an APPROVED nudge followup if one for this attempt does not exist."""
+    lead_id = lead["id"]
+    attempt = int(attempt)
+    if attempt < 1 or attempt > 2:
+        return
+
+    message_key = "second_message" if attempt == 1 else "third_message"
+    draft_text = (sequence_messages.get(message_key) or "").strip()
+    if not draft_text:
+        logger.warn("Skipping nudge scheduling due to empty sequence message", {"leadId": lead_id, "attempt": attempt})
+        return
+
+    existing = (
+        client.table("followups")
+        .select("id, status")
+        .eq("lead_id", lead_id)
+        .eq("followup_type", "NUDGE")
+        .eq("attempt", attempt)
+        .limit(1)
+        .execute()
+    ).data or []
+    if existing:
+        logger.debug("Nudge followup already exists", {"leadId": lead_id, "attempt": attempt, "followupId": existing[0]["id"]})
+        return
+
+    interval_days = _safe_int(sequence_messages.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS)
+    if interval_days < 1:
+        interval_days = SEQUENCE_INTERVAL_DEFAULT_DAYS
+    next_send_at = (base_time + timedelta(days=interval_days)).isoformat()
+
+    payload = {
+        "lead_id": lead_id,
+        "status": "APPROVED",
+        "followup_type": "NUDGE",
+        "attempt": attempt,
+        "draft_text": draft_text,
+        "next_send_at": next_send_at,
+        "last_message_text": _hard_cap_text(previous_message or "", 2000),
+        "last_message_from": "us",
+    }
+    client.table("followups").insert(payload).execute()
+    logger.info(
+        "Scheduled nudge followup",
+        {"leadId": lead_id},
+        {"attempt": attempt, "next_send_at": next_send_at, "source": sequence_messages.get("source")},
+    )
 
 
 async def process_followup_one(context: BrowserContext, client: Client, followup: Dict[str, Any]) -> str:

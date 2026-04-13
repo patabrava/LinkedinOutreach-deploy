@@ -28,6 +28,16 @@ type Props = {
 
 type SortKey = "name" | "company" | "status" | "followupCount" | "createdAt" | "updatedAt";
 
+type SequenceDefinition = {
+  id: string;
+  name: string;
+};
+
+const SEQUENCES_STORAGE_KEY = "outreach_sequences_v1";
+const BATCH_ASSIGNMENTS_STORAGE_KEY = "csv_batch_sequence_assignments_v1";
+const UPDATE_EVENT = "outreach-sequences-updated";
+const UNASSIGNED_BATCH = "unassigned";
+
 const statusClasses: Record<string, string> = {
   NEW: "status-new",
   ENRICHED: "status-enriched",
@@ -70,6 +80,29 @@ const formatDate = (iso?: string | null) => {
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 };
 
+const safeParseJson = <T,>(value: string | null, fallback: T): T => {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+};
+
+const getBatchKey = (lead: LeadListRow): string => {
+  const raw = lead.batch_name || lead.batch_id || lead.profile_data?.csv_batch_name || lead.profile_data?.csv_filename;
+
+  if ((typeof raw !== "string" && typeof raw !== "number") || `${raw}`.trim() === "") {
+    return UNASSIGNED_BATCH;
+  }
+  return `${raw}`.trim();
+};
+
+const formatBatchLabel = (batchKey: string): string => {
+  if (batchKey === UNASSIGNED_BATCH) return "Unassigned";
+  return batchKey;
+};
+
 export function LeadList({
   leads,
   total,
@@ -89,6 +122,8 @@ export function LeadList({
     linkedin: initialFilters?.linkedin || "",
   });
   const [sort, setSort] = useState<{ key: SortKey; direction: "asc" | "desc" } | null>(null);
+  const [sequenceById, setSequenceById] = useState<Record<string, SequenceDefinition>>({});
+  const [assignmentByBatch, setAssignmentByBatch] = useState<Record<string, string>>({});
 
   useEffect(() => {
     setFilters((prev) => {
@@ -124,6 +159,7 @@ export function LeadList({
       company,
       headline: headline || null,
       linkedinUrl: lead.linkedin_url || "",
+      batchKey: getBatchKey(lead),
       status: statusKey,
       statusClass: statusClasses[statusKey] || "status-new",
       followupCount: typeof lead.followup_count === "number" ? lead.followup_count : 0,
@@ -216,6 +252,31 @@ export function LeadList({
     const mapped = Array.isArray(leads) ? leads.map(mapLeadToRow) : [];
     setRows(mapped.filter(matchesFilters));
   }, [leads, filters.status, filters.company, filters.linkedin, filters.name]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const syncSequenceConfig = () => {
+      const sequences = safeParseJson<SequenceDefinition[]>(
+        window.localStorage.getItem(SEQUENCES_STORAGE_KEY),
+        []
+      );
+      const assignments = safeParseJson<Record<string, string>>(
+        window.localStorage.getItem(BATCH_ASSIGNMENTS_STORAGE_KEY),
+        {}
+      );
+      setSequenceById(Object.fromEntries(sequences.map((sequence) => [sequence.id, sequence])));
+      setAssignmentByBatch(assignments);
+    };
+
+    syncSequenceConfig();
+    window.addEventListener("storage", syncSequenceConfig);
+    window.addEventListener(UPDATE_EVENT, syncSequenceConfig);
+    return () => {
+      window.removeEventListener("storage", syncSequenceConfig);
+      window.removeEventListener(UPDATE_EVENT, syncSequenceConfig);
+    };
+  }, []);
 
   // Subscribe to realtime lead updates so status bar and enrichment details stay fresh
   useEffect(() => {
@@ -362,6 +423,16 @@ export function LeadList({
                           {row.recentActivity[0].text.length > 140 ? "…" : ""}
                         </span>
                       ) : null}
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 2 }}>
+                        <span className="status-chip">Batch: {formatBatchLabel(row.batchKey)}</span>
+                        {assignmentByBatch[row.batchKey] && sequenceById[assignmentByBatch[row.batchKey]]?.name ? (
+                          <span className="status-chip status-approved">
+                            Sequence: {sequenceById[assignmentByBatch[row.batchKey]]?.name}
+                          </span>
+                        ) : (
+                          <span className="status-chip status-pending">No sequence</span>
+                        )}
+                      </div>
                     </div>
                   </td>
                   <td>{row.company}</td>
