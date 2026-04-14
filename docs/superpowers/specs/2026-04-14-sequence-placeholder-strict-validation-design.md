@@ -34,7 +34,7 @@ Planned touchpoints:
 
 1. `apps/web/components/SequenceEditor.tsx`
 2. `apps/web/app/actions.ts`
-3. `apps/web/lib/<new placeholder validator utility>.ts`
+3. `apps/web/lib/sequencePlaceholders.ts`
 4. `workers/sender/sender.py` (compatibility aliases only)
 5. Optional tests file(s) co-located with web utility/actions
 
