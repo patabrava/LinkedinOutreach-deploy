@@ -34,6 +34,32 @@ type SequenceDefinition = {
   name: string;
 };
 
+type LeadDisplayRow = {
+  id: string;
+  name: string;
+  company: string;
+  headline: string | null;
+  linkedinUrl: string;
+  batchKey: string;
+  batchId: number | null;
+  batchName: string | null;
+  sequenceId: number | null;
+  sequenceName: string | null;
+  batchSequenceId: number | null;
+  status: string;
+  statusLabel: string;
+  statusClass: string;
+  followupCount: number;
+  lastReplyAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  recentActivity: any[];
+  connectionSentAt: string | null;
+  connectionAcceptedAt: string | null;
+  sentAt: string | null;
+  sequenceStep: number;
+};
+
 const SEQUENCES_STORAGE_KEY = "outreach_sequences_v1";
 const BATCH_ASSIGNMENTS_STORAGE_KEY = "csv_batch_sequence_assignments_v1";
 const UPDATE_EVENT = "outreach-sequences-updated";
@@ -89,6 +115,25 @@ const formatStatus = (status?: string | null) => {
   return STATUS_LABELS[key] || key.replace(/_/g, " ");
 };
 
+const formatLifecycleStatus = (lead: LeadListRow) => {
+  if (lead.sent_at) {
+    if ((lead.sequence_step ?? 0) <= 1) {
+      return "First message sent";
+    }
+    return "Message sent";
+  }
+
+  if (lead.connection_accepted_at) {
+    return "Accepted";
+  }
+
+  if (lead.connection_sent_at) {
+    return "Invite sent";
+  }
+
+  return formatStatus(lead.status);
+};
+
 const formatDate = (iso?: string | null) => {
   if (!iso) return "—";
   const date = new Date(iso);
@@ -130,6 +175,38 @@ const getBatchKey = (lead: LeadListRow): string => {
 const formatBatchLabel = (batchKey: string): string => {
   if (batchKey === UNASSIGNED_BATCH) return "Unassigned";
   return batchKey;
+};
+
+const getSequenceLabel = (
+  row: LeadDisplayRow,
+  sequenceById: Record<string, SequenceDefinition>,
+  assignmentByBatch: Record<string, string>,
+  batchKey: string
+) => {
+  if (row.sequenceName?.trim()) {
+    return row.sequenceName.trim();
+  }
+
+  if (typeof row.sequenceId === "number") {
+    const serverSequence = sequenceById[String(row.sequenceId)]?.name;
+    if (serverSequence) {
+      return serverSequence;
+    }
+  }
+
+  if (typeof row.batchSequenceId === "number") {
+    const batchSequence = sequenceById[String(row.batchSequenceId)]?.name;
+    if (batchSequence) {
+      return batchSequence;
+    }
+  }
+
+  const localSequenceId = assignmentByBatch[batchKey];
+  if (localSequenceId && sequenceById[localSequenceId]?.name) {
+    return sequenceById[localSequenceId].name;
+  }
+
+  return null;
 };
 
 const inferBatchIntent = (label: string): "connect_only" | "connect_message" | null => {
@@ -182,8 +259,9 @@ export function LeadList({
     });
   }, [initialFilters?.status, initialFilters?.company, initialFilters?.name, initialFilters?.linkedin]);
 
-  const mapLeadToRow = (lead: LeadListRow) => {
+  const mapLeadToRow = (lead: LeadListRow): LeadDisplayRow => {
     const statusKey = (lead.status || "NEW").toUpperCase();
+    const lifecycleStatus = formatLifecycleStatus(lead);
     const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim() || "Name pending";
     const company = lead.company_name || lead.profile_data?.current_company || "Company pending";
     const headline =
@@ -200,13 +278,23 @@ export function LeadList({
       headline: headline || null,
       linkedinUrl: lead.linkedin_url || "",
       batchKey: getBatchKey(lead),
+      batchId: lead.batch_id ?? null,
+      batchName: lead.batch_name ?? null,
+      sequenceId: lead.sequence_id ?? null,
+      sequenceName: lead.sequence_name ?? null,
+      batchSequenceId: lead.batch_sequence_id ?? null,
       status: statusKey,
+      statusLabel: lifecycleStatus,
       statusClass: statusClasses[statusKey] || "status-new",
       followupCount: typeof lead.followup_count === "number" ? lead.followup_count : 0,
       lastReplyAt: lead.last_reply_at || null,
-      createdAt: lead.created_at,
-      updatedAt: lead.updated_at,
+      createdAt: lead.created_at || null,
+      updatedAt: lead.updated_at || null,
       recentActivity,
+      connectionSentAt: lead.connection_sent_at || null,
+      connectionAcceptedAt: lead.connection_accepted_at || null,
+      sentAt: lead.sent_at || null,
+      sequenceStep: lead.sequence_step ?? 0,
     };
   };
 
@@ -403,21 +491,21 @@ export function LeadList({
   }, [filteredRows]);
 
   const statusSummary = useMemo(() => {
-    const summarize = (keys: string[]) => keys.reduce((acc, key) => acc + (statusCounts[key] || 0), 0);
-    const invitesSent = summarize(["CONNECT_SENT", "CONNECT_ONLY_SENT"]);
-    const draftsReady = summarize(["DRAFT_READY", "MESSAGE_ONLY_READY"]);
-    const approved = summarize(["APPROVED", "MESSAGE_ONLY_APPROVED"]);
+    const invitesSent = allRows.filter((row) => row.connectionSentAt).length;
+    const accepted = allRows.filter((row) => row.connectionAcceptedAt).length;
+    const draftsReady = (statusCounts.DRAFT_READY || 0) + (statusCounts.MESSAGE_ONLY_READY || 0);
+    const approved = statusCounts.APPROVED || statusCounts.MESSAGE_ONLY_APPROVED || 0;
     return {
       newCount: statusCounts.NEW || 0,
       enriched: statusCounts.ENRICHED || 0,
       invitesSent,
-      accepted: statusCounts.CONNECTED || 0,
+      accepted,
       draftsReady,
       approved,
-      sent: statusCounts.SENT || 0,
+      sent: allRows.filter((row) => row.sentAt).length,
       failed: statusCounts.FAILED || 0,
     };
-  }, [statusCounts]);
+  }, [allRows, statusCounts]);
 
   const nextStepHint = useMemo(() => {
     if (!filters.batch) return "Pick a batch to see the most relevant next step.";
@@ -553,9 +641,9 @@ export function LeadList({
                       ) : null}
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 2 }}>
                         <span className="status-chip">Batch: {formatBatchLabel(row.batchKey)}</span>
-                        {assignmentByBatch[row.batchKey] && sequenceById[assignmentByBatch[row.batchKey]]?.name ? (
+                        {getSequenceLabel(row, sequenceById, assignmentByBatch, row.batchKey) ? (
                           <span className="status-chip status-approved">
-                            Sequence: {sequenceById[assignmentByBatch[row.batchKey]]?.name}
+                            Sequence: {getSequenceLabel(row, sequenceById, assignmentByBatch, row.batchKey)}
                           </span>
                         ) : (
                           <span className="status-chip status-pending">No sequence</span>
@@ -565,8 +653,12 @@ export function LeadList({
                   </td>
                   <td>{row.company}</td>
                   <td>
-                    <span className={`status-chip ${row.statusClass}`}>
-                      {formatStatus(row.status)}
+                    <span
+                      className={`status-chip ${row.statusClass}`}
+                      title={row.statusLabel}
+                      style={{ minWidth: 132, justifyContent: "center", whiteSpace: "nowrap" }}
+                    >
+                      {row.statusLabel || formatStatus(row.status)}
                     </span>
                   </td>
                   <td>

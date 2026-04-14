@@ -25,6 +25,11 @@ export type DraftWithLead = {
   regenerating?: boolean;
   status?: string;
   sentAt?: string | null;
+  sequenceId?: number | null;
+  sequenceName?: string | null;
+  batchId?: number | null;
+  batchSequenceId?: number | null;
+  batchName?: string | null;
 };
 
 type Props = {
@@ -93,6 +98,28 @@ function getBatchKey(profile?: Record<string, any>): string {
 function formatBatchLabel(batchKey: string): string {
   if (batchKey === UNASSIGNED_BATCH) return "Unassigned";
   return batchKey;
+}
+
+function getSequenceLabel(
+  draft: DraftWithLead,
+  sequenceById: Record<string, SequenceDefinition>,
+  assignmentByBatch: Record<string, string>
+) {
+  if (draft.sequenceName?.trim()) return draft.sequenceName.trim();
+  if (typeof draft.sequenceId === "number") {
+    const fromServer = sequenceById[String(draft.sequenceId)]?.name;
+    if (fromServer) return fromServer;
+  }
+  if (typeof draft.batchSequenceId === "number") {
+    const batchAssigned = sequenceById[String(draft.batchSequenceId)]?.name;
+    if (batchAssigned) return batchAssigned;
+  }
+  const batchKey = getBatchKey(draft.profile);
+  const localSequenceId = assignmentByBatch[batchKey];
+  if (localSequenceId && sequenceById[localSequenceId]?.name) {
+    return sequenceById[localSequenceId].name;
+  }
+  return null;
 }
 
 export function DraftFeed({ drafts, initialOutreachMode = "connect_message", variant = "full" }: Props) {
@@ -522,8 +549,7 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message", var
           actionableDrafts.map((draft) => (
             (() => {
               const batchKey = getBatchKey(draft.profile);
-              const assignedSequenceId = assignmentByBatch[batchKey];
-              const assignedSequenceName = assignedSequenceId ? sequenceById[assignedSequenceId]?.name : undefined;
+              const assignedSequenceName = getSequenceLabel(draft, sequenceById, assignmentByBatch);
 
               return (
                 <DraftCard
@@ -557,8 +583,7 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message", var
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
                   {(() => {
                     const batchKey = getBatchKey(draft.profile);
-                    const assignedSequenceId = assignmentByBatch[batchKey];
-                    const assignedSequenceName = assignedSequenceId ? sequenceById[assignedSequenceId]?.name : undefined;
+                    const assignedSequenceName = getSequenceLabel(draft, sequenceById, assignmentByBatch);
                     return (
                       <>
                         <span className="status-chip">Batch: {formatBatchLabel(batchKey)}</span>
@@ -599,7 +624,7 @@ function DraftCard({
   draft: DraftWithLead;
   outreachMode: OutreachMode;
   batchLabel: string;
-  sequenceLabel?: string;
+  sequenceLabel?: string | null;
   onAction?: () => void;
   onRegenerateStart?: (leadId: string, draft: DraftWithLead) => void;
   onRegenerateError?: (leadId: string) => void;

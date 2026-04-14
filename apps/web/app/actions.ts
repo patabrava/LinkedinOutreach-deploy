@@ -51,12 +51,12 @@ function startDraftAgent(
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-  const args = [
+    const args = [
       agentPath,
       "--prompt-type",
       String(promptType),
       "--mode",
-      outreachMode === "connect_only" ? "connect_only" : "message",
+      outreachMode === "connect_only" ? "connect_only" : "connect_message",
     ];
 
     logger.workerSpawn(
@@ -77,6 +77,40 @@ function startDraftAgent(
   }
 }
 
+async function assertConnectOnlyLaunchReadiness(correlationId: string) {
+  const client = supabaseAdmin();
+  const { data, error } = await client
+    .from("leads")
+    .select("id, batch_id, sequence_id, sequence:outreach_sequences(id, first_message), batch:lead_batches(id, name, sequence_id)")
+    .eq("outreach_mode", OUTREACH_MODE_TO_DB.connect_only)
+    // Gate only pre-launch leads; historical/post-launch states must not block new starts.
+    .in("status", ["NEW", "ENRICHED", "PROCESSING", "ENRICH_FAILED"])
+    .limit(5000);
+
+  if (error) {
+    logger.error("connect-only launch gate query failed", { correlationId }, error);
+    throw new Error("Unable to validate connect-only launch readiness.");
+  }
+
+  const leads = data || [];
+  const invalid = leads.find((lead: any) => {
+    const sequence = Array.isArray(lead.sequence) ? lead.sequence[0] : lead.sequence;
+    const batch = Array.isArray(lead.batch) ? lead.batch[0] : lead.batch;
+    const firstMessage = (sequence?.first_message || "").trim();
+    return !lead.batch_id || !lead.sequence_id || !batch?.sequence_id || !firstMessage;
+  });
+
+  if (!invalid) {
+    return;
+  }
+
+  const batch = Array.isArray((invalid as any).batch) ? (invalid as any).batch[0] : (invalid as any).batch;
+  const batchLabel = batch?.name ? `batch \"${batch.name}\"` : "one or more batches";
+  throw new Error(
+    `Connect-only launch blocked: ${batchLabel} is not ready. Assign a sequence and ensure Message 1 (first_message) is not empty before starting automation.`
+  );
+}
+
 export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_message") {
   const correlationId = logger.actionStart("fetchDraftFeed", {}, { outreachMode });
 
@@ -95,7 +129,7 @@ export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_messa
 
     let query = client
       .from("leads")
-      .select("id, linkedin_url, first_name, last_name, company_name, status, sent_at, profile_data, recent_activity, drafts(*)")
+      .select("id, linkedin_url, first_name, last_name, company_name, status, sent_at, sequence_id, batch_id, batch:lead_batches(id, name, sequence_id), sequence:outreach_sequences(id, name), profile_data, recent_activity, drafts(*)")
       .in("status", statusList)
       .order("updated_at", { ascending: false })
       .limit(50)
@@ -113,6 +147,8 @@ export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_messa
 
     const result = (data || []).flatMap((lead) => {
       const drafts = lead.drafts || [];
+      const batch = Array.isArray(lead.batch) ? lead.batch[0] : lead.batch;
+      const sequence = Array.isArray(lead.sequence) ? lead.sequence[0] : lead.sequence;
       logger.debug("Processing lead", { correlationId, leadId: lead.id }, {
         status: lead.status,
         draftCount: drafts.length,
@@ -136,6 +172,11 @@ export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_messa
           linkedinUrl: lead.linkedin_url,
           status: lead.status || "DRAFT_READY",
           sentAt: lead.sent_at || null,
+          sequenceId: lead.sequence_id ?? sequence?.id ?? null,
+          sequenceName: sequence?.name || null,
+          batchId: lead.batch_id ?? batch?.id ?? null,
+          batchSequenceId: batch?.sequence_id ?? null,
+          batchName: batch?.name || null,
         }));
       }
 
@@ -157,6 +198,11 @@ export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_messa
           linkedinUrl: lead.linkedin_url,
           status: lead.status || "CONNECT_ONLY_SENT",
           sentAt: lead.sent_at || null,
+          sequenceId: lead.sequence_id ?? sequence?.id ?? null,
+          sequenceName: sequence?.name || null,
+          batchId: lead.batch_id ?? batch?.id ?? null,
+          batchSequenceId: batch?.sequence_id ?? null,
+          batchName: batch?.name || null,
         }];
       }
 
@@ -188,9 +234,13 @@ export type LeadListRow = {
   status: string | null;
   batch_id?: number | null;
   batch_name?: string | null;
+  batch_sequence_id?: number | null;
   sequence_id?: number | null;
   sequence_name?: string | null;
   sequence_step?: number | null;
+  sent_at?: string | null;
+  connection_sent_at?: string | null;
+  connection_accepted_at?: string | null;
   followup_count?: number | null;
   last_reply_at?: string | null;
   created_at?: string | null;
@@ -232,7 +282,7 @@ export async function fetchLeadList(
     let query = client
       .from("leads")
       .select(
-        "id, linkedin_url, first_name, last_name, company_name, status, batch_id, sequence_id, sequence_step, followup_count, last_reply_at, created_at, updated_at, profile_data, recent_activity, batch:lead_batches(id, name), sequence:outreach_sequences(id, name)",
+        "id, linkedin_url, first_name, last_name, company_name, status, batch_id, sequence_id, sequence_step, sent_at, connection_sent_at, connection_accepted_at, followup_count, last_reply_at, created_at, updated_at, profile_data, recent_activity, batch:lead_batches(id, name, sequence_id), sequence:outreach_sequences(id, name)",
         { count: "exact" }
       )
       .order("created_at", { ascending: false });
@@ -281,9 +331,13 @@ export async function fetchLeadList(
         status: lead.status || "NEW",
         batch_id: lead.batch_id ?? batch?.id ?? null,
         batch_name: batch?.name || null,
+        batch_sequence_id: batch?.sequence_id ?? null,
         sequence_id: lead.sequence_id ?? sequence?.id ?? null,
         sequence_name: sequence?.name || null,
         sequence_step: lead.sequence_step ?? 0,
+        sent_at: lead.sent_at || null,
+        connection_sent_at: lead.connection_sent_at || null,
+        connection_accepted_at: lead.connection_accepted_at || null,
         followup_count: lead.followup_count ?? 0,
         last_reply_at: lead.last_reply_at || null,
         created_at: lead.created_at,
@@ -771,7 +825,12 @@ export async function triggerInboxScan() {
  *   3 = Process Optimization
  */
 export async function triggerDraftGeneration(promptType: PromptType = 1, outreachMode: OutreachMode = "connect_message") {
+  const correlationId = logger.actionStart("triggerDraftGeneration", {}, { promptType, outreachMode });
+  if (outreachMode === "connect_only") {
+    await assertConnectOnlyLaunchReadiness(correlationId);
+  }
   startDraftAgent(undefined, promptType, outreachMode);
+  logger.actionComplete("triggerDraftGeneration", { correlationId }, { promptType, outreachMode });
 }
 
 /**
@@ -902,7 +961,7 @@ export async function sendAllApproved(outreachMode: OutreachMode = "connect_mess
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
 
-    // For connect_only mode, pass --message-only flag to sender
+    // connect_message uses the standard outreach path; connect_only remains the post-acceptance path.
     const args = outreachMode === "connect_only"
       ? [senderPath, "--message-only"]
       : [senderPath];
@@ -986,7 +1045,7 @@ export async function approveDraft(input: DraftInput) {
 
     logger.dbResult("update", "leads", { correlationId, leadId: input.leadId });
 
-    // Fire-and-forget: trigger the sender worker for connect+message approvals only.
+    // Fire-and-forget: trigger the sender worker for connect_message approvals only.
     if (mode === "connect_message") {
       try {
         const repoRoot = path.resolve(process.cwd(), "..", "..");
@@ -1013,7 +1072,7 @@ export async function approveDraft(input: DraftInput) {
         logger.error("Failed to trigger sender worker", { correlationId, leadId: input.leadId }, err);
       }
     } else {
-      logger.info("Message-only draft approved; awaiting message-only sender run", { correlationId, leadId: input.leadId });
+      logger.info("Connect-only draft approved; awaiting connect-only sender run", { correlationId, leadId: input.leadId });
     }
 
     revalidatePath("/");
@@ -1224,21 +1283,43 @@ export async function importLeads(
   if (!sanitized.length) return { inserted: 0 };
 
   const client = supabaseAdmin();
-  const batchName = `${fileName?.trim() || "CSV batch"} (${
+  const batchName = `${fileName?.trim() || "CSV batch"} (${ 
     normalizedMode === "connect_only" ? "Connect Only" : "Connect + Message"
   })`;
-  const { data: defaultSequence, error: defaultSequenceError } = await client
-    .from("outreach_sequences")
-    .select("id")
-    .eq("name", "Default Sequence")
-    .maybeSingle();
+  let sequenceId: number | null = null;
 
-  if (defaultSequenceError) {
-    console.error("importLeads default sequence error", defaultSequenceError);
-    throw defaultSequenceError;
-  }
-  if (!defaultSequence?.id) {
-    throw new Error("Default Sequence not found.");
+  if (normalizedMode === "connect_only") {
+    const { data: seededSequence, error: seededSequenceError } = await client
+      .from("outreach_sequences")
+      .select("id")
+      .eq("is_active", true)
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (seededSequenceError) {
+      console.error("importLeads connect-only sequence seed error", seededSequenceError);
+      throw seededSequenceError;
+    }
+    if (!seededSequence?.id) {
+      throw new Error("No active outreach sequence found for connect-only batch seeding.");
+    }
+    sequenceId = seededSequence.id;
+  } else {
+    const { data: defaultSequence, error: defaultSequenceError } = await client
+      .from("outreach_sequences")
+      .select("id")
+      .eq("name", "Default Sequence")
+      .maybeSingle();
+
+    if (defaultSequenceError) {
+      console.error("importLeads default sequence error", defaultSequenceError);
+      throw defaultSequenceError;
+    }
+    if (!defaultSequence?.id) {
+      throw new Error("Default Sequence not found.");
+    }
+    sequenceId = defaultSequence.id;
   }
 
   const { data: batchData, error: batchError } = await client
@@ -1248,7 +1329,7 @@ export async function importLeads(
       source: "csv_upload",
       // Repo rule: imported leads inherit `batch_id` and `sequence_id` together.
       // Even connect-only batches carry a sequence_id so the lead record is consistent.
-      sequence_id: defaultSequence.id,
+      sequence_id: sequenceId,
     })
     .select("id")
     .single();
@@ -1262,7 +1343,7 @@ export async function importLeads(
   const batched = sanitized.map((row) => ({
     ...row,
     batch_id: batchId,
-    sequence_id: defaultSequence.id,
+    sequence_id: sequenceId,
     outreach_mode: dbOutreachMode,
   }));
 
@@ -1277,7 +1358,7 @@ export async function importLeads(
   }
   await client.from("leads").update({
     batch_id: batchId,
-    sequence_id: defaultSequence.id,
+    sequence_id: sequenceId,
     outreach_mode: dbOutreachMode,
   }).in(
     "linkedin_url",
