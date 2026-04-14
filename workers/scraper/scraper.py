@@ -74,6 +74,23 @@ def now_iso_utc() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+async def capture_connect_failure_screenshot(page: Page, reason: str, lead_id: Optional[str] = None) -> Optional[str]:
+    """Best-effort screenshot capture for connect-only failures."""
+    try:
+        out_dir = Path(__file__).parent / "output" / "connect_failures"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_reason = re.sub(r"[^a-zA-Z0-9_-]+", "_", reason).strip("_") or "unknown"
+        safe_lead = re.sub(r"[^a-zA-Z0-9_-]+", "_", lead_id or "unknown").strip("_")
+        path = out_dir / f"{ts}_{safe_lead}_{safe_reason}.png"
+        await page.screenshot(path=str(path), full_page=True)
+        logger.info("Captured connect-only failure screenshot", data={"reason": reason, "path": str(path)})
+        return str(path)
+    except Exception as exc:
+        logger.warn("Failed to capture connect-only failure screenshot", error=exc, data={"reason": reason})
+        return None
+
+
 def execute_with_retry(query, desc: str, attempts: int = 3, delay: float = 1.0):
     """Execute a Supabase query with basic retry/backoff for transient network errors."""
     last_exc = None
@@ -119,18 +136,52 @@ def fetch_new_leads(client: Client, limit: int = 10, outreach_mode: Optional[str
 
     logger.db_query("select", "leads", query_meta)
 
-    query = (
-        client.table("leads")
-        .select("id, linkedin_url, first_name, last_name, company_name")
-        .eq("status", "NEW")
-        .limit(limit)
-    )
+    # In connect_only mode, retry previously enriched-but-unsent leads first.
+    # This keeps invite throughput high while preserving the existing send flow.
+    if outreach_mode == "connect_only":
+        query_meta["status"] = "ENRICHED+NEW (unsent)"
 
-    if outreach_mode:
-        query = query.eq("outreach_mode", outreach_mode)
+        enriched_resp = (
+            client.table("leads")
+            .select("id, linkedin_url, first_name, last_name, company_name")
+            .eq("outreach_mode", "connect_only")
+            .eq("status", "ENRICHED")
+            .is_("connection_sent_at", "null")
+            .limit(limit)
+            .execute()
+        )
 
-    resp = query.execute()
-    leads: List[Lead] = [Lead(**row) for row in resp.data or []]
+        enriched_rows = enriched_resp.data or []
+        remaining = max(0, limit - len(enriched_rows))
+        new_rows: List[Dict[str, Any]] = []
+
+        if remaining > 0:
+            new_resp = (
+                client.table("leads")
+                .select("id, linkedin_url, first_name, last_name, company_name")
+                .eq("outreach_mode", "connect_only")
+                .eq("status", "NEW")
+                .is_("connection_sent_at", "null")
+                .limit(remaining)
+                .execute()
+            )
+            new_rows = new_resp.data or []
+
+        leads = [Lead(**row) for row in [*enriched_rows, *new_rows]]
+    else:
+        query = (
+            client.table("leads")
+            .select("id, linkedin_url, first_name, last_name, company_name")
+            .eq("status", "NEW")
+            .limit(limit)
+        )
+
+        if outreach_mode:
+            query = query.eq("outreach_mode", outreach_mode)
+
+        resp = query.execute()
+        leads = [Lead(**row) for row in resp.data or []]
+
     logger.db_result("select", "leads", query_meta, len(leads))
     logger.info(
         f"Fetched {len(leads)} NEW leads",
@@ -594,12 +645,36 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
             await random_pause()
             logger.dialog_detected("connection_invite", context={"path": 1})
             logger.path_attempt("Invite link", 1, success=True)
-            return await _click_send_without_note(page, normalized)
+            return await _click_send_without_note(page, normalized, lead.id)
         except Exception as e:
             logger.element_click("Invite link", success=False)
             logger.path_attempt("Invite link", 1, success=False)
     
     # PATH 2: Direct Vernetzen / Als Kontakt button on profile card
+    direct_connect_anchor_selectors = [
+        "a[aria-label*='Vernetzen']",
+        "a[aria-label*='Einladen']",
+        "a[href*='/preload/custom-invite/']",
+    ]
+    for css in direct_connect_anchor_selectors:
+        direct_connect_anchor = profile_container.locator(css)
+        direct_connect_anchor_count = await direct_connect_anchor.count()
+        logger.element_search(f"Connect anchor: {css}", direct_connect_anchor_count, role="link", context={"path": 2})
+
+        if direct_connect_anchor_count > 0:
+            try:
+                logger.debug("connect-only: matched connect anchor", data={"selector": css})
+                await direct_connect_anchor.first.click(timeout=8_000)
+                logger.element_click(f"Connect anchor: {css}", success=True)
+                await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
+                await random_pause()
+                logger.dialog_detected("connection_direct_anchor", context={"path": 2, "selector": css})
+                logger.path_attempt(f"Direct Connect anchor ({css})", 2, success=True)
+                return await _click_send_without_note(page, normalized, lead.id)
+            except Exception as e:
+                logger.element_click(f"Connect anchor: {css}", success=False)
+                logger.path_attempt(f"Direct Connect anchor ({css})", 2, success=False)
+
     direct_connect_btn = profile_container.get_by_role(
         "button",
         name=re.compile(r"(Vernetzen|Als Kontakt|als Kontakt)", re.I),
@@ -615,7 +690,7 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
             await random_pause()
             logger.dialog_detected("connection_direct", context={"path": 2})
             logger.path_attempt("Direct Connect button", 2, success=True)
-            return await _click_send_without_note(page, normalized)
+            return await _click_send_without_note(page, normalized, lead.id)
         except Exception as e:
             logger.element_click("Vernetzen button", success=False)
             logger.path_attempt("Direct Connect button", 2, success=False)
@@ -645,18 +720,19 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
                 await random_pause()
                 logger.dialog_detected("connection_more_menu", context={"path": 3})
                 logger.path_attempt("More -> Invite", 3, success=True)
-                return await _click_send_without_note(page, normalized)
+                return await _click_send_without_note(page, normalized, lead.id)
             else:
                 logger.path_attempt("More -> Invite", 3, success=False)
         except Exception as e:
             logger.element_click("More button flow", success=False)
             logger.path_attempt("More -> Invite", 3, success=False)
     
-    logger.connection_flow("all_paths", "EXHAUSTED", data={"url": normalized})
+    screenshot_path = await capture_connect_failure_screenshot(page, "all_paths_exhausted", lead.id)
+    logger.connection_flow("all_paths", "EXHAUSTED", data={"url": normalized, "screenshot": screenshot_path})
     return False
 
 
-async def _click_send_without_note(page: Page, url: str) -> bool:
+async def _click_send_without_note(page: Page, url: str, lead_id: Optional[str] = None) -> bool:
     """Click 'Ohne Notiz senden' button in the connection dialog."""
     # Try exact German buttons first, then fallback to regex
     send_label = page.get_by_role("button", name="Ohne Notiz senden")
@@ -677,7 +753,8 @@ async def _click_send_without_note(page: Page, url: str) -> bool:
         logger.element_search("Send button (fallback regex)", send_count, role="button")
 
     if send_count == 0:
-        logger.connection_flow("send_button", "NOT_FOUND", data={"url": url})
+        screenshot_path = await capture_connect_failure_screenshot(page, "send_button_not_found", lead_id)
+        logger.connection_flow("send_button", "NOT_FOUND", data={"url": url, "screenshot": screenshot_path})
         return False
 
     try:
@@ -690,7 +767,8 @@ async def _click_send_without_note(page: Page, url: str) -> bool:
         return True
     except Exception as exc:
         logger.element_click("Send button", success=False)
-        logger.connection_flow("send_button", "CLICK_FAILED", data={"url": url}, error=exc)
+        screenshot_path = await capture_connect_failure_screenshot(page, "send_button_click_failed", lead_id)
+        logger.connection_flow("send_button", "CLICK_FAILED", data={"url": url, "screenshot": screenshot_path}, error=exc)
         return False
 
 
@@ -747,6 +825,14 @@ async def login_with_credentials(context: BrowserContext, creds: LinkedinCredent
 
         email_filled = await fill_first(email_locators, creds.email) or await fill_first(email_fallbacks, creds.email)
         pwd_filled = await fill_first(password_locators, creds.password) or await fill_first(password_fallbacks, creds.password)
+
+        # LinkedIn occasionally serves an authwall/login variant where /login lacks fields.
+        # Retry once on /uas/login before failing hard.
+        if not email_filled or not pwd_filled:
+            await page.goto("https://www.linkedin.com/uas/login", wait_until="domcontentloaded", timeout=60_000)
+            await page.wait_for_timeout(1_000)
+            email_filled = await fill_first(email_locators, creds.email) or await fill_first(email_fallbacks, creds.email)
+            pwd_filled = await fill_first(password_locators, creds.password) or await fill_first(password_fallbacks, creds.password)
 
         if not email_filled or not pwd_filled:
             raise TimeoutError("Could not locate email or password fields on LinkedIn login page.")

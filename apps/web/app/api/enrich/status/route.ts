@@ -48,7 +48,7 @@ const MODE_CONFIG = {
   },
   connect_only: {
     outreachMode: "connect_only",
-    completedStatuses: ["CONNECT_ONLY_SENT", "ENRICH_FAILED", "ENRICHED"] as StatusKey[],
+    completedStatuses: ["CONNECT_ONLY_SENT"] as StatusKey[],
   },
 } as const;
 
@@ -115,30 +115,75 @@ export async function GET(request: Request) {
 
     logger.dbResult("select", "leads", { correlationId }, nextLead);
 
-    // Compute progress strictly from the enrichment pipeline:
-    // remaining = NEW + PROCESSING
-    // completed = ENRICHED + ENRICH_FAILED (both are terminal states for enrichment)
-    const remaining = (counts.NEW || 0) + (counts.PROCESSING || 0);
-    const completed = modeConfig.completedStatuses.reduce((sum, status) => sum + (counts[status] || 0), 0);
+    const isConnectOnly = requestedMode === "connect_only";
+    let remaining = (counts.NEW || 0) + (counts.PROCESSING || 0);
+    let completed = modeConfig.completedStatuses.reduce((sum, status) => sum + (counts[status] || 0), 0);
 
     // Track what actually happened today so we can cap the status bar to the daily quota
     const startOfDay = new Date();
     startOfDay.setUTCHours(0, 0, 0, 0);
     const startIso = startOfDay.toISOString();
 
-    logger.dbQuery(
-      "select-count",
-      "leads",
-      { correlationId, status: modeConfig.completedStatuses, outreachMode: modeConfig.outreachMode },
-      { since: startIso }
-    );
+    let completedToday = 0;
+    let completedTodayError: any = null;
 
-    const { count: completedToday, error: completedTodayError } = await client
-      .from("leads")
-      .select("id", { count: "exact", head: true })
-      .in("status", modeConfig.completedStatuses)
-      .eq("outreach_mode", modeConfig.outreachMode)
-      .gte("updated_at", startIso);
+    if (isConnectOnly) {
+      logger.dbQuery(
+        "select-count",
+        "leads",
+        { correlationId, metric: "connect_only_sent_total", outreachMode: modeConfig.outreachMode },
+      );
+
+      const { count: sentTotal, error: sentTotalError } = await client
+        .from("leads")
+        .select("id", { count: "exact", head: true })
+        .eq("outreach_mode", modeConfig.outreachMode)
+        .not("connection_sent_at", "is", null);
+
+      if (sentTotalError) {
+        logger.error("Failed to count connect-only sent total", { correlationId }, sentTotalError);
+        throw sentTotalError;
+      }
+
+      completed = sentTotal || 0;
+
+      logger.dbQuery(
+        "select-count",
+        "leads",
+        { correlationId, metric: "connect_only_sent_today", outreachMode: modeConfig.outreachMode },
+        { since: startIso }
+      );
+
+      const sentTodayResp = await client
+        .from("leads")
+        .select("id", { count: "exact", head: true })
+        .eq("outreach_mode", modeConfig.outreachMode)
+        .not("connection_sent_at", "is", null)
+        .gte("connection_sent_at", startIso);
+
+      completedToday = sentTodayResp.count || 0;
+      completedTodayError = sentTodayResp.error;
+
+      // Queue for connect_only means unsent leads that still can be processed.
+      remaining = (counts.NEW || 0) + (counts.PROCESSING || 0) + (counts.ENRICHED || 0);
+    } else {
+      logger.dbQuery(
+        "select-count",
+        "leads",
+        { correlationId, status: modeConfig.completedStatuses, outreachMode: modeConfig.outreachMode },
+        { since: startIso }
+      );
+
+      const messageCompletedResp = await client
+        .from("leads")
+        .select("id", { count: "exact", head: true })
+        .in("status", modeConfig.completedStatuses)
+        .eq("outreach_mode", modeConfig.outreachMode)
+        .gte("updated_at", startIso);
+
+      completedToday = messageCompletedResp.count || 0;
+      completedTodayError = messageCompletedResp.error;
+    }
 
     if (completedTodayError) {
       logger.error("Failed to count today's completions", { correlationId }, completedTodayError);
@@ -149,11 +194,11 @@ export async function GET(request: Request) {
       "select-count",
       "leads",
       { correlationId, status: modeConfig.completedStatuses },
-      completedToday ?? 0
+      completedToday || 0
     );
 
     // Remaining for today is driven purely by the daily cap; queue/backlog is reported separately
-    const remainingToday = Math.max(0, dailyCap - (completedToday || 0));
+    const remainingToday = Math.max(0, dailyCap - completedToday);
 
     // Explicit ground-truth log of counts and computed values
     logger.debug(
@@ -165,7 +210,7 @@ export async function GET(request: Request) {
         completed,
         mode: requestedMode,
         dailyCap,
-        completedToday: completedToday || 0,
+        completedToday,
         remainingToday,
         queueRemaining: remaining,
       }
@@ -178,7 +223,7 @@ export async function GET(request: Request) {
       remaining,
       completed,
       dailyCap,
-      completedToday: completedToday || 0,
+      completedToday,
       remainingToday,
       queueRemaining: remaining,
       nextLead: nextLead || null,
