@@ -1,10 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { approveAndSendAllDrafts, approveDraft, fetchDraftFeed, regenerateDraft, rejectDraft, triggerDraftGeneration, sendLeadNow, sendAllApproved } from "../app/actions";
-import { OUTREACH_MODE_LABELS } from "../lib/outreachModes";
 import type { OutreachMode } from "../lib/outreachModes";
 import { PROMPT_TYPE_LABELS } from "../lib/promptTypes";
 import type { PromptType } from "../lib/promptTypes";
@@ -32,6 +30,7 @@ export type DraftWithLead = {
 type Props = {
   drafts: DraftWithLead[];
   initialOutreachMode?: OutreachMode;
+  variant?: "mission_control" | "full";
 };
 
 type SequenceDefinition = {
@@ -47,11 +46,11 @@ const UPDATE_EVENT = "outreach-sequences-updated";
 const UNASSIGNED_BATCH = "unassigned";
 
 const STATUS_PILL_META: Record<string, { label: string; className: string }> = {
-  APPROVED: { label: "Approved (unsent)", className: "status-approved" },
+  APPROVED: { label: "Approved (queued)", className: "status-approved" },
   DRAFT_READY: { label: "Draft Ready", className: "status-draft" },
-  MESSAGE_ONLY_READY: { label: "Message Draft Ready", className: "status-draft" },
-  MESSAGE_ONLY_APPROVED: { label: "Message Approved", className: "status-approved" },
-  CONNECT_ONLY_SENT: { label: "Pending Connection", className: "status-pending" },
+  MESSAGE_ONLY_READY: { label: "Post-Acceptance Draft Ready", className: "status-draft" },
+  MESSAGE_ONLY_APPROVED: { label: "Post-Acceptance Approved", className: "status-approved" },
+  CONNECT_ONLY_SENT: { label: "Waiting Acceptance", className: "status-pending" },
   SENT: { label: "Sent", className: "status-sent" },
   DEFAULT: { label: "Draft", className: "status-new" },
 };
@@ -96,10 +95,7 @@ function formatBatchLabel(batchKey: string): string {
   return batchKey;
 }
 
-export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: Props) {
-  const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
+export function DraftFeed({ drafts, initialOutreachMode = "connect_message", variant = "full" }: Props) {
   const [localDrafts, setLocalDrafts] = useState<DraftWithLead[]>([]);
   const localDraftsRef = useRef<DraftWithLead[]>(drafts);
   const [loading, setLoading] = useState(true);
@@ -110,15 +106,15 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
   const [regenerating, setRegenerating] = useState<Set<string>>(new Set());
   const [isPolling, setIsPolling] = useState(false);
   const [promptType, setPromptType] = useState<PromptType>(1);
-  const [outreachMode, setOutreachMode] = useState<OutreachMode>(initialOutreachMode);
+  const effectiveInitialMode: OutreachMode = variant === "mission_control" ? "connect_only" : initialOutreachMode;
+  const [outreachMode, setOutreachMode] = useState<OutreachMode>(effectiveInitialMode);
   const pollingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const lastDraftCountRef = useRef<number>(drafts.length || 0);
   const isPollingRef = useRef(false);
   const regeneratingRef = useRef(regenerating);
   const [sequenceById, setSequenceById] = useState<Record<string, SequenceDefinition>>({});
   const [assignmentByBatch, setAssignmentByBatch] = useState<Record<string, string>>({});
-
-  const isMessageOnly = outreachMode === "message_only";
+  const isConnectOnly = outreachMode === "connect_only";
 
   const fetchDrafts = useCallback(async (showLoading = false, mode?: OutreachMode) => {
     if (showLoading) {
@@ -170,10 +166,11 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
     }
   }, [outreachMode]);
 
-  // Keep outreachMode in sync with server-provided initial value
+  // Keep outreachMode in sync with server-provided initial value (except in Mission Control, which is locked post-acceptance).
   useEffect(() => {
+    if (variant === "mission_control") return;
     setOutreachMode(initialOutreachMode);
-  }, [initialOutreachMode]);
+  }, [initialOutreachMode, variant]);
 
   // Fetch existing drafts on mount and when outreach mode changes
   useEffect(() => {
@@ -254,9 +251,12 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
     const supabase = supabaseBrowserClient();
     const channel = supabase.channel(`draft-feed-updates-${outreachMode}`);
 
-    const leadStatuses = isMessageOnly
-      ? ["CONNECT_ONLY_SENT", "MESSAGE_ONLY_READY", "MESSAGE_ONLY_APPROVED", "SENT"]
-      : ["DRAFT_READY", "APPROVED", "SENT"];
+    const leadStatuses =
+      variant === "mission_control"
+        ? ["MESSAGE_ONLY_READY", "MESSAGE_ONLY_APPROVED", "SENT"]
+        : isConnectOnly
+        ? ["CONNECT_ONLY_SENT", "MESSAGE_ONLY_READY", "MESSAGE_ONLY_APPROVED", "SENT"]
+        : ["DRAFT_READY", "APPROVED", "SENT"];
 
     leadStatuses.forEach((status) => {
       channel.on(
@@ -286,7 +286,7 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [fetchDrafts, outreachMode, isMessageOnly]);
+  }, [fetchDrafts, outreachMode, isConnectOnly, variant]);
 
   useEffect(() => {
     return () => {
@@ -315,34 +315,24 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
 
   const isGenerating = genPending || isPolling;
   const pendingDrafts = useMemo(
-    () => (isMessageOnly ? localDrafts.filter((d) => d.status === "CONNECT_ONLY_SENT") : []),
-    [localDrafts, isMessageOnly]
+    () => (isConnectOnly ? localDrafts.filter((d) => d.status === "CONNECT_ONLY_SENT") : []),
+    [localDrafts, isConnectOnly]
   );
   const actionableDrafts = useMemo(
-    () => (isMessageOnly ? localDrafts.filter((d) => d.status !== "CONNECT_ONLY_SENT") : localDrafts),
-    [localDrafts, isMessageOnly]
+    () => (isConnectOnly ? localDrafts.filter((d) => d.status !== "CONNECT_ONLY_SENT") : localDrafts),
+    [localDrafts, isConnectOnly]
   );
   const actionableCount = actionableDrafts.length;
 
   const disableBulkSend = bulkPending || isGenerating || actionableCount === 0;
 
-  const generateButtonLabel = outreachMode === "message_only" ? "Prepare Message Drafts" : "Generate Drafts";
-
-  const updateUrlOutreachMode = (mode: OutreachMode) => {
-    const params = new URLSearchParams(searchParams?.toString() || "");
-    if (mode === "connect_message") {
-      params.delete("outreachMode");
-    } else {
-      params.set("outreachMode", mode);
-    }
-    const query = params.toString();
-    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
-  };
-
-  const handleOutreachModeChange = (mode: OutreachMode) => {
-    setOutreachMode(mode);
-    updateUrlOutreachMode(mode);
-  };
+  const generateButtonLabel = outreachMode === "connect_only" ? "Generate Post-Acceptance Drafts" : "Generate Message Drafts";
+  const isMissionControl = variant === "mission_control";
+  const sendAllApprovedLabel = isMissionControl
+    ? "Send All Approved"
+    : outreachMode === "connect_only"
+    ? "Send to Accepted Connections"
+    : "Send All Approved";
 
   const handleSendAllApproved = async () => {
     setBulkMessage(null);
@@ -350,8 +340,8 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
     try {
       const result = await sendAllApproved(outreachMode);
       const msg = result?.senderTriggered
-        ? outreachMode === "message_only" 
-          ? "Triggered sender for pending connections (message-only mode)."
+        ? outreachMode === "connect_only" 
+          ? "Triggered sender for connect-only leads."
           : "Triggered sender for approved leads."
         : "No leads to send.";
       setBulkMessage(msg);
@@ -393,7 +383,7 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
 
   const getActionableDraftSnapshot = () => {
     const list = localDraftsRef.current;
-    if (outreachMode === "message_only") {
+    if (outreachMode === "connect_only") {
       return list.filter((d) => d.status !== "CONNECT_ONLY_SENT");
     }
     return list;
@@ -431,55 +421,31 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
   if (!localDrafts.length && !loading) {
     return (
       <div className="card" style={{ marginTop: 24 }}>
-        <div className="pill">Draft Feed</div>
+        <div className="pill">{isMissionControl ? "Post-Acceptance Messaging" : "Messaging"}</div>
         <h3 style={{ margin: "12px 0 8px 0" }}>
-          {outreachMode === "message_only" ? "NO PENDING CONNECTIONS" : "NO DRAFTS READY"}
+          {isMissionControl ? "NO POST-ACCEPTANCE MESSAGES YET" : outreachMode === "connect_only" ? "NOTHING TO MESSAGE YET" : "NO DRAFTS YET"}
         </h3>
         <div className="muted">
-          {outreachMode === "message_only" 
-            ? "When connections are accepted, leads will appear here for messaging."
-            : "When the agent generates drafts, they will appear here."}
-        </div>
-        <div style={{ marginTop: 16, marginBottom: 12, display: "flex", gap: 16, flexWrap: "wrap" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <label style={{ fontSize: 12, margin: 0 }}>Outreach Style:</label>
-            <select
-              value={outreachMode}
-              onChange={(e) => handleOutreachModeChange(e.target.value as OutreachMode)}
-              disabled={isGenerating}
-              className="input"
-              style={{ maxWidth: 200, padding: "8px 12px", fontSize: 12 }}
-            >
-              <option value="connect_message">{OUTREACH_MODE_LABELS.connect_message}</option>
-              <option value="message_only">{OUTREACH_MODE_LABELS.message_only}</option>
-            </select>
-          </div>
-          {outreachMode === "connect_message" && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <label style={{ fontSize: 12, margin: 0 }}>Message Style:</label>
-              <select
-                value={promptType}
-                onChange={(e) => setPromptType(Number(e.target.value) as PromptType)}
-                disabled={isGenerating}
-                className="input"
-                style={{ maxWidth: 200, padding: "8px 12px", fontSize: 12 }}
-              >
-                <option value={1}>{PROMPT_TYPE_LABELS[1]}</option>
-                <option value={2}>{PROMPT_TYPE_LABELS[2]}</option>
-                <option value={3}>{PROMPT_TYPE_LABELS[3]}</option>
-              </select>
-            </div>
-          )}
+          {isMissionControl
+            ? "When a connection is accepted, messages will appear here for review and approval."
+            : outreachMode === "connect_only"
+            ? "When connections are accepted, leads will appear here for post-acceptance messaging."
+            : "After enrichment, generate drafts for connect-plus-message leads here."}
         </div>
         <div style={{ display: "flex", gap: 0, flexWrap: "wrap" }}>
-          <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
-            {genPending ? "STARTING…" : isPolling ? "GENERATING…" : generateButtonLabel}
+          <button className="btn secondary" onClick={() => fetchDrafts(true)} disabled={isGenerating}>
+            Refresh
           </button>
+          {!isMissionControl ? (
+            <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
+              {genPending ? "STARTING…" : isPolling ? "GENERATING…" : generateButtonLabel}
+            </button>
+          ) : null}
           <button className="btn warn" onClick={handleBulkApproveSend} disabled={disableBulkSend}>
             {bulkPending ? "SENDING…" : "Approve & Send All"}
           </button>
           <button className="btn secondary" onClick={handleSendAllApproved} disabled={bulkPending}>
-            {bulkPending ? "TRIGGERING…" : outreachMode === "message_only" ? "Send to Accepted" : "Send All Approved"}
+            {bulkPending ? "TRIGGERING…" : sendAllApprovedLabel}
           </button>
           {genMessage ? (
             <span className="muted" style={{ marginLeft: 12, alignSelf: "center" }} aria-live="polite">
@@ -506,50 +472,32 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
       <div className="card" style={{ marginTop: 24, marginBottom: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
           <div>
-            <div className="pill">Draft Feed</div>
-            <h3 style={{ margin: "12px 0 8px 0" }}>REVIEW AND APPROVE DRAFTS</h3>
-            <div className="muted">Manually trigger draft generation for ENRICHED leads when you are ready.</div>
+            <div className="pill">{isMissionControl ? "Post-Acceptance Messaging" : "Messaging"}</div>
+            <h3 style={{ margin: "12px 0 8px 0" }}>
+              {isMissionControl ? "REVIEW AND APPROVE POST-ACCEPTANCE MESSAGES" : "REVIEW AND APPROVE MESSAGES"}
+            </h3>
+            <div className="muted">
+              {isMissionControl
+                ? "This queue is only for messages sent after a connection is accepted."
+                : "Generate and approve messages for the selected workflow. Connect-only invites do not use this queue."}
+            </div>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "flex-end" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <label style={{ fontSize: 11, margin: 0 }}>Outreach Style:</label>
-                <select
-                  value={outreachMode}
-                  onChange={(e) => handleOutreachModeChange(e.target.value as OutreachMode)}
-                  disabled={isGenerating}
-                  className="input"
-                  style={{ maxWidth: 200, padding: "8px 12px", fontSize: 11 }}
-                >
-                  <option value="connect_message">{OUTREACH_MODE_LABELS.connect_message}</option>
-                  <option value="message_only">{OUTREACH_MODE_LABELS.message_only}</option>
-                </select>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <label style={{ fontSize: 11, margin: 0 }}>Message Style:</label>
-                <select
-                  value={promptType}
-                  onChange={(e) => setPromptType(Number(e.target.value) as PromptType)}
-                  disabled={isGenerating || outreachMode === "message_only"}
-                  className="input"
-                  style={{ maxWidth: 200, padding: "8px 12px", fontSize: 11 }}
-                >
-                  <option value={1}>{PROMPT_TYPE_LABELS[1]}</option>
-                  <option value={2}>{PROMPT_TYPE_LABELS[2]}</option>
-                  <option value={3}>{PROMPT_TYPE_LABELS[3]}</option>
-                </select>
-              </div>
-            </div>
             <div style={{ display: "flex", gap: 0 }}>
+              <button className="btn secondary" onClick={() => fetchDrafts(true)} disabled={isGenerating}>
+                Refresh
+              </button>
               <button className="btn warn" onClick={handleBulkApproveSend} disabled={disableBulkSend}>
                 {bulkPending ? "SENDING…" : "Approve & Send All"}
               </button>
               <button className="btn secondary" onClick={handleSendAllApproved} disabled={bulkPending}>
-                {bulkPending ? "TRIGGERING…" : "Send All Approved"}
+                {bulkPending ? "TRIGGERING…" : sendAllApprovedLabel}
               </button>
-              <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
-                {genPending ? "STARTING…" : isPolling ? "GENERATING…" : generateButtonLabel}
-              </button>
+              {!isMissionControl ? (
+                <button className="btn" onClick={handleGenerateDrafts} disabled={isGenerating}>
+                  {genPending ? "STARTING…" : isPolling ? "GENERATING…" : generateButtonLabel}
+                </button>
+              ) : null}
             </div>
           </div>
         </div>
@@ -594,7 +542,7 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message" }: P
         )}
       </div>
 
-      {isMessageOnly && pendingDrafts.length ? (
+      {!isMissionControl && isConnectOnly && pendingDrafts.length ? (
         <div className="card" style={{ marginTop: 24 }}>
           <div className="pill" style={{ marginBottom: 12 }}>Pending Connections</div>
           <h3 style={{ margin: "0 0 8px 0" }}>WAITING FOR ACCEPTANCE</h3>
@@ -851,4 +799,3 @@ function DraftCard({
     </section>
   );
 }
-

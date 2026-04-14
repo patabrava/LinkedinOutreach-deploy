@@ -28,8 +28,11 @@ const POLL_INTERVAL_MS = 5_000;
 
 type EnrichmentMode = "message" | "connect_only";
 
+type ButtonVariant = "dashboard" | "details";
+
 type StartEnrichmentButtonProps = {
   mode?: EnrichmentMode;
+  variant?: ButtonVariant;
 };
 
 const MODE_CONFIG: Record<EnrichmentMode, {
@@ -43,22 +46,22 @@ const MODE_CONFIG: Record<EnrichmentMode, {
   message: {
     statusUrl: "/api/enrich/status",
     startEndpoint: "/api/enrich",
-    startLabel: "START ENRICHMENT",
+    startLabel: "RUN ENRICHMENT",
     runningLabel: "STARTING…",
     buttonClass: "btn",
-    defaultStartMessage: "Scraper started. A browser window should appear.",
+    defaultStartMessage: "Enrichment started.",
   },
   connect_only: {
     statusUrl: "/api/enrich/status?mode=connect_only",
     startEndpoint: "/api/enrich/connect-only",
-    startLabel: "ENRICH + CONNECT (NO NOTE)",
-    runningLabel: "STARTING CONNECT-ONLY…",
+    startLabel: "SEND INVITES",
+    runningLabel: "STARTING…",
     buttonClass: "btn secondary",
-    defaultStartMessage: "Connect-only run started. A browser window should appear.",
+    defaultStartMessage: "Invite run started.",
   },
 };
 
-export function StartEnrichmentButton({ mode = "message" }: StartEnrichmentButtonProps) {
+export function StartEnrichmentButton({ mode = "message", variant = "details" }: StartEnrichmentButtonProps) {
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
@@ -215,6 +218,29 @@ export function StartEnrichmentButton({ mode = "message" }: StartEnrichmentButto
     }
   };
 
+  const dashboardSummary = useMemo(() => {
+    if (!status) return "";
+    const completed = typeof status.completedToday === "number" ? status.completedToday : status.completed;
+    const remaining = typeof status.remainingToday === "number" ? status.remainingToday : status.remaining;
+    const cap = typeof status.dailyCap === "number" ? status.dailyCap : null;
+    const backlog = typeof status.queueRemaining === "number" ? status.queueRemaining : null;
+
+    const parts: string[] = [];
+    parts.push(`Today: ${completed} done`);
+    if (cap !== null) {
+      parts.push(`${Math.max(0, cap - completed)} left`);
+    } else {
+      parts.push(`${remaining} remaining`);
+    }
+    if (backlog !== null) {
+      parts.push(`Queue: ${backlog}`);
+    }
+    return parts.join(" • ");
+  }, [status]);
+
+  const showDetails = variant === "details";
+  const showStop = showDetails || polling || stopping;
+
   return (
     <div style={{ width: "100%" }}>
       <div style={{ display: "flex", gap: 0 }}>
@@ -226,14 +252,16 @@ export function StartEnrichmentButton({ mode = "message" }: StartEnrichmentButto
         >
           {running ? modeConfig.runningLabel : modeConfig.startLabel}
         </button>
-        <button
-          onClick={stop}
-          disabled={stopping}
-          className="btn warn"
-          style={{ flex: 1 }}
-        >
-          {stopping ? "STOPPING…" : "STOP ENRICHMENT"}
-        </button>
+        {showStop ? (
+          <button
+            onClick={stop}
+            disabled={stopping}
+            className="btn warn"
+            style={{ flex: 1 }}
+          >
+            {stopping ? "STOPPING…" : "STOP"}
+          </button>
+        ) : null}
       </div>
 
       {message ? (
@@ -243,7 +271,8 @@ export function StartEnrichmentButton({ mode = "message" }: StartEnrichmentButto
         <div style={{ marginTop: 12, fontSize: 12, color: "var(--accent)" }}>{error}</div>
       ) : null}
 
-      <div style={{ marginTop: 20 }}>
+      {showDetails ? (
+        <div style={{ marginTop: 20 }}>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
           <span>STATUS</span>
           <span>{statusLoading ? "UPDATING…" : `${completionPercent}%`}</span>
@@ -282,7 +311,12 @@ export function StartEnrichmentButton({ mode = "message" }: StartEnrichmentButto
         {nextLeadLabel ? (
           <div style={{ marginTop: 8, fontSize: 11, color: "var(--muted)" }}>NEXT UP: {nextLeadLabel}</div>
         ) : null}
-      </div>
+        </div>
+      ) : (
+        <div style={{ marginTop: 10, fontSize: 12, color: "var(--muted)" }}>
+          {statusLoading ? "Updating status…" : status ? dashboardSummary : "Loading status…"}
+        </div>
+      )}
     </div>
   );
 }

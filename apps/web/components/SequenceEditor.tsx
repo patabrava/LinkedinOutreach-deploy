@@ -6,7 +6,6 @@ import type { LeadBatchRow, OutreachSequenceRow } from "../app/actions";
 import { assignBatchToSequence, saveOutreachSequence } from "../app/actions";
 
 type Props = {
-  leads: LeadForBatch[];
   sequences: OutreachSequenceRow[];
   batches: LeadBatchRow[];
 };
@@ -27,7 +26,7 @@ const emptyDraft = (): Draft => ({
   followup_interval_days: 3,
 });
 
-export function SequenceEditor({ leads, sequences, batches }: Props) {
+export function SequenceEditor({ sequences, batches }: Props) {
   const [draft, setDraft] = useState<Draft>(() => {
     const first = sequences[0];
     return first
@@ -52,11 +51,8 @@ export function SequenceEditor({ leads, sequences, batches }: Props) {
     () =>
       batches
         .filter((batch) => batch.source === "csv_upload")
-        .map((batch) => ({
-          ...batch,
-          leadCount: leads.filter((lead) => lead.batch_id === batch.id).length,
-        })),
-    [batches, leads]
+        .map((batch) => ({ ...batch })),
+    [batches]
   );
 
   const syncDraft = (sequence?: OutreachSequenceRow | null) => {
@@ -101,14 +97,14 @@ export function SequenceEditor({ leads, sequences, batches }: Props) {
 
   return (
     <section className="card" style={{ marginBottom: 24 }}>
-      <div className="pill">Sequence Manager</div>
-      <h3 style={{ margin: "12px 0 8px 0" }}>SEQUENCES + CSV BATCH ASSIGNMENT</h3>
+      <div className="pill">Post-Acceptance Sequences</div>
+      <h3 style={{ margin: "12px 0 8px 0" }}>SEQUENCES + BATCH ASSIGNMENT</h3>
       <div className="muted" style={{ marginBottom: 16 }}>
-        One CSV equals one batch. Each batch maps to one sequence.
+        Sequences are used only after a connection is accepted. Invite notes are separate. Each imported CSV creates a batch; assign each batch to one sequence.
       </div>
 
-      <div style={{ display: "grid", gap: 16, gridTemplateColumns: "minmax(240px, 1fr) minmax(320px, 2fr)" }}>
-        <div style={{ border: "2px solid #000", padding: 12 }}>
+      <div className="seq-grid">
+        <div className="seq-panel">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <strong>Sequences</strong>
             <button className="btn secondary" onClick={onCreate} type="button">
@@ -132,7 +128,7 @@ export function SequenceEditor({ leads, sequences, batches }: Props) {
           </div>
         </div>
 
-        <div style={{ border: "2px solid #000", padding: 12 }}>
+        <div className="seq-panel">
           <strong>Edit Sequence</strong>
           {!selectedSequence && selectedSequenceId !== null ? (
             <div className="muted" style={{ marginTop: 8 }}>
@@ -197,7 +193,7 @@ export function SequenceEditor({ leads, sequences, batches }: Props) {
         </div>
       </div>
 
-      <div style={{ marginTop: 16, border: "2px solid #000", padding: 12 }}>
+      <div className="seq-panel" style={{ marginTop: 16 }}>
         <strong>CSV Batches</strong>
         <div className="muted" style={{ marginTop: 4, marginBottom: 8 }}>
           Assign each imported CSV batch to a sequence.
@@ -210,7 +206,6 @@ export function SequenceEditor({ leads, sequences, batches }: Props) {
               <thead>
                 <tr>
                   <th>BATCH</th>
-                  <th>LEADS</th>
                   <th>SEQUENCE</th>
                 </tr>
               </thead>
@@ -218,7 +213,6 @@ export function SequenceEditor({ leads, sequences, batches }: Props) {
                 {batchRows.map((batch) => (
                   <tr key={batch.id}>
                     <td>{batch.name}</td>
-                    <td>{batch.leadCount}</td>
                     <td>
                       <select
                         className="input"

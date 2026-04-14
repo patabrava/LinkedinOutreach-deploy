@@ -74,6 +74,28 @@ trap cleanup INT TERM EXIT
 
 load_envs
 
+prepare_web_runtime() {
+  local web_next_dir="$ROOT_DIR/apps/web/.next"
+  local pids=""
+  pids="$(lsof -tiTCP:3000 -sTCP:LISTEN 2>/dev/null || true)"
+  if [ -n "$pids" ]; then
+    echo "[web] port 3000 busy; stopping existing listener(s): $pids"
+    # Keep web deterministic: one Next dev server on :3000 only.
+    kill $pids 2>/dev/null || true
+    sleep 1
+    pids="$(lsof -tiTCP:3000 -sTCP:LISTEN 2>/dev/null || true)"
+    if [ -n "$pids" ]; then
+      echo "[web] forcing stop for remaining listener(s): $pids"
+      kill -9 $pids 2>/dev/null || true
+      sleep 1
+    fi
+  fi
+  if [ -d "$web_next_dir" ]; then
+    echo "[web] clearing stale Next build cache: $web_next_dir"
+    rm -rf "$web_next_dir"
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage: ./run_all.sh [--web] [--agent] [--sender] [--all]
@@ -156,6 +178,7 @@ fi
 
 # Web UI (Mission Control dashboard)
 if [ "$START_WEB" -eq 1 ]; then
+  prepare_web_runtime
   run_service "web" "cd '$ROOT_DIR' && npm run dev:web"
 else
   echo "[web] ⏭ Skipping (enable with --web or --all)."

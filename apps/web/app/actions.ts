@@ -7,7 +7,7 @@ import { revalidatePath } from "next/cache";
 
 import { logger } from "../lib/logger";
 import type { OutreachMode } from "../lib/outreachModes";
-import { OUTREACH_MODE_TO_DB } from "../lib/outreachModes";
+import { normalizeOutreachMode, OUTREACH_MODE_TO_DB } from "../lib/outreachModes";
 import type { PromptType } from "../lib/promptTypes";
 import { supabaseAdmin } from "../lib/supabaseAdmin";
 
@@ -51,12 +51,12 @@ function startDraftAgent(
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-    const args = [
+  const args = [
       agentPath,
       "--prompt-type",
       String(promptType),
       "--mode",
-      outreachMode === "message_only" ? "connect_only" : "message",
+      outreachMode === "connect_only" ? "connect_only" : "message",
     ];
 
     logger.workerSpawn(
@@ -82,7 +82,7 @@ export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_messa
 
   // Message-only mode surfaces pending connections plus message-only draft stages
   // Connect+message mode shows standard DRAFT_READY/APPROVED leads
-  const statusList = outreachMode === "message_only"
+  const statusList = outreachMode === "connect_only"
     ? [...MESSAGE_ONLY_FEED_STATUSES]
     : [...CONNECT_MESSAGE_FEED_STATUSES];
 
@@ -139,7 +139,7 @@ export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_messa
         }));
       }
 
-      if (outreachMode === "message_only") {
+      if (outreachMode === "connect_only") {
         // Message-only mode surfaces CONNECT_ONLY_SENT leads even without draft rows.
         return [{
           leadId: lead.id,
@@ -268,25 +268,30 @@ export async function fetchLeadList(
 
     logger.dbResult("select", "leads", { correlationId }, data);
 
-    const leads = (data || []).map((lead) => ({
-      id: lead.id,
-      linkedin_url: lead.linkedin_url,
-      first_name: lead.first_name || null,
-      last_name: lead.last_name || null,
-      company_name: lead.company_name || null,
-      status: lead.status || "NEW",
-      batch_id: lead.batch_id ?? lead.batch?.id ?? null,
-      batch_name: lead.batch?.name || null,
-      sequence_id: lead.sequence_id ?? lead.sequence?.id ?? null,
-      sequence_name: lead.sequence?.name || null,
-      sequence_step: lead.sequence_step ?? 0,
-      followup_count: lead.followup_count ?? 0,
-      last_reply_at: lead.last_reply_at || null,
-      created_at: lead.created_at,
-      updated_at: lead.updated_at,
-      profile_data: lead.profile_data || null,
-      recent_activity: lead.recent_activity || null,
-    }));
+    const leads = (data || []).map((leadRaw) => {
+      const lead = leadRaw as any;
+      const batch = Array.isArray(lead.batch) ? lead.batch[0] : lead.batch;
+      const sequence = Array.isArray(lead.sequence) ? lead.sequence[0] : lead.sequence;
+      return {
+        id: lead.id,
+        linkedin_url: lead.linkedin_url,
+        first_name: lead.first_name || null,
+        last_name: lead.last_name || null,
+        company_name: lead.company_name || null,
+        status: lead.status || "NEW",
+        batch_id: lead.batch_id ?? batch?.id ?? null,
+        batch_name: batch?.name || null,
+        sequence_id: lead.sequence_id ?? sequence?.id ?? null,
+        sequence_name: sequence?.name || null,
+        sequence_step: lead.sequence_step ?? 0,
+        followup_count: lead.followup_count ?? 0,
+        last_reply_at: lead.last_reply_at || null,
+        created_at: lead.created_at,
+        updated_at: lead.updated_at,
+        profile_data: lead.profile_data || null,
+        recent_activity: lead.recent_activity || null,
+      };
+    });
 
     const total = count || 0;
     const totalPages = total ? Math.max(1, Math.ceil(total / pageSize)) : 1;
@@ -863,7 +868,7 @@ export async function sendLeadNow(leadId: string, outreachMode: OutreachMode = "
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
     const args = [senderPath, "--lead-id", leadId];
-    if (outreachMode === "message_only") {
+    if (outreachMode === "connect_only") {
       args.push("--message-only");
     }
 
@@ -897,8 +902,8 @@ export async function sendAllApproved(outreachMode: OutreachMode = "connect_mess
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
 
-    // For message_only mode, pass --message-only flag to sender
-    const args = outreachMode === "message_only"
+    // For connect_only mode, pass --message-only flag to sender
+    const args = outreachMode === "connect_only"
       ? [senderPath, "--message-only"]
       : [senderPath];
 
@@ -923,8 +928,8 @@ export async function sendAllApproved(outreachMode: OutreachMode = "connect_mess
 
 export async function approveDraft(input: DraftInput) {
   const correlationId = logger.actionStart("approveDraft", { leadId: input.leadId, draftId: input.draftId?.toString() }, input);
-  const mode: OutreachMode = input.outreachMode ?? "connect_message";
-  const approvedStatus = mode === "message_only" ? "MESSAGE_ONLY_APPROVED" : "APPROVED";
+  const mode: OutreachMode = normalizeOutreachMode(input.outreachMode ?? "connect_message");
+  const approvedStatus = mode === "connect_only" ? "MESSAGE_ONLY_APPROVED" : "APPROVED";
 
   try {
     const client = supabaseAdmin();
@@ -1021,7 +1026,7 @@ export async function approveDraft(input: DraftInput) {
 
 export async function approveAndSendAllDrafts(outreachMode: OutreachMode = "connect_message") {
   const correlationId = logger.actionStart("approveAndSendAllDrafts", {}, { outreachMode });
-  const isMessageOnly = outreachMode === "message_only";
+  const isMessageOnly = outreachMode === "connect_only";
   const dbOutreachMode = OUTREACH_MODE_TO_DB[outreachMode];
   const draftingStatus = isMessageOnly ? "MESSAGE_ONLY_READY" : "DRAFT_READY";
   const approvedStatus = isMessageOnly ? "MESSAGE_ONLY_APPROVED" : "APPROVED";
@@ -1118,7 +1123,7 @@ export async function approveAndSendAllDrafts(outreachMode: OutreachMode = "conn
         const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
         const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
         const execToUse = pythonExec;
-        const args = outreachMode === "message_only" ? [senderPath, "--message-only"] : [senderPath];
+        const args = outreachMode === "connect_only" ? [senderPath, "--message-only"] : [senderPath];
 
         logger.workerSpawn("sender", args, { correlationId, approvedCount, outreachMode });
 
@@ -1175,8 +1180,8 @@ export async function regenerateDraft(leadId: string, outreachMode: OutreachMode
     logger.error("regenerateDraft delete error", { correlationId, leadId }, draftErr);
     throw draftErr;
   }
-  const nextStatus = outreachMode === "message_only" ? "CONNECT_ONLY_SENT" : "ENRICHED";
-  const nextOutreachMode = outreachMode === "message_only" ? "connect_only" : "message";
+  const nextStatus = outreachMode === "connect_only" ? "CONNECT_ONLY_SENT" : "ENRICHED";
+  const nextOutreachMode = outreachMode === "connect_only" ? "connect_only" : "message";
   const { error: leadErr } = await client
     .from("leads")
     .update({ status: nextStatus, outreach_mode: nextOutreachMode })
@@ -1198,8 +1203,14 @@ type LeadCsvRow = {
   company_name?: string;
 };
 
-export async function importLeads(rows: LeadCsvRow[], fileName?: string) {
+export async function importLeads(
+  rows: LeadCsvRow[],
+  fileName?: string,
+  outreachMode: OutreachMode = "connect_message"
+) {
   if (!rows?.length) return { inserted: 0 };
+  const normalizedMode = normalizeOutreachMode(outreachMode);
+  const dbOutreachMode = OUTREACH_MODE_TO_DB[normalizedMode];
   const sanitized = rows
     .map((row) => ({
       linkedin_url: row.linkedin_url?.trim(),
@@ -1207,12 +1218,15 @@ export async function importLeads(rows: LeadCsvRow[], fileName?: string) {
       last_name: row.last_name?.trim() || null,
       company_name: row.company_name?.trim() || null,
       status: "NEW",
+      outreach_mode: dbOutreachMode,
     }))
     .filter((row) => row.linkedin_url);
   if (!sanitized.length) return { inserted: 0 };
 
   const client = supabaseAdmin();
-  const batchName = fileName?.trim() || `CSV batch ${new Date().toISOString()}`;
+  const batchName = `${fileName?.trim() || "CSV batch"} (${
+    normalizedMode === "connect_only" ? "Connect Only" : "Connect + Message"
+  })`;
   const { data: defaultSequence, error: defaultSequenceError } = await client
     .from("outreach_sequences")
     .select("id")
@@ -1229,7 +1243,13 @@ export async function importLeads(rows: LeadCsvRow[], fileName?: string) {
 
   const { data: batchData, error: batchError } = await client
     .from("lead_batches")
-    .insert({ name: batchName, source: "csv_upload", sequence_id: defaultSequence.id })
+    .insert({
+      name: batchName,
+      source: "csv_upload",
+      // Repo rule: imported leads inherit `batch_id` and `sequence_id` together.
+      // Even connect-only batches carry a sequence_id so the lead record is consistent.
+      sequence_id: defaultSequence.id,
+    })
     .select("id")
     .single();
 
@@ -1243,6 +1263,7 @@ export async function importLeads(rows: LeadCsvRow[], fileName?: string) {
     ...row,
     batch_id: batchId,
     sequence_id: defaultSequence.id,
+    outreach_mode: dbOutreachMode,
   }));
 
   const { error, count } = await client.from("leads").upsert(batched, {
@@ -1254,7 +1275,11 @@ export async function importLeads(rows: LeadCsvRow[], fileName?: string) {
     console.error("importLeads error", error);
     throw error;
   }
-  await client.from("leads").update({ batch_id: batchId, sequence_id: defaultSequence.id }).in(
+  await client.from("leads").update({
+    batch_id: batchId,
+    sequence_id: defaultSequence.id,
+    outreach_mode: dbOutreachMode,
+  }).in(
     "linkedin_url",
     sanitized.map((row) => row.linkedin_url)
   );

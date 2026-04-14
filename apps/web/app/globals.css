@@ -41,6 +41,17 @@ a {
   text-decoration: none;
 }
 
+a:hover {
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 2px;
+}
+
+.brand:hover,
+.nav-link:hover {
+  text-decoration: none;
+}
+
 /* Typography */
 h1, h2, h3 { 
   font-weight: 700; 
@@ -84,6 +95,10 @@ h3 {
   .grid {
     grid-template-columns: 1fr;
   }
+
+  .page {
+    padding: 24px 16px 40px;
+  }
 }
 
 /* Brutalist Cards */
@@ -115,6 +130,16 @@ h3 {
   color: var(--bg);
 }
 
+.btn:focus-visible,
+.input:focus-visible,
+.textarea:focus-visible,
+a:focus-visible,
+.nav-link:focus-visible,
+.brand:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -129,6 +154,16 @@ h3 {
 .btn.accent:hover:not(:disabled) {
   background: var(--bg);
   color: var(--accent);
+}
+
+.btn[aria-pressed="true"] {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.btn.secondary[aria-pressed="true"] {
+  background: var(--fg);
+  color: var(--bg);
 }
 
 .btn.secondary {
@@ -358,6 +393,26 @@ label {
 
 /* ==================== NAVIGATION ==================== */
 
+.skip-link {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 100;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: var(--border-width) var(--border-style) var(--border-color);
+  color: var(--fg);
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  transform: translateY(-220%);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
 .top-nav {
   position: sticky;
   top: 0;
@@ -479,6 +534,10 @@ label {
 @media (max-width: 600px) {
   .nav-links {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .lead-table {
+    min-width: 100%;
   }
 }
 
@@ -845,10 +904,38 @@ select.input {
   }
 }
 
+/* Sequence Editor Layout */
+.seq-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(240px, 1fr) minmax(320px, 2fr);
+}
+
+.seq-panel {
+  border: 2px solid var(--border-color);
+  padding: 12px;
+  background: var(--bg);
+}
+
+@media (max-width: 960px) {
+  .seq-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Focus States for Accessibility */
 *:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* Scrollbar Styling */

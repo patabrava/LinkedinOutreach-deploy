@@ -14,7 +14,8 @@ export default async function LeadsPage({
     name: (searchParams?.name || "").trim(),
     linkedin: (searchParams?.linkedin || "").trim(),
   };
-  const leads = await fetchLeadList(currentPage, 50, filters);
+  // Slightly larger slice makes the batch dashboard more useful without adding new endpoints.
+  const leads = await fetchLeadList(currentPage, 150, filters);
 
   return (
     <div className="page">
@@ -28,65 +29,54 @@ export default async function LeadsPage({
         }}
       >
         <div style={{ minWidth: 0 }}>
-          <div className="pill">Leads</div>
-          <h1 style={{ margin: "16px 0 8px 0" }}>LEAD INTAKE</h1>
-          <div className="muted">Upload a CSV and review everything that landed.</div>
-          <div style={{ marginTop: 8 }}>
-            <a className="muted" href="/settings">
-              Set LinkedIn credentials →
+          <div className="pill">Batch Dashboard</div>
+          <h1 style={{ margin: "16px 0 8px 0" }}>BATCHES</h1>
+          <div className="muted">
+            Upload leads, pick a batch, then run the next step for that batch intent. Connect-only sends invites without a note. Connect + Message prepares leads for messaging after acceptance.
+          </div>
+          <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 10 }}>
+            <a className="btn secondary" href="/upload">
+              UPLOAD NEW BATCH
+            </a>
+            <a className="btn secondary" href="/settings">
+              SETTINGS
             </a>
           </div>
         </div>
         <div className="card" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16, borderLeft: "none", borderTop: "none", borderBottom: "none" }}>
           <div>
-            <div className="pill">Automation Control</div>
-            <h3 style={{ margin: "12px 0 8px 0" }}>LEAD ENRICHMENT</h3>
-            <div className="muted">
-              Run enrichment in two modes: prepare message drafts (standard) or send a connection request without a
-              note for leads flagged as connect-only.
-            </div>
+            <div className="pill">Next Actions</div>
+            <h3 style={{ margin: "12px 0 8px 0" }}>RUN WHAT’S NEXT</h3>
+            <div className="muted">These actions run across all eligible leads (across batches) for the selected intent.</div>
           </div>
 
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 12,
-              border: "3px solid #000",
-              padding: 16,
-            }}
-          >
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, border: "3px solid #000", padding: 16 }}>
             <div>
-              <strong>STANDARD ENRICHMENT + DRAFTS</strong>
-              <div className="muted" style={{ marginTop: 4 }}>
-                Enrich NEW leads and move them toward draft generation.
-              </div>
+              <strong>CONNECT + MESSAGE</strong>
+              <div className="muted" style={{ marginTop: 4 }}>Step 1: Enrich NEW leads so they’re ready for messaging after acceptance.</div>
             </div>
-            <StartEnrichmentButton mode="message" />
+            <StartEnrichmentButton mode="message" variant="dashboard" />
           </div>
 
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 12,
-              border: "3px solid #000",
-              padding: 16,
-            }}
-          >
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, border: "3px solid #000", padding: 16 }}>
             <div>
-              <strong>ENRICH + CONNECT (NO NOTE)</strong>
-              <div className="muted" style={{ marginTop: 4 }}>
-                Targets leads whose outreach_mode is set to connect_only. After enrichment, a connection
-                request is sent without drafting a message.
-              </div>
+              <strong>CONNECT ONLY</strong>
+              <div className="muted" style={{ marginTop: 4 }}>Send connection requests without a note for connect-only batches.</div>
             </div>
-            <StartEnrichmentButton mode="connect_only" />
+            <StartEnrichmentButton mode="connect_only" variant="dashboard" />
           </div>
 
-          <div className="muted" style={{ marginTop: 4 }}>
-            Manage LinkedIn login & credentials in <a href="/settings">Settings</a>.
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, border: "3px solid #000", padding: 16 }}>
+            <div>
+              <strong>MESSAGING + SEQUENCES</strong>
+              <div className="muted" style={{ marginTop: 4 }}>Review drafts, approvals, and post-acceptance sequences.</div>
+            </div>
+            <a className="btn secondary" href="/">
+              OPEN MESSAGING
+            </a>
           </div>
+
+          <div className="muted" style={{ marginTop: 4 }}>Tip: use the Batch selector below to focus on one upload at a time.</div>
         </div>
       </div>
 

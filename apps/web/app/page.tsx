@@ -1,43 +1,31 @@
 import { DraftFeed } from "../components/DraftFeed";
-import { LeadList } from "../components/LeadList";
 import { SequenceEditor } from "../components/SequenceEditor";
-import { fetchDraftFeed, fetchLeadList, fetchLeadBatches, fetchOutreachSequences } from "./actions";
-import type { OutreachMode } from "../lib/outreachModes";
+import { fetchDraftFeed, fetchLeadBatches, fetchOutreachSequences } from "./actions";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-type PageProps = {
-  searchParams?: {
-    outreachMode?: OutreachMode;
-  };
-};
-
-export default async function MissionControlPage({ searchParams }: PageProps) {
-  const outreachMode: OutreachMode = searchParams?.outreachMode === "message_only" ? "message_only" : "connect_message";
-  const leadStatuses = outreachMode === "message_only"
-    ? ["CONNECT_ONLY_SENT"]
-    : ["ENRICHED", "DRAFT_READY", "APPROVED"];
-
-  const [drafts, leadResult, sequences, batches] = await Promise.all([
-    fetchDraftFeed(outreachMode),
-    fetchLeadList(1, 50, { statuses: leadStatuses }),
+export default async function MissionControlPage() {
+  // Mission Control is intentionally post-acceptance only.
+  // Under the hood, the post-acceptance queue is represented by the "connect_only" mode.
+  const [drafts, sequences, batches] = await Promise.all([
+    fetchDraftFeed("connect_only"),
     fetchOutreachSequences(),
     fetchLeadBatches(),
   ]);
 
   return (
     <div className="page">
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 24, gap: 14 }}>
+      <div style={{ display: "grid", gap: 10, marginBottom: 24, maxWidth: 920 }}>
         <div>
-          <div className="pill">Draft Feed</div>
-          <h1 style={{ margin: "16px 0 8px 0" }}>
-            MISSION CONTROL
-          </h1>
-          <div className="muted">Review, edit, and approve AI-generated outreach.</div>
+          <div className="pill">Mission Control</div>
+          <h1 style={{ margin: "16px 0 8px 0" }}>POST-ACCEPTANCE</h1>
+          <div className="muted">
+            Review and approve messages that go out <strong>after</strong> a connection is accepted, and manage post-acceptance sequences.
+          </div>
           <div style={{ marginTop: 8 }}>
             <a className="muted" href="/leads">
-              View all leads →
+              Lead Intake (batch progress) →
             </a>
           </div>
           <div style={{ marginTop: 4 }}>
@@ -48,16 +36,9 @@ export default async function MissionControlPage({ searchParams }: PageProps) {
         </div>
       </div>
 
-      <SequenceEditor leads={leadResult.leads} sequences={sequences} batches={batches} />
+      <SequenceEditor sequences={sequences} batches={batches} />
 
-      <LeadList
-        leads={leadResult.leads}
-        condensed
-        maxRows={8}
-        initialFilters={{ status: outreachMode === "message_only" ? "CONNECT_ONLY_SENT" : "ENRICHED" }}
-      />
-
-      <DraftFeed drafts={drafts} initialOutreachMode={outreachMode} />
+      <DraftFeed drafts={drafts} variant="mission_control" />
     </div>
   );
 }

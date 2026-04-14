@@ -11,6 +11,7 @@ type LeadFilters = {
   company?: string;
   name?: string;
   linkedin?: string;
+  batch?: string;
 };
 
 type Props = {
@@ -41,8 +42,13 @@ const UNASSIGNED_BATCH = "unassigned";
 const statusClasses: Record<string, string> = {
   NEW: "status-new",
   ENRICHED: "status-enriched",
+  CONNECT_SENT: "status-pending",
+  CONNECT_ONLY_SENT: "status-pending",
+  CONNECTED: "status-approved",
   DRAFT_READY: "status-draft",
   APPROVED: "status-approved",
+  MESSAGE_ONLY_READY: "status-draft",
+  MESSAGE_ONLY_APPROVED: "status-approved",
   REJECTED: "status-rejected",
   SENT: "status-sent",
   PENDING_REVIEW: "status-pending",
@@ -52,13 +58,36 @@ const statusClasses: Record<string, string> = {
 
 const statusOrder: Record<string, number> = {
   NEW: 0,
-  ENRICHED: 1,
-  DRAFT_READY: 2,
-  APPROVED: 3,
-  REJECTED: 4,
+  ENRICHED: 10,
+  CONNECT_SENT: 20,
+  CONNECT_ONLY_SENT: 20,
+  CONNECTED: 30,
+  DRAFT_READY: 40,
+  APPROVED: 50,
+  MESSAGE_ONLY_READY: 60,
+  MESSAGE_ONLY_APPROVED: 70,
+  SENT: 80,
+  REJECTED: 90,
 };
 
-const formatStatus = (status?: string | null) => (status || "NEW").replace(/_/g, " ");
+const STATUS_LABELS: Record<string, string> = {
+  NEW: "New",
+  ENRICHED: "Enriched",
+  CONNECT_SENT: "Invite sent",
+  CONNECT_ONLY_SENT: "Invite sent (no note)",
+  CONNECTED: "Accepted",
+  DRAFT_READY: "Draft ready",
+  APPROVED: "Approved",
+  MESSAGE_ONLY_READY: "Post-acceptance draft ready",
+  MESSAGE_ONLY_APPROVED: "Post-acceptance approved",
+  REJECTED: "Rejected",
+  SENT: "Sent",
+};
+
+const formatStatus = (status?: string | null) => {
+  const key = (status || "NEW").toUpperCase();
+  return STATUS_LABELS[key] || key.replace(/_/g, " ");
+};
 
 const formatDate = (iso?: string | null) => {
   if (!iso) return "—";
@@ -103,6 +132,14 @@ const formatBatchLabel = (batchKey: string): string => {
   return batchKey;
 };
 
+const inferBatchIntent = (label: string): "connect_only" | "connect_message" | null => {
+  const normalized = (label || "").toLowerCase();
+  if (normalized.includes("connect only")) return "connect_only";
+  if (normalized.includes("connect + message")) return "connect_message";
+  if (normalized.includes("connect+message")) return "connect_message";
+  return null;
+};
+
 export function LeadList({
   leads,
   total,
@@ -120,6 +157,7 @@ export function LeadList({
     company: initialFilters?.company || "",
     name: initialFilters?.name || "",
     linkedin: initialFilters?.linkedin || "",
+    batch: "",
   });
   const [sort, setSort] = useState<{ key: SortKey; direction: "asc" | "desc" } | null>(null);
   const [sequenceById, setSequenceById] = useState<Record<string, SequenceDefinition>>({});
@@ -132,12 +170,14 @@ export function LeadList({
         company: initialFilters?.company || "",
         name: initialFilters?.name || "",
         linkedin: initialFilters?.linkedin || "",
+        batch: prev.batch || "",
       };
       const isSame =
         prev.status === next.status &&
         prev.company === next.company &&
         prev.name === next.name &&
-        prev.linkedin === next.linkedin;
+        prev.linkedin === next.linkedin &&
+        prev.batch === next.batch;
       return isSame ? prev : next;
     });
   }, [initialFilters?.status, initialFilters?.company, initialFilters?.name, initialFilters?.linkedin]);
@@ -234,6 +274,7 @@ export function LeadList({
   };
 
   const matchesFilters = (row: ReturnType<typeof mapLeadToRow>) => {
+    if (filters.batch && row.batchKey !== filters.batch) return false;
     if (filters.status && row.status !== filters.status.toUpperCase()) return false;
     if (filters.company && !row.company.toLowerCase().includes(filters.company.toLowerCase())) return false;
     if (filters.linkedin && !row.linkedinUrl.toLowerCase().includes(filters.linkedin.toLowerCase())) return false;
@@ -245,13 +286,17 @@ export function LeadList({
     return true;
   };
 
-  const [rows, setRows] = useState(() => (Array.isArray(leads) ? leads.map(mapLeadToRow) : []));
+  const [allRows, setAllRows] = useState(() => (Array.isArray(leads) ? leads.map(mapLeadToRow) : []));
 
   // Keep local state in sync when server data changes
   useEffect(() => {
     const mapped = Array.isArray(leads) ? leads.map(mapLeadToRow) : [];
-    setRows(mapped.filter(matchesFilters));
-  }, [leads, filters.status, filters.company, filters.linkedin, filters.name]);
+    setAllRows(mapped);
+  }, [leads]);
+
+  const filteredRows = useMemo(() => {
+    return allRows.filter(matchesFilters);
+  }, [allRows, filters.batch, filters.status, filters.company, filters.linkedin, filters.name]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -290,14 +335,14 @@ export function LeadList({
           const updated = payload.new as LeadListRow | null;
           if (!updated) return;
 
-          setRows((current) => {
+          setAllRows((current) => {
             const incoming = mapLeadToRow(updated);
-            if (!matchesFilters(incoming)) {
-              // Remove rows that no longer match filters
-              return current.filter((r) => r.id !== incoming.id);
-            }
             const existingIdx = current.findIndex((row) => row.id === incoming.id);
             if (existingIdx === -1) {
+              if (showPagination) {
+                // Keep paged views stable; don't inject leads that aren't part of the current slice.
+                return current;
+              }
               // Only add new rows to the top if we are showing the newest slice
               const next = [incoming, ...current];
               return typeof maxRows === "number" && maxRows >= 0 ? next.slice(0, maxRows) : next;
@@ -314,10 +359,10 @@ export function LeadList({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [maxRows, filters.status, filters.company, filters.linkedin, filters.name]);
+  }, [maxRows, showPagination]);
 
   const displayRows = useMemo(() => {
-    const working = [...rows];
+    const working = [...filteredRows];
     if (sort) {
       working.sort((a, b) => {
         const aVal = getSortValue(a, sort.key);
@@ -330,21 +375,86 @@ export function LeadList({
       });
     }
     return typeof maxRows === "number" && maxRows >= 0 ? working.slice(0, maxRows) : working;
-  }, [rows, sort, maxRows]);
+  }, [filteredRows, sort, maxRows]);
 
   const shownCount = displayRows.length;
-  const totalCount = rows.length;
+  const totalCount = filteredRows.length;
   const hasData = shownCount > 0;
+
+  const batchOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const row of allRows) {
+      counts.set(row.batchKey, (counts.get(row.batchKey) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([key, count]) => ({ key, label: formatBatchLabel(key), count }));
+  }, [allRows]);
+
+  const selectedBatchLabel = filters.batch ? formatBatchLabel(filters.batch) : "All batches";
+  const selectedIntent = filters.batch ? inferBatchIntent(selectedBatchLabel) : null;
+
+  const statusCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const row of filteredRows) {
+      counts[row.status] = (counts[row.status] || 0) + 1;
+    }
+    return counts;
+  }, [filteredRows]);
+
+  const statusSummary = useMemo(() => {
+    const summarize = (keys: string[]) => keys.reduce((acc, key) => acc + (statusCounts[key] || 0), 0);
+    const invitesSent = summarize(["CONNECT_SENT", "CONNECT_ONLY_SENT"]);
+    const draftsReady = summarize(["DRAFT_READY", "MESSAGE_ONLY_READY"]);
+    const approved = summarize(["APPROVED", "MESSAGE_ONLY_APPROVED"]);
+    return {
+      newCount: statusCounts.NEW || 0,
+      enriched: statusCounts.ENRICHED || 0,
+      invitesSent,
+      accepted: statusCounts.CONNECTED || 0,
+      draftsReady,
+      approved,
+      sent: statusCounts.SENT || 0,
+      failed: statusCounts.FAILED || 0,
+    };
+  }, [statusCounts]);
+
+  const nextStepHint = useMemo(() => {
+    if (!filters.batch) return "Pick a batch to see the most relevant next step.";
+    if (selectedIntent === "connect_only") return "Next step: Send invites (no note).";
+    if (selectedIntent === "connect_message") return "Next step: Run enrichment for Connect + Message.";
+    return "Next step depends on this batch intent (set at upload).";
+  }, [filters.batch, selectedIntent]);
 
   return (
     <section className="card">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-        <div>
-          <div className="pill">Lead Intake</div>
-          <h3 style={{ margin: "12px 0 8px 0" }}>LATEST LEADS</h3>
-          <div className="muted">Newest uploads appear at the top.</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 16, flexWrap: "wrap" }}>
+        <div style={{ minWidth: 260 }}>
+          <div className="pill">Batch Progress</div>
+          <h3 style={{ margin: "12px 0 8px 0" }}>LEADS</h3>
+          <div className="muted">{nextStepHint}</div>
         </div>
-        <div className="muted">
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <label htmlFor="batch-filter" className="muted" style={{ fontSize: 12 }}>
+            Batch
+          </label>
+          <select
+            id="batch-filter"
+            value={filters.batch || ""}
+            onChange={(e) => setFilters((prev) => ({ ...prev, batch: e.target.value }))}
+            className="input"
+            style={{ minWidth: 240, height: 40 }}
+          >
+            <option value="">{`All batches (${allRows.length})`}</option>
+            {batchOptions.map((opt) => (
+              <option key={opt.key} value={opt.key}>
+                {`${opt.label} (${opt.count})`}
+              </option>
+            ))}
+          </select>
+
+          <div className="muted" style={{ whiteSpace: "nowrap" }}>
           {hasData
             ? showPagination && total
               ? `${shownCount} shown • ${total} total`
@@ -352,8 +462,26 @@ export function LeadList({
               ? `${shownCount} shown • ${totalCount} total`
               : `${shownCount} loaded`
             : null}
+          </div>
         </div>
       </div>
+
+      {hasData ? (
+        <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <span className="status-chip">Scope: {selectedBatchLabel}</span>
+          {selectedIntent ? (
+            <span className="status-chip status-approved">Intent: {selectedIntent === "connect_only" ? "Connect Only" : "Connect + Message"}</span>
+          ) : null}
+          <span className="status-chip">New: {statusSummary.newCount}</span>
+          <span className="status-chip">Enriched: {statusSummary.enriched}</span>
+          <span className="status-chip status-pending">Invites sent: {statusSummary.invitesSent}</span>
+          <span className="status-chip status-approved">Accepted: {statusSummary.accepted}</span>
+          <span className="status-chip status-draft">Drafts ready: {statusSummary.draftsReady}</span>
+          <span className="status-chip status-approved">Approved: {statusSummary.approved}</span>
+          <span className="status-chip status-sent">Sent: {statusSummary.sent}</span>
+          {statusSummary.failed ? <span className="status-chip status-failed">Failed: {statusSummary.failed}</span> : null}
+        </div>
+      ) : null}
 
       {hasData ? (
         <div

@@ -4,11 +4,11 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const NAV_ITEMS = [
-  { href: "/", label: "Mission Control", hint: "Drafts & approvals" },
-  { href: "/leads", label: "Leads", hint: "Uploaded pipeline" },
+  { href: "/", label: "Mission Control", hint: "Post-acceptance work" },
+  { href: "/leads", label: "Leads", hint: "Batch progress" },
+  { href: "/upload", label: "Upload", hint: "Batch intake" },
   { href: "/followups", label: "Follow-ups", hint: "Replies & review" },
   { href: "/analytics", label: "Analytics", hint: "Performance metrics" },
-  { href: "/upload", label: "Upload", hint: "CSV intake" },
   { href: "/settings", label: "Settings", hint: "LinkedIn credentials" },
 ];
 
