@@ -1,10 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-
-import { supabaseBrowserClient } from "../lib/supabaseClient";
-
+import { usePathname } from "next/navigation";
 
 const NAV_ITEMS = [
   { href: "/", label: "Mission Control" },
@@ -22,16 +19,6 @@ type NavBarProps = {
 
 export function NavBar({ authenticated = false, email = null }: NavBarProps) {
   const pathname = usePathname();
-  const router = useRouter();
-
-  const handleSignOut = async () => {
-    const supabase = supabaseBrowserClient();
-    if (supabase) {
-      await supabase.auth.signOut();
-    }
-    router.replace("/login");
-    router.refresh();
-  };
 
   return (
     <nav className="top-nav">
@@ -57,19 +44,15 @@ export function NavBar({ authenticated = false, email = null }: NavBarProps) {
               </Link>
             );
           })}
-
-          {authenticated ? (
-            <button type="button" className="nav-link nav-button" onClick={handleSignOut}>
-              <div className="nav-label">Log out</div>
-              <div className="nav-hint">{email || "Supabase session"}</div>
-            </button>
-          ) : (
-            <Link href="/login" className={`nav-link${pathname === "/login" ? " active" : ""}`} prefetch>
-              <div className="nav-label">Log in</div>
-              <div className="nav-hint">Supabase auth</div>
-            </Link>
-          )}
         </div>
+        {authenticated ? (
+          <div className="nav-user">
+            <span className="nav-user-email">{(email ?? "").toUpperCase()}</span>
+            <form action="/logout" method="post">
+              <button type="submit" className="nav-signout">[SIGN OUT]</button>
+            </form>
+          </div>
+        ) : null}
       </div>
     </nav>
   );
