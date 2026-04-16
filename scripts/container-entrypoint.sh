@@ -25,4 +25,9 @@ export WEB_RUNTIME="${WEB_RUNTIME:-prod}"
 export PLAYWRIGHT_BROWSERS_PATH
 export PLAYWRIGHT_BROWSERS_SEED_PATH
 
-exec ./run_all.sh --all
+if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+  exec ./run_all.sh --all
+fi
+
+echo "[entrypoint] Supabase worker env missing; starting web UI only."
+exec ./run_all.sh --web
