@@ -21,6 +21,13 @@
   --border-width: 3px;
   --border-style: solid;
   --border-color: #000000;
+
+  /* Semantic Status Tokens */
+  --success: var(--accent);   /* red = acted / committed */
+  --error: var(--fg);         /* error = solid black; distinct from red */
+
+  /* Neutral palette */
+  --neutral-200: #e0e0e0;
 }
 
 * { 
@@ -91,8 +98,20 @@ h3 {
   gap: 20px;
 }
 
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  gap: 0;
+  align-items: flex-start;
+  margin-bottom: 24px;
+}
+
 @media (max-width: 960px) {
   .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-grid {
     grid-template-columns: 1fr;
   }
 
@@ -107,6 +126,47 @@ h3 {
   border: var(--border-width) var(--border-style) var(--border-color);
   padding: var(--space-md) var(--space-sm) var(--space-lg) var(--space-md);
   margin-bottom: var(--space-md);
+}
+
+/* Action Stack — Next Actions sidebar single bordered container */
+.action-stack {
+  border: var(--border-width) var(--border-style) var(--border-color);
+}
+
+.action-stack__row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: var(--space-md);
+  border-bottom: 2px solid var(--border-color);
+}
+
+.action-stack__row:last-child {
+  border-bottom: none;
+}
+
+.action-stack__row--primary strong {
+  font-size: 16px;
+}
+
+.action-stack__row strong {
+  font-size: 13px;
+}
+
+.action-stack__header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Page/Section Title margin utility */
+.page-title {
+  margin: var(--space-md) 0 var(--space-sm) 0;
+}
+
+/* Section title tight — H3 sub-heads (was 12px 0 8px 0; 12px has no token, rounds to --space-sm) */
+.section-title-tight {
+  margin: var(--space-sm) 0 var(--space-sm) 0;
 }
 
 /* Brutalist Buttons */
@@ -268,8 +328,12 @@ label {
   background: var(--row-alt);
 }
 
-.lead-table tr:hover {
-  background: var(--highlight);
+.lead-table tbody tr {
+  position: relative;
+}
+.lead-table tbody tr:hover {
+  outline: 3px solid var(--fg);
+  outline-offset: -3px;
 }
 
 /* Pills & Status Chips */
@@ -305,13 +369,13 @@ label {
 /* Status Variants */
 .status-new { background: var(--bg); }
 .status-enriched { background: var(--highlight); }
-.status-draft { background: #e0e0e0; }
+.status-draft { background: var(--neutral-200); }
 .status-approved { background: var(--fg); color: var(--bg); border-color: var(--fg); }
-.status-sent { background: var(--accent); color: var(--bg); border-color: var(--accent); }
-.status-rejected { background: var(--accent); color: var(--bg); border-color: var(--accent); }
-.status-pending { background: #e0e0e0; }
+.status-sent { background: var(--success); color: var(--bg); border-color: var(--success); }
+.status-rejected { background: var(--error); color: var(--bg); border-color: var(--error); border-style: dashed; }
+.status-pending { background: var(--neutral-200); }
 .status-processing { background: var(--highlight); }
-.status-failed { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.status-failed { background: var(--error); color: var(--bg); border-color: var(--error); border-style: dashed; }
 
 /* Muted Text */
 .muted {
@@ -366,7 +430,9 @@ label {
 }
 
 .pager-btn {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
   padding: 8px 16px;
   border: var(--border-width) var(--border-style) var(--border-color);
   background: var(--bg);
@@ -489,22 +555,6 @@ label {
   color: var(--bg);
 }
 
-.nav-label {
-  font-weight: 700;
-}
-
-.nav-hint {
-  color: var(--muted);
-  font-size: 9px;
-  letter-spacing: 0.05em;
-  font-weight: 400;
-  text-transform: uppercase;
-}
-
-.nav-link.active .nav-hint {
-  color: var(--bg);
-  opacity: 0.7;
-}
 
 @media (max-width: 1100px) {
   .nav-inner {
@@ -723,7 +773,10 @@ label {
 .funnel__bar {
   height: 100%;
   background: var(--fg);
-  transition: width 0.4s ease;
+  width: 100%;
+  transform-origin: left center;
+  transform: scaleX(var(--bar-scale, 0));
+  transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1); /* ease-out-quart */
 }
 
 .funnel__bar--highlight {
@@ -807,7 +860,7 @@ label {
 }
 
 .daily-chart__bar-value {
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   color: var(--fg);
   min-height: 12px;
@@ -818,7 +871,10 @@ label {
   width: 100%;
   min-height: 2px;
   background: var(--fg);
-  transition: height 0.3s ease;
+  height: 100%;
+  transform-origin: center bottom;
+  transform: scaleY(var(--bar-scale, 0));
+  transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .daily-chart__bar-wrapper:hover .daily-chart__bar {
@@ -826,7 +882,7 @@ label {
 }
 
 .daily-chart__bar-label {
-  font-size: 9px;
+  font-size: 10px;
   color: var(--muted);
   text-align: center;
   text-transform: uppercase;
@@ -899,8 +955,13 @@ select.input {
   }
   
   .nav-link {
-    padding: 12px 8px;
-    font-size: 9px;
+    padding: 12px 10px;
+    min-height: 44px;
+    font-size: 10px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
   }
 }
 

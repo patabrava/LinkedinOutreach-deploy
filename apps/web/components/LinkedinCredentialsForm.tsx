@@ -27,7 +27,7 @@ export function LinkedinCredentialsForm({ existing, useCard = true }: Props) {
   const content = (
     <>
       <div className="pill">LinkedIn Auth</div>
-      <h3 style={{ margin: "12px 0 8px 0" }}>CREDENTIALS</h3>
+      <h3 className="section-title-tight">CREDENTIALS</h3>
       <div className="muted" style={{ marginBottom: 16 }}>
         Stored securely in Supabase settings. Used by the Playwright scraper to log in and cache auth.json.
       </div>

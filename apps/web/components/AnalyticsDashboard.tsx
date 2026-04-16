@@ -1,5 +1,6 @@
 "use client";
 
+import React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import type {
     OutreachAnalytics,
@@ -85,7 +86,7 @@ function ConversionFunnel({ stages }: { stages: FunnelStats["stages"] }) {
                             <div className="funnel__bar-container">
                                 <div
                                     className={`funnel__bar ${i === stages.length - 1 ? "funnel__bar--highlight" : ""}`}
-                                    style={{ width: `${Math.max(widthPercent, 2)}%` }}
+                                    style={{ ["--bar-scale" as string]: Math.max(widthPercent, 2) / 100 } as React.CSSProperties}
                                 />
                             </div>
                             {i > 0 && (
@@ -171,7 +172,7 @@ function DailyChart({
                             <div className="daily-chart__bar-value">{d.value > 0 ? d.value : ""}</div>
                             <div
                                 className="daily-chart__bar"
-                                style={{ height: `${Math.max(height, d.value > 0 ? 8 : 2)}%` }}
+                                style={{ ["--bar-scale" as string]: Math.max(height, d.value > 0 ? 8 : 2) / 100 } as React.CSSProperties}
                             />
                             <div className="daily-chart__bar-label">{d.label}</div>
                         </div>

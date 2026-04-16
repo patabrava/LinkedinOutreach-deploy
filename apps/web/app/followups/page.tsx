@@ -1,5 +1,6 @@
 import { fetchFollowups, triggerInboxScan, triggerFollowupSender } from "../actions";
 import FollowupsList from "../../components/FollowupsList";
+import { TriggerButton } from "../../components/TriggerButton";
 
 export const dynamic = "force-dynamic";
 
@@ -9,12 +10,19 @@ export default async function FollowupsPage() {
     <main className="container">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, gap: 0 }}>
         {/* Server Actions forms */}
-        <form action={triggerInboxScan}>
-          <button className="btn" type="submit">CHECK INBOX</button>
-        </form>
-        <form action={triggerFollowupSender}>
-          <button className="btn secondary" type="submit">SEND APPROVED</button>
-        </form>
+        <TriggerButton
+          action={triggerInboxScan}
+          label="CHECK INBOX"
+          pendingLabel="SCANNING INBOX…"
+          successMessage="Inbox scan started — watch the list for new replies."
+        />
+        <TriggerButton
+          action={triggerFollowupSender}
+          label="SEND APPROVED"
+          pendingLabel="SENDING…"
+          successMessage="Follow-up sender started."
+          variant="secondary"
+        />
       </div>
       <FollowupsList initial={initial} />
     </main>

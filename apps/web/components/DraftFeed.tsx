@@ -449,7 +449,7 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message", var
     return (
       <div className="card" style={{ marginTop: 24 }}>
         <div className="pill">{isMissionControl ? "Post-Acceptance Messaging" : "Messaging"}</div>
-        <h3 style={{ margin: "12px 0 8px 0" }}>
+        <h3 className="section-title-tight">
           {isMissionControl ? "NO POST-ACCEPTANCE MESSAGES YET" : outreachMode === "connect_only" ? "NOTHING TO MESSAGE YET" : "NO DRAFTS YET"}
         </h3>
         <div className="muted">
@@ -500,7 +500,7 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message", var
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
           <div>
             <div className="pill">{isMissionControl ? "Post-Acceptance Messaging" : "Messaging"}</div>
-            <h3 style={{ margin: "12px 0 8px 0" }}>
+            <h3 className="section-title-tight">
               {isMissionControl ? "REVIEW AND APPROVE POST-ACCEPTANCE MESSAGES" : "REVIEW AND APPROVE MESSAGES"}
             </h3>
             <div className="muted">

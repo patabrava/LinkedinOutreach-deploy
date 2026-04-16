@@ -19,19 +19,13 @@ export default async function MissionControlPage() {
       <div style={{ display: "grid", gap: 10, marginBottom: 24, maxWidth: 920 }}>
         <div>
           <div className="pill">Mission Control</div>
-          <h1 style={{ margin: "16px 0 8px 0" }}>POST-ACCEPTANCE</h1>
+          <h1 className="page-title">POST-ACCEPTANCE</h1>
           <div className="muted">
             Review and approve messages that go out <strong>after</strong> a connection is accepted, and manage post-acceptance sequences.
           </div>
-          <div style={{ marginTop: 8 }}>
-            <a className="muted" href="/leads">
-              Lead Intake (batch progress) →
-            </a>
-          </div>
-          <div style={{ marginTop: 4 }}>
-            <a className="muted" href="/settings">
-              Set LinkedIn credentials →
-            </a>
+          <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 10 }}>
+            <a className="btn secondary" href="/leads">LEAD INTAKE</a>
+            <a className="btn secondary" href="/settings">LINKEDIN CREDENTIALS</a>
           </div>
         </div>
       </div>

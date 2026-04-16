@@ -44,6 +44,7 @@ export default function FollowupsList({ initial }: Props) {
   const [genMessage, setGenMessage] = useState<string | null>(null);
   const [bulkPending, setBulkPending] = useState(false);
   const [bulkMessage, setBulkMessage] = useState<string | null>(null);
+  const [hydrationError, setHydrationError] = useState<string | null>(null);
 
   useEffect(() => {
     setRows(initial || []);
@@ -62,6 +63,7 @@ export default function FollowupsList({ initial }: Props) {
           .limit(100);
         if (error) {
           console.warn("Followups client fetch error", error);
+          setHydrationError("Failed to refresh followups — showing server snapshot. See console.");
           return;
         }
         if (data && data.length) {
@@ -69,6 +71,7 @@ export default function FollowupsList({ initial }: Props) {
         }
       } catch (err) {
         console.warn("Followups client fetch failed", err);
+        setHydrationError("Failed to refresh followups — showing server snapshot. See console.");
       }
     })();
   }, []);
@@ -234,7 +237,7 @@ export default function FollowupsList({ initial }: Props) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
         <div>
           <div className="pill">Follow-ups</div>
-          <h3 style={{ margin: "12px 0 8px 0" }}>FOLLOW-UPS NEEDING REVIEW</h3>
+          <h3 className="section-title-tight">FOLLOW-UPS NEEDING REVIEW</h3>
           <div className="muted">Review replies and nudge opportunities, then draft and send your response.</div>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "flex-end" }}>
@@ -275,6 +278,13 @@ export default function FollowupsList({ initial }: Props) {
         </div>
       </div>
 
+      {hydrationError ? (
+        <div className="card" style={{ borderColor: "var(--error)", borderStyle: "dashed", marginBottom: 12 }}>
+          <strong>Warning</strong>
+          <div className="muted">{hydrationError}</div>
+        </div>
+      ) : null}
+
       {rows.length === 0 ? (
         <div className="muted" style={{ marginTop: 16 }}>
           No follow-ups yet.
@@ -291,12 +301,12 @@ export default function FollowupsList({ initial }: Props) {
           <table className="lead-table" style={{ minWidth: 900 }}>
             <thead>
               <tr>
-                <th>LEAD</th>
-                <th>TYPE</th>
-                <th>MESSAGE</th>
-                <th>STATUS</th>
-                <th>DRAFT</th>
-                <th style={{ width: 180 }}>ACTIONS</th>
+                <th scope="col">LEAD</th>
+                <th scope="col">TYPE</th>
+                <th scope="col">MESSAGE</th>
+                <th scope="col">STATUS</th>
+                <th scope="col">DRAFT</th>
+                <th scope="col" style={{ width: 180 }}>ACTIONS</th>
               </tr>
             </thead>
             <tbody>
