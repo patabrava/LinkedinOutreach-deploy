@@ -27,30 +27,9 @@ services:
       retries: 3
       start_period: 90s
 
-  proxy:
-    build:
-      context: .
-      dockerfile: docker/proxy.Dockerfile
-    restart: unless-stopped
-    depends_on:
-      app:
-        condition: service_healthy
-    env_file:
-      - .env
-    environment:
-      DOMAIN: ${DOMAIN:-localhost}
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - caddy_data:/data
-      - caddy_config:/config
-
 volumes:
   scraper_auth:
   sender_auth:
   playwright_cache:
   app_home:
   app_logs:
-  caddy_data:
-  caddy_config:
