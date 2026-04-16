@@ -55,3 +55,4 @@ supabase/.temp/
 
 # Local data artifacts
 enriched_contacts.csv
+.worktrees/
