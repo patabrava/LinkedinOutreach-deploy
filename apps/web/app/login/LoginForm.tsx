@@ -20,6 +20,8 @@ function statusLine(state: LoginState, queryError: string | null): string {
   if (state.status === "ok") return "IF ALLOWED, A LINK WAS SENT.";
   if (state.status === "error" && state.code === "AUTH_UNREACHABLE") return "AUTH SYSTEM UNREACHABLE";
   if (state.status === "error" && state.code === "INVALID_EMAIL") return "INVALID EMAIL";
+  if (state.status === "error" && state.code === "RATE_LIMITED")
+    return "TOO MANY ATTEMPTS. WAIT ~1H OR TRY ANOTHER ALLOWED EMAIL.";
   if (queryError === "denied") return "ACCESS DENIED.";
   if (queryError === "expired") return "LINK EXPIRED. REQUEST A NEW ONE.";
   return "";
