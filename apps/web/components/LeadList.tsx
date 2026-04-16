@@ -494,7 +494,7 @@ export function LeadList({
     const invitesSent = allRows.filter((row) => row.connectionSentAt).length;
     const accepted = allRows.filter((row) => row.connectionAcceptedAt).length;
     const draftsReady = (statusCounts.DRAFT_READY || 0) + (statusCounts.MESSAGE_ONLY_READY || 0);
-    const approved = statusCounts.APPROVED || statusCounts.MESSAGE_ONLY_APPROVED || 0;
+    const approved = (statusCounts.APPROVED || 0) + (statusCounts.MESSAGE_ONLY_APPROVED || 0);
     return {
       newCount: statusCounts.NEW || 0,
       enriched: statusCounts.ENRICHED || 0,
