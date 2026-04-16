@@ -7,7 +7,7 @@ import { supabaseServerAction } from "../../lib/supabaseServer";
 export type LoginState =
   | { status: "idle" }
   | { status: "ok" }
-  | { status: "error"; code: "AUTH_UNREACHABLE" | "INVALID_EMAIL" };
+  | { status: "error"; code: "AUTH_UNREACHABLE" | "INVALID_EMAIL" | "RATE_LIMITED" };
 
 export async function requestMagicLink(
   _prev: LoginState,
@@ -44,6 +44,10 @@ export async function requestMagicLink(
 
   if (error) {
     console.error("[auth] signInWithOtp failed", error.message);
+    const msg = error.message.toLowerCase();
+    if (error.status === 429 || msg.includes("rate limit")) {
+      return { status: "error", code: "RATE_LIMITED" };
+    }
     return { status: "error", code: "AUTH_UNREACHABLE" };
   }
 
