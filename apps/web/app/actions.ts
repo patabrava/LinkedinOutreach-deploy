@@ -9,6 +9,7 @@ import { logger } from "../lib/logger";
 import type { OutreachMode } from "../lib/outreachModes";
 import { normalizeOutreachMode, OUTREACH_MODE_TO_DB } from "../lib/outreachModes";
 import type { PromptType } from "../lib/promptTypes";
+import { validateSequencePlaceholdersByField } from "../lib/sequencePlaceholders";
 import { supabaseAdmin } from "../lib/supabaseAdmin";
 
 type DraftInput = {
@@ -411,7 +412,6 @@ export async function saveOutreachSequence(input: {
   third_message: string;
   followup_interval_days: number;
 }) {
-  const client = supabaseAdmin();
   const payload = {
     name: input.name.trim(),
     first_message: input.first_message.trim(),
@@ -419,6 +419,41 @@ export async function saveOutreachSequence(input: {
     third_message: input.third_message.trim(),
     followup_interval_days: input.followup_interval_days,
   };
+
+  const placeholderValidation = validateSequencePlaceholdersByField({
+    first_message: payload.first_message,
+    second_message: payload.second_message,
+    third_message: payload.third_message,
+  });
+
+  if (!placeholderValidation.isValid) {
+    const details = {
+      code: "SEQUENCE_PLACEHOLDER_VALIDATION_FAILED",
+      message: "Sequence contains unsupported placeholders.",
+      field_errors: placeholderValidation.errors.map((entry) => ({
+        field: entry.fieldKey,
+        invalid_tokens: entry.invalidTokens,
+        allowed_tokens: entry.allowedTokens,
+      })),
+      allowed_tokens: placeholderValidation.allowedTokens,
+    };
+    logger.warn("saveOutreachSequence placeholder validation failed", {
+      sequenceId: input.id ?? null,
+      fieldCount: details.field_errors.length,
+      invalidByField: details.field_errors,
+    });
+    const validationError = new Error(details.message) as Error & {
+      code?: string;
+      details?: typeof details;
+    };
+    validationError.name = "SequencePlaceholderValidationError";
+    validationError.code = details.code;
+    validationError.details = details;
+    validationError.message = JSON.stringify(details);
+    throw validationError;
+  }
+
+  const client = supabaseAdmin();
   const { data, error } = await client
     .from("outreach_sequences")
     .upsert(input.id ? { id: input.id, ...payload } : payload)
