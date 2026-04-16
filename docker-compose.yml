@@ -12,8 +12,8 @@ services:
       WEB_RUNTIME: prod
       PORT: "3000"
     shm_size: "1gb"
-    expose:
-      - "3000"
+    ports:
+      - "3000:3000"
     volumes:
       - scraper_auth:/data/scraper
       - sender_auth:/data/sender
