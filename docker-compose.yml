@@ -1,0 +1,55 @@
+services:
+  app:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      HOME: /data/home
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      WEB_RUNTIME: prod
+      PORT: "3000"
+    shm_size: "1gb"
+    expose:
+      - "3000"
+    volumes:
+      - scraper_auth:/data/scraper
+      - sender_auth:/data/sender
+      - playwright_cache:/ms-playwright
+      - app_home:/data/home
+      - app_logs:/app/.logs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/api/health >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+  proxy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  scraper_auth:
+  sender_auth:
+  playwright_cache:
+  app_home:
+  app_logs:
+  caddy_data:
+  caddy_config:
