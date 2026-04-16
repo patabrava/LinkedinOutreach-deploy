@@ -1,6 +1,6 @@
 import { LeadList } from "../../components/LeadList";
 import { StartEnrichmentButton } from "../../components/StartEnrichmentButton";
-import { fetchLeadList } from "../actions";
+import { fetchLeadList, triggerFollowupSender } from "../actions";
 
 export default async function LeadsPage({
   searchParams,
@@ -74,6 +74,18 @@ export default async function LeadsPage({
             <a className="btn secondary" href="/">
               OPEN MESSAGING
             </a>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, border: "3px solid #000", padding: 16 }}>
+            <div>
+              <strong>DUE FOLLOW-UPS</strong>
+              <div className="muted" style={{ marginTop: 4 }}>Manually run sender for follow-ups that are due now.</div>
+            </div>
+            <form action={triggerFollowupSender}>
+              <button className="btn secondary" type="submit">
+                SEND DUE FOLLOW-UPS
+              </button>
+            </form>
           </div>
 
           <div className="muted" style={{ marginTop: 4 }}>Tip: use the Batch selector below to focus on one upload at a time.</div>

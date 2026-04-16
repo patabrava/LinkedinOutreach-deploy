@@ -30,6 +30,7 @@ AUTH_STATE_PATH = (Path(__file__).parent.parent / "scraper" / "auth.json").resol
 DAILY_SEND_DEFAULT = 100
 SEQUENCE_INTERVAL_DEFAULT_DAYS = 3
 LEAD_MESSAGE_ONLY_MAX_RETRIES = 3
+FOLLOWUP_PROCESSING_STALE_MINUTES = 45
 SEQUENCE_DEFAULT_MESSAGES = {
     "first_message": (
         "Hi {first_name},\n\n"
@@ -1086,18 +1087,48 @@ def fetch_approved_followups(
     """Fetch APPROVED followups that are due and mark them PROCESSING."""
     now_utc = _utc_now()
     logger.db_query("select", "followups", {"status": "APPROVED", "limit": limit})
-    resp = (
-        client.table("followups")
-        .select(
-            "id, lead_id, status, followup_type, attempt, draft_text, sent_text, next_send_at, "
-            "last_message_text, last_message_from, updated_at, "
-            "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at)"
+    try:
+        resp = (
+            client.table("followups")
+            .select(
+                "id, lead_id, status, followup_type, attempt, draft_text, sent_text, next_send_at, "
+                "last_message_text, last_message_from, updated_at, "
+                "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step)"
+            )
+            .eq("status", "APPROVED")
+            .order("updated_at", desc=True)
+            .limit(max(limit * 5, limit))
+            .execute()
         )
-        .eq("status", "APPROVED")
-        .order("updated_at", desc=True)
-        .limit(max(limit * 5, limit))
-        .execute()
-    )
+    except Exception:
+        # Legacy schemas may miss `attempt` but still include `followup_type`.
+        try:
+            resp = (
+                client.table("followups")
+                .select(
+                    "id, lead_id, status, followup_type, draft_text, sent_text, next_send_at, "
+                    "last_message_text, last_message_from, updated_at, "
+                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step)"
+                )
+                .eq("status", "APPROVED")
+                .order("updated_at", desc=True)
+                .limit(max(limit * 5, limit))
+                .execute()
+            )
+        except Exception:
+            # Last-resort legacy fallback.
+            resp = (
+                client.table("followups")
+                .select(
+                    "id, lead_id, status, draft_text, sent_text, next_send_at, "
+                    "last_message_text, last_message_from, updated_at, "
+                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step)"
+                )
+                .eq("status", "APPROVED")
+                .order("updated_at", desc=True)
+                .limit(max(limit * 5, limit))
+                .execute()
+            )
     rows = resp.data or []
     logger.db_result("select", "followups", {"status": "APPROVED"}, len(rows))
 
@@ -1133,6 +1164,54 @@ def fetch_approved_followups(
     return selected
 
 
+def recover_stale_processing_followups(
+    client: Client,
+    stale_minutes: int = FOLLOWUP_PROCESSING_STALE_MINUTES,
+    limit: int = 200,
+) -> int:
+    """Recover followups stuck in PROCESSING beyond the stale threshold."""
+    stale_cutoff = (_utc_now() - timedelta(minutes=max(1, stale_minutes))).isoformat()
+    query_meta = {"status": "PROCESSING", "stale_before": stale_cutoff, "limit": limit}
+    logger.db_query("select", "followups", query_meta)
+    try:
+        resp = (
+            client.table("followups")
+            .select("id, processing_started_at")
+            .eq("status", "PROCESSING")
+            .lt("processing_started_at", stale_cutoff)
+            .order("processing_started_at", desc=False)
+            .limit(max(1, limit))
+            .execute()
+        )
+    except Exception as e:
+        logger.warn("Skipping stale followup recovery (query failed)", data=query_meta, error=e)
+        return 0
+
+    rows = resp.data or []
+    logger.db_result("select", "followups", query_meta, len(rows))
+    recovered = 0
+    for row in rows:
+        followup_id = row.get("id")
+        if not followup_id:
+            continue
+        try:
+            revert_followup_to_approved(client, followup_id)
+            recovered += 1
+        except Exception as e:
+            logger.warn(
+                "Failed to recover stale PROCESSING followup",
+                {"followupId": followup_id},
+                error=e,
+            )
+
+    if recovered:
+        logger.info(
+            "Recovered stale PROCESSING followups",
+            data={"count": recovered, "threshold_minutes": stale_minutes},
+        )
+    return recovered
+
+
 def fetch_next_followup(client: Client) -> Optional[Dict[str, Any]]:
     """Legacy single-fetch; returns first APPROVED followup."""
     followups = fetch_approved_followups(client, 1)
@@ -1140,26 +1219,22 @@ def fetch_next_followup(client: Client) -> Optional[Dict[str, Any]]:
 
 
 def sanitize_followup_message(text: str) -> str:
-    """Apply safety filters: remove dashes/apostrophes, enforce char limit."""
+    """Apply safety filters for direct-message followups without invite-note truncation."""
     if not text:
         return ""
     # Remove dashes and apostrophes (same as outreach no-dash rule)
     sanitized = re.sub(r"[\-\u2010-\u2015\u2212]+", " ", text)
     sanitized = re.sub(r"['`\u2018\u2019]+", " ", sanitized)
-    sanitized = sanitized.replace("\n", " ").replace("\r", " ")
-    sanitized = re.sub(r" {2,}", " ", sanitized).strip()
-    
-    # Hard cap at 300 characters
-    if len(sanitized) > 300:
-        logger.warn("Followup message exceeded 300 chars, truncating", data={"original": len(sanitized)})
-        # Truncate at word boundary
-        candidate = sanitized[:297].rstrip()
-        space_idx = candidate.rfind(" ")
-        if space_idx >= 150:
-            candidate = candidate[:space_idx]
-        candidate = candidate.rstrip(" ,.;:-")
-        sanitized = f"{candidate}..."
-    
+    sanitized = sanitized.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t]{2,}", " ", line).strip() for line in sanitized.splitlines()]
+    sanitized = "\n".join(lines).strip()
+
+    # Direct LinkedIn messages support significantly more than invite notes.
+    # Keep a generous safety cap to avoid pathological payloads.
+    if len(sanitized) > 2000:
+        logger.warn("Followup message exceeded 2000 chars, truncating", data={"original": len(sanitized)})
+        sanitized = _hard_cap_text(sanitized, 2000)
+
     return sanitized
 
 
@@ -1169,7 +1244,52 @@ def build_followup_message(fu: Dict[str, Any]) -> str:
     return sanitize_followup_message(raw_msg)
 
 
-def mark_followup_sent(client: Client, followup_id: str, message: str, followup: Optional[Dict[str, Any]] = None) -> None:
+def _next_sequence_step_for_nudge(followup: Dict[str, Any]) -> Optional[int]:
+    if (str(followup.get("followup_type") or "").upper() != "NUDGE"):
+        return None
+    # Prefer explicit attempt mapping when available.
+    explicit = _step_from_followup(followup.get("followup_type"), followup.get("attempt"))
+    if explicit is not None:
+        return explicit
+    lead = followup.get("lead") or {}
+    current_step = _safe_int(lead.get("sequence_step"), 0)
+    if current_step <= 1:
+        return 2
+    if current_step == 2:
+        return 3
+    return 3
+
+
+def resolve_followup_message(client: Client, followup: Dict[str, Any]) -> Tuple[str, Optional[int], str]:
+    """Resolve followup text with sequence-aware message selection for NUDGE flows."""
+    default_message = build_followup_message(followup)
+    followup_type = str(followup.get("followup_type") or "").upper()
+    if followup_type != "NUDGE":
+        return default_message, None, "followup_draft_text"
+
+    lead = followup.get("lead") or {}
+    if not isinstance(lead, dict) or not lead.get("id"):
+        return default_message, None, "followup_draft_text_no_lead"
+
+    next_step = _next_sequence_step_for_nudge(followup)
+    if next_step not in (2, 3):
+        return default_message, None, "followup_draft_text_unknown_step"
+
+    sequence_messages = load_sequence_messages(client, lead)
+    message_key = "second_message" if next_step == 2 else "third_message"
+    candidate = sanitize_followup_message(str(sequence_messages.get(message_key) or ""))
+    if candidate:
+        return candidate, next_step, f"sequence_template:{message_key}"
+    return default_message, next_step, "followup_draft_text_empty_template"
+
+
+def mark_followup_sent(
+    client: Client,
+    followup_id: str,
+    message: str,
+    followup: Optional[Dict[str, Any]] = None,
+    sequence_step: Optional[int] = None,
+) -> None:
     now_iso = datetime.utcnow().isoformat()
     logger.db_query("update", "followups", {"followupId": followup_id}, {"status": "SENT"})
     client.table("followups").update(
@@ -1177,10 +1297,11 @@ def mark_followup_sent(client: Client, followup_id: str, message: str, followup:
     ).eq("id", followup_id).execute()
 
     lead_id: Optional[str] = None
-    step_to_set: Optional[int] = None
+    step_to_set: Optional[int] = sequence_step
     if isinstance(followup, dict):
         lead_id = str(followup.get("lead_id") or "") or None
-        step_to_set = _step_from_followup(followup.get("followup_type"), followup.get("attempt"))
+        if step_to_set is None:
+            step_to_set = _next_sequence_step_for_nudge(followup)
 
     if lead_id:
         lead_update: Dict[str, Any] = {
@@ -1353,7 +1474,7 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
         mark_followup_failed(client, followup_id, error_msg, permanent=True)
         return "failed"
 
-    message = build_followup_message(followup)
+    message, resolved_step, source = resolve_followup_message(client, followup)
     if not message:
         error_msg = "Followup has no draft_text to send"
         logger.error(error_msg, {"followupId": followup_id})
@@ -1361,7 +1482,11 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
         return "failed"
 
     logger.message_send_start(lead_id or "unknown", {"followupId": followup_id}, message)
-    logger.debug(f"Followup message preview", {"followupId": followup_id}, {"message": message[:100], "length": len(message)})
+    logger.debug(
+        f"Followup message preview",
+        {"followupId": followup_id},
+        {"message": message[:100], "length": len(message), "source": source, "resolvedStep": resolved_step},
+    )
 
     page = await context.new_page()
     try:
@@ -1371,10 +1496,14 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
         
         surface = await open_message_surface(page)
         logger.debug(f"Message surface opened for followup", {"followupId": followup_id}, {"surface": surface})
+        if surface != "message":
+            raise RuntimeError(
+                f"Followup requires direct-message surface only; got non-sendable surface '{surface}'"
+            )
 
         await send_message(page, message, surface)
         await page.close()
-        mark_followup_sent(client, followup_id, message, followup)
+        mark_followup_sent(client, followup_id, message, followup, sequence_step=resolved_step)
 
         logger.message_send_complete(lead_id or "unknown", {"followupId": followup_id})
         logger.info(f"Followup sent successfully", {"followupId": followup_id, "leadId": lead_id})
@@ -1806,6 +1935,7 @@ async def main() -> None:
 
         if args.followup:
             # Process a batch of approved followups with proper status tracking
+            recover_stale_processing_followups(client)
             batch_limit = min(20, max(1, daily_limit - already_sent))
             items = fetch_approved_followups(client, batch_limit)
             

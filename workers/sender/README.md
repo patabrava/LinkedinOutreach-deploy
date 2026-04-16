@@ -10,12 +10,20 @@ Simulates human typing to send approved drafts on LinkedIn.
 ## Usage
 - `python sender.py` pulls one `APPROVED` lead, opens the profile, composes the message with per-character typing, and marks the row as `SENT`.
 - `python sender.py --message-only` checks connect-only leads, detects accepted invites, sends sequence step 1, and schedules step 2/3 followups.
+- `python sender.py --followup` processes due `APPROVED` followups, first recovering stale `PROCESSING` rows older than 45 minutes.
 
 Production polling loop (15 minutes):
 
 ```bash
 cd /Users/camiloecheverri/Documents/AI/Linkedin\ Scraper/LinkedinOutreach/workers/sender
 while true; do python sender.py --message-only; sleep 900; done
+```
+
+Follow-up polling loop (15 minutes):
+
+```bash
+cd /Users/camiloecheverri/Documents/AI/Linkedin\ Scraper/LinkedinOutreach/workers/sender
+while true; do python sender.py --followup; sleep 900; done
 ```
 
 Limits to respect:

@@ -98,7 +98,7 @@ prepare_web_runtime() {
 
 usage() {
   cat <<'EOF'
-Usage: ./run_all.sh [--web] [--agent] [--sender] [--message-only] [--all]
+Usage: ./run_all.sh [--web] [--agent] [--sender] [--message-only] [--followup] [--all]
 
 Defaults to launching only the web UI to reduce LinkedIn surface area. Add flags to
 opt-in other workers:
@@ -106,6 +106,7 @@ opt-in other workers:
   --agent     Start the MCP agent (generates drafts from ENRICHED leads)
   --sender    Start the sender (connect + send APPROVED drafts)
   --message-only  Start message-only sender poller (checks CONNECT_ONLY_SENT every 15m)
+  --followup  Start follow-up sender poller (checks APPROVED followups every 15m)
   --all       Start all of the above
 EOF
 }
@@ -114,6 +115,7 @@ START_WEB=0
 START_AGENT=0
 START_SENDER=0
 START_MESSAGE_ONLY=0
+START_FOLLOWUP=0
 
 if [ $# -eq 0 ]; then
   # Safer default: only start the web UI unless explicitly requested.
@@ -125,7 +127,8 @@ else
       --agent) START_AGENT=1 ;;
       --sender) START_SENDER=1 ;;
       --message-only) START_MESSAGE_ONLY=1 ;;
-      --all) START_WEB=1; START_AGENT=1; START_SENDER=1; START_MESSAGE_ONLY=1 ;;
+      --followup) START_FOLLOWUP=1 ;;
+      --all) START_WEB=1; START_AGENT=1; START_SENDER=1; START_MESSAGE_ONLY=1; START_FOLLOWUP=1 ;;
       -h|--help) usage; exit 0 ;;
       *)
         echo "Unknown option: $1"
@@ -190,6 +193,17 @@ else
   echo "[sender_message_only] ⏭ Skipping (enable with --message-only or --all)."
 fi
 
+# Follow-up sender poller (checks approved followups and sends nudges)
+if [ "$START_FOLLOWUP" -eq 1 ]; then
+  if [ -f "$ROOT_DIR/workers/sender/auth.json" ]; then
+    run_service "sender_followup" "cd '$ROOT_DIR/workers/sender' && source venv/bin/activate && while true; do python -u sender.py --followup; sleep 900; done"
+  else
+    echo "[sender_followup] ⏭ Skipping start (missing workers/sender/auth.json)."
+  fi
+else
+  echo "[sender_followup] ⏭ Skipping (enable with --followup or --all)."
+fi
+
 # Web UI (Mission Control dashboard)
 if [ "$START_WEB" -eq 1 ]; then
   prepare_web_runtime
@@ -203,6 +217,7 @@ cat <<'EOF'
   - Scraper  (logs: .logs/scraper.log)
   - Agent    (logs: .logs/agent.log)
   - Sender   (logs: .logs/sender.log)
+  - Sender Followup Poller (logs: .logs/sender_followup.log)
   - Web UI   (logs: .logs/web.log)
 
 Press Ctrl+C to stop everything.
