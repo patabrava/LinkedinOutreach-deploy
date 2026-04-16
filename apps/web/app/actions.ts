@@ -1020,6 +1020,62 @@ export async function sendAllApproved(outreachMode: OutreachMode = "connect_mess
   return { senderTriggered };
 }
 
+export async function sendFirstMessagesForBatch(batchId: number) {
+  const correlationId = logger.actionStart("sendFirstMessagesForBatch", {}, { batchId });
+  let senderTriggered = false;
+  let eligibleCount = 0;
+
+  try {
+    if (!Number.isFinite(batchId) || batchId <= 0) {
+      throw new Error("Invalid batch id.");
+    }
+
+    const client = supabaseAdmin();
+    const { count, error: countError } = await client
+      .from("leads")
+      .select("id", { count: "exact", head: true })
+      .eq("batch_id", batchId)
+      .eq("outreach_mode", OUTREACH_MODE_TO_DB.connect_only)
+      .in("status", ["CONNECT_ONLY_SENT", "CONNECTED", "MESSAGE_ONLY_READY", "MESSAGE_ONLY_APPROVED"]);
+
+    if (countError) {
+      logger.error("Failed to count eligible message-only leads for batch", { correlationId, batchId }, countError);
+      throw countError;
+    }
+
+    eligibleCount = count || 0;
+
+    const repoRoot = path.resolve(process.cwd(), "..", "..");
+    const senderDir = path.resolve(repoRoot, "workers", "sender");
+    const senderPath = path.join(senderDir, "sender.py");
+    const venvPython = path.join(senderDir, "venv", "bin", "python");
+    const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
+    const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
+    const execToUse = pythonExec;
+    const args = [senderPath, "--message-only", "--batch-id", String(batchId)];
+
+    logger.workerSpawn("sender", args, { correlationId, batchId, eligibleCount, mode: "connect_only" });
+
+    const proc = spawn(execToUse, args, {
+      cwd: repoRoot,
+      stdio: ["ignore", "inherit", "inherit"],
+      detached: true,
+      env: { ...process.env, CORRELATION_ID: correlationId },
+    });
+    proc.unref();
+    senderTriggered = true;
+    logger.info("Sender worker triggered for batch first-messages", { correlationId, batchId, eligibleCount, pid: proc.pid });
+  } catch (err: any) {
+    logger.error("sendFirstMessagesForBatch error", { correlationId, batchId }, err);
+    throw err;
+  } finally {
+    revalidatePath("/");
+    revalidatePath("/leads");
+  }
+
+  return { senderTriggered, eligibleCount, batchId };
+}
+
 export async function approveDraft(input: DraftInput) {
   const correlationId = logger.actionStart("approveDraft", { leadId: input.leadId, draftId: input.draftId?.toString() }, input);
   const mode: OutreachMode = normalizeOutreachMode(input.outreachMode ?? "connect_message");

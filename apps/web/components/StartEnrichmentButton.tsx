@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { sendAllApproved } from "../app/actions";
 import { supabaseBrowserClient } from "../lib/supabaseClient";
 
 type StatusCounts = Record<string, number>;
@@ -69,6 +70,7 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
   const [statusLoading, setStatusLoading] = useState<boolean>(false);
   const [polling, setPolling] = useState<boolean>(false);
   const [stopping, setStopping] = useState<boolean>(false);
+  const [messageOnlySending, setMessageOnlySending] = useState<boolean>(false);
   const modeConfig = MODE_CONFIG[mode];
 
   const refreshStatus = useCallback(async ({ silent = false } = {}) => {
@@ -218,6 +220,26 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
     }
   };
 
+  const triggerMessageOnlySender = async () => {
+    if (mode !== "connect_only") return;
+    setMessageOnlySending(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await sendAllApproved("connect_only");
+      if (!result?.senderTriggered) {
+        throw new Error("Failed to trigger message sender.");
+      }
+      setMessage("Message sender triggered for accepted friend requests.");
+      setPolling(true);
+      await refreshStatus({ silent: true });
+    } catch (e: any) {
+      setError(e?.message || "Unable to trigger message sender.");
+    } finally {
+      setMessageOnlySending(false);
+    }
+  };
+
   const dashboardSummary = useMemo(() => {
     if (!status) return "";
     const completed = typeof status.completedToday === "number" ? status.completedToday : status.completed;
@@ -263,6 +285,18 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
           </button>
         ) : null}
       </div>
+      {mode === "connect_only" ? (
+        <button
+          onClick={triggerMessageOnlySender}
+          disabled={messageOnlySending}
+          className="btn secondary"
+          style={{ marginTop: 8, width: "100%" }}
+        >
+          {messageOnlySending
+            ? "STARTING…"
+            : "SEND MESSAGE AFTER FRIEND REQUEST ACCEPTANCE"}
+        </button>
+      ) : null}
 
       {message ? (
         <div style={{ marginTop: 12, fontSize: 12, color: "var(--muted)" }}>{message}</div>

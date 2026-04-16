@@ -28,10 +28,39 @@ logger = get_logger("sender")
 AUTH_STATE_PATH = (Path(__file__).parent.parent / "scraper" / "auth.json").resolve()
 DAILY_SEND_DEFAULT = 100
 SEQUENCE_INTERVAL_DEFAULT_DAYS = 3
+LEAD_MESSAGE_ONLY_MAX_RETRIES = 3
 SEQUENCE_DEFAULT_MESSAGES = {
-    "first_message": "Freut mich auf den Austausch.",
-    "second_message": "Kurzer Ping falls es untergegangen ist. Ist das Thema aktuell relevant fuer dich?",
-    "third_message": "Letzter kurzer Ping von mir. Wenn es gerade nicht passt ist das auch ok.",
+    "first_message": (
+        "Hi {first_name},\n\n"
+        "freut mich, dass wir uns hier vernetzen.\n\n"
+        "Ich bin Katharina von Degura, du hattest deine betriebliche Altersvorsorge damals über uns eingerichtet.\n\n"
+        "Ich melde mich kurz, weil wir bei vielen ehemaligen Degura Kunden sehen, dass nach einem Arbeitgeberwechsel staatliche Förderung "
+        "und Arbeitgeberzuschüsse nicht mehr genutzt werden, obwohl sie einem weiterhin zustehen.\n\n"
+        "Wie ist es bei dir mit der bAV weitergegangen? Läuft der Vertrag noch?\n\n"
+        "Falls du magst, können wir uns das auch gerne kurz gemeinsam anschauen, dauert nur ein paar Minuten.\n\n"
+        "Viele Grüße,\nKatharina"
+    ),
+    "second_message": (
+        "Hi {first_name},\n\n"
+        "nur ein kurzer Followup zu meiner letzten Nachricht.\n\n"
+        "Der Grund, warum mir das Thema wichtig ist: Wenn dein Vertrag beitragsfrei liegt, verzichtest du aktuell auf den Arbeitgeberzuschuss "
+        "und die steuerliche Förderung, die dir beim neuen Arbeitgeber zustehen.\n\n"
+        "Das ist bares Geld, das du jeden Monat liegen lässt.\n\n"
+        "Sollen wir da einmal kurz gemeinsam reinschauen?\n\n"
+        "Viele Grüße,\nKatharina"
+    ),
+    "third_message": (
+        "Hi {first_name},\n\n"
+        "letzte kurze Nachricht von meiner Seite.\n\n"
+        "Dir stehen aktuell vermutlich drei Dinge zu, die du nicht nutzt:\n\n"
+        "Arbeitgeberzuschuss (mindestens 15%, oft mehr)\n"
+        "Steuerliche Förderung (Beitrag aus dem Brutto)\n"
+        "Sozialversicherungsersparnis\n\n"
+        "Und noch ein kurzer Ausblick: Ab 2027 kommt das neue Altersvorsorgedepot. Degura wird das ab dem ersten Tag anbieten, "
+        "als zentrale Plattform für deine komplette Vorsorge, egal bei welchem Arbeitgeber.\n\n"
+        "Falls du Lust hast, das einmal kurz anzuschauen, ich freue mich auf den Austausch.\n\n"
+        "Viele Grüße,\nKatharina"
+    ),
 }
 
 
@@ -149,54 +178,61 @@ def fetch_approved_leads(client: Client, limit: int) -> list[Dict[str, Any]]:
 
 MESSAGE_ONLY_PIPELINE_STATUSES = [
     "CONNECT_ONLY_SENT",
+    "CONNECTED",
     "MESSAGE_ONLY_READY",
     "MESSAGE_ONLY_APPROVED",
 ]
 
 
-def fetch_message_only_leads(client: Client, limit: int) -> list[Dict[str, Any]]:
+def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int] = None) -> list[Dict[str, Any]]:
     """Fetch leads eligible for message-only sending (pending or approved)."""
     select_fields_extended = (
         "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
         "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
-        "sequence_id, csv_batch_id, outreach_mode, profile_data, ai_tags"
+        "sequence_id, sequence_step, sequence_started_at, sequence_last_sent_at, "
+        "csv_batch_id, outreach_mode, profile_data, ai_tags"
     )
     select_fields_legacy = (
         "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
         "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
         "outreach_mode, profile_data, ai_tags"
     )
-    logger.db_query(
-        "select",
-        "leads",
-        {"status": MESSAGE_ONLY_PIPELINE_STATUSES, "outreach_mode": "connect_only", "limit": limit},
-    )
+    query_meta: Dict[str, Any] = {
+        "status": MESSAGE_ONLY_PIPELINE_STATUSES,
+        "outreach_mode": "connect_only",
+        "limit": limit,
+    }
+    if batch_id is not None:
+        query_meta["batch_id"] = batch_id
+    logger.db_query("select", "leads", query_meta)
     try:
-        resp = (
+        query = (
             client.table("leads")
             .select(select_fields_extended)
             .in_("status", MESSAGE_ONLY_PIPELINE_STATUSES)
             .eq("outreach_mode", "connect_only")
             .order("updated_at", desc=True)
-            .limit(limit)
-            .execute()
         )
+        if batch_id is not None:
+            query = query.eq("batch_id", batch_id)
+        resp = query.limit(limit).execute()
     except Exception:
-        resp = (
+        query = (
             client.table("leads")
             .select(select_fields_legacy)
             .in_("status", MESSAGE_ONLY_PIPELINE_STATUSES)
             .eq("outreach_mode", "connect_only")
             .order("updated_at", desc=True)
-            .limit(limit)
-            .execute()
         )
+        if batch_id is not None:
+            query = query.eq("batch_id", batch_id)
+        resp = query.limit(limit).execute()
     rows = resp.data or []
-    logger.db_result("select", "leads", {"status": MESSAGE_ONLY_PIPELINE_STATUSES}, len(rows))
+    logger.db_result("select", "leads", query_meta, len(rows))
     if rows:
         logger.info(
             "Fetched %d message-only leads",
-            data={"count": len(rows), "statuses": MESSAGE_ONLY_PIPELINE_STATUSES},
+            data={"count": len(rows), "statuses": MESSAGE_ONLY_PIPELINE_STATUSES, "batch_id": batch_id},
         )
     return rows
 
@@ -211,7 +247,8 @@ def fetch_lead_by_id(client: Client, lead_id: str) -> Optional[Dict[str, Any]]:
     select_fields_extended = (
         "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
         "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
-        "sequence_id, csv_batch_id, outreach_mode, profile_data, ai_tags"
+        "sequence_id, sequence_step, sequence_started_at, sequence_last_sent_at, "
+        "csv_batch_id, outreach_mode, profile_data, ai_tags"
     )
     select_fields_legacy = (
         "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
@@ -335,6 +372,12 @@ def _render_template_message(template: str, lead: Dict[str, Any]) -> str:
     company = (lead.get("company_name") or "").strip()
     full_name = " ".join([p for p in [first_name, last_name] if p]).strip()
     replacements = {
+        "{{first_name}}": first_name,
+        "{{last_name}}": last_name,
+        "{{full_name}}": full_name,
+        "{{company_name}}": company,
+        "{{VORNAME}}": first_name,
+        "{{NACHNAME}}": last_name,
         "{first_name}": first_name,
         "{last_name}": last_name,
         "{full_name}": full_name,
@@ -345,8 +388,10 @@ def _render_template_message(template: str, lead: Dict[str, Any]) -> str:
     rendered = (template or "").strip()
     for key, val in replacements.items():
         rendered = rendered.replace(key, val or "")
-    rendered = re.sub(r"\s{2,}", " ", rendered).strip()
-    return _hard_cap_text(rendered, 300)
+    # Preserve paragraph breaks for direct LinkedIn messages while normalizing
+    # accidental extra spaces inside each line.
+    lines = [re.sub(r"[ \t]{2,}", " ", line).strip() for line in rendered.splitlines()]
+    return "\n".join(lines).strip()
 
 
 def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, Any]:
@@ -803,7 +848,12 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
         logger.warn("Could not verify full direct message text was entered, proceeding anyway")
 
     # Find and click Send button
-    send_btn = page.locator("button:has-text('Send'), button:has-text('Senden'), button[aria-label*='Send']").first
+    send_btn = page.locator(
+        "button:has-text('Send'):visible, "
+        "button:has-text('Senden'):visible, "
+        "button[aria-label*='Send']:visible, "
+        "button[aria-label*='Senden']:visible"
+    ).first
     try:
         await send_btn.wait_for(state="visible", timeout=10_000)
         logger.element_search("Send button (message)", 1, role="button")
@@ -846,6 +896,40 @@ def mark_failed(client: Client, lead_id: str, error_message: str = "") -> None:
     client.table("leads").update(update_data).eq("id", lead_id).execute()
     logger.db_result("update", "leads", {"leadId": lead_id}, 1)
     logger.warn(f"Lead marked as FAILED", {"leadId": lead_id, "error": error_message})
+
+
+def mark_lead_retry_later(client: Client, lead: Dict[str, Any], error_message: str = "") -> int:
+    """Mark a connected lead as needing a later retry and persist retry attempts in profile_data."""
+    lead_id = str(lead.get("id") or "")
+    current_profile_data = lead.get("profile_data")
+    profile_data: Dict[str, Any] = current_profile_data if isinstance(current_profile_data, dict) else {}
+
+    attempts = _safe_int(profile_data.get("message_only_retry_attempts"), 0) + 1
+    now_iso = datetime.utcnow().isoformat()
+    truncated_error = (error_message or "")[:500]
+
+    updated_profile_data = dict(profile_data)
+    updated_profile_data["message_only_retry_attempts"] = attempts
+    updated_profile_data["message_only_last_error"] = truncated_error
+    updated_profile_data["message_only_last_retry_at"] = now_iso
+
+    logger.db_query("update", "leads", {"leadId": lead_id}, {"status": "CONNECTED"})
+    update_payload: Dict[str, Any] = {
+        "status": "CONNECTED",
+        "updated_at": now_iso,
+        "error_message": truncated_error,
+    }
+    try:
+        update_payload["profile_data"] = updated_profile_data
+        client.table("leads").update(update_payload).eq("id", lead_id).execute()
+    except Exception:
+        update_payload.pop("profile_data", None)
+        client.table("leads").update(update_payload).eq("id", lead_id).execute()
+
+    lead["profile_data"] = updated_profile_data
+    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
+    logger.warn("Lead marked for retry while connected", {"leadId": lead_id, "attempt": attempts, "error": truncated_error})
+    return attempts
 
 
 async def send_connection_request(page: Page) -> bool:
@@ -1130,15 +1214,29 @@ def schedule_nudge_followup(
         logger.warn("Skipping nudge scheduling due to empty sequence message", {"leadId": lead_id, "attempt": attempt})
         return
 
-    existing = (
-        client.table("followups")
-        .select("id, status")
-        .eq("lead_id", lead_id)
-        .eq("followup_type", "NUDGE")
-        .eq("attempt", attempt)
-        .limit(1)
-        .execute()
-    ).data or []
+    try:
+        existing = (
+            client.table("followups")
+            .select("id, status")
+            .eq("lead_id", lead_id)
+            .eq("followup_type", "NUDGE")
+            .eq("attempt", attempt)
+            .limit(1)
+            .execute()
+        ).data or []
+    except Exception:
+        # Legacy schemas may not expose attempt/followup_type. Fall back to lead-only dedupe.
+        try:
+            existing = (
+                client.table("followups")
+                .select("id, status")
+                .eq("lead_id", lead_id)
+                .limit(1)
+                .execute()
+            ).data or []
+        except Exception as e:
+            logger.warn("Skipping nudge scheduling: followups table unavailable", {"leadId": lead_id, "attempt": attempt}, error=e)
+            return
     if existing:
         logger.debug("Nudge followup already exists", {"leadId": lead_id, "attempt": attempt, "followupId": existing[0]["id"]})
         return
@@ -1158,7 +1256,28 @@ def schedule_nudge_followup(
         "last_message_text": _hard_cap_text(previous_message or "", 2000),
         "last_message_from": "us",
     }
-    client.table("followups").insert(payload).execute()
+    try:
+        client.table("followups").insert(payload).execute()
+    except Exception:
+        fallback_payload = dict(payload)
+        fallback_payload.pop("attempt", None)
+        try:
+            client.table("followups").insert(fallback_payload).execute()
+        except Exception as e:
+            minimal_payload = {
+                "lead_id": lead_id,
+                "status": "APPROVED",
+                "draft_text": draft_text,
+            }
+            try:
+                client.table("followups").insert(minimal_payload).execute()
+            except Exception as e2:
+                logger.warn(
+                    "Skipping nudge scheduling due to incompatible followups schema",
+                    {"leadId": lead_id, "attempt": attempt},
+                    error=e2,
+                )
+                return
     logger.info(
         "Scheduled nudge followup",
         {"leadId": lead_id},
@@ -1253,6 +1372,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
     Returns:
         'sent' - message was sent successfully
         'pending' - connection still pending (Ausstehend), skipped
+        'retry' - transient failure, queued for retry
         'failed' - could not process
     """
     lead_id = lead["id"]
@@ -1262,13 +1382,15 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
     
     logger.message_send_start(lead_id, {"url": lead.get("linkedin_url"), "mode": "message-only"})
     
-    # Fetch the draft for this lead
-    draft = fetch_draft(client, lead_id)
-    if not draft:
-        logger.warn("No draft found for message-only lead, using default message", {"leadId": lead_id})
-        message = "Freue mich auf den Austausch!"
-    else:
-        message = build_message(draft)
+    sequence_messages = load_sequence_messages(client, lead)
+    message = (sequence_messages.get("first_message") or "").strip()
+    if not message:
+        error_msg = "Missing sequence first_message for message-only flow"
+        attempts = mark_lead_retry_later(client, lead, error_msg)
+        if attempts >= LEAD_MESSAGE_ONLY_MAX_RETRIES:
+            mark_failed(client, lead_id, f"Retry limit reached: {error_msg}")
+            return "failed"
+        return "retry"
     
     page = await context.new_page()
     url = str(lead["linkedin_url"]).replace("http://", "https://")
@@ -1325,12 +1447,53 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                 # Send the message
                 await send_message(page, message, "message")
                 
-                # Mark as SENT and update connection_accepted_at
-                client.table("leads").update({
+                # Mark as SENT, capture acceptance, and initialize sequence progress metadata.
+                accepted_at = datetime.utcnow().isoformat()
+                sequence_started_at = lead.get("sequence_started_at") or accepted_at
+                lead_update = {
                     "status": "SENT",
-                    "sent_at": datetime.utcnow().isoformat(),
-                    "connection_accepted_at": datetime.utcnow().isoformat(),
-                }).eq("id", lead_id).execute()
+                    "sent_at": accepted_at,
+                    "connection_accepted_at": accepted_at,
+                    "sequence_step": 1,
+                    "sequence_started_at": sequence_started_at,
+                    "sequence_last_sent_at": accepted_at,
+                    "error_message": None,
+                }
+                try:
+                    client.table("leads").update(lead_update).eq("id", lead_id).execute()
+                except Exception:
+                    # Older schemas may miss sequence progress columns; fall back to core status update.
+                    fallback_update = {
+                        "status": "SENT",
+                        "sent_at": accepted_at,
+                        "connection_accepted_at": accepted_at,
+                        "error_message": None,
+                    }
+                    client.table("leads").update(fallback_update).eq("id", lead_id).execute()
+
+                accepted_base = _parse_iso_datetime(accepted_at) or _utc_now()
+                try:
+                    schedule_nudge_followup(client, lead, 1, sequence_messages, accepted_base, message)
+                    interval_days = _safe_int(
+                        sequence_messages.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS
+                    )
+                    if interval_days < 1:
+                        interval_days = SEQUENCE_INTERVAL_DEFAULT_DAYS
+                    second_message = (sequence_messages.get("second_message") or "").strip()
+                    schedule_nudge_followup(
+                        client,
+                        lead,
+                        2,
+                        sequence_messages,
+                        accepted_base + timedelta(days=interval_days),
+                        second_message or message,
+                    )
+                except Exception as schedule_error:
+                    logger.warn(
+                        "Failed to schedule followups after first message; keeping lead as SENT",
+                        {"leadId": lead_id},
+                        error=schedule_error,
+                    )
                 
                 logger.message_send_complete(lead_id)
                 logger.info("Message sent to connected lead", {"leadId": lead_id})
@@ -1339,7 +1502,22 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
             except Exception as e:
                 logger.error("Failed to send message to connected lead", {"leadId": lead_id}, error=e)
                 await page.close()
-                return "failed"
+                error_msg = str(e)
+                permanent_indicators = [
+                    "No messaging surface found",
+                    "3rd-degree",
+                    "restrictions",
+                    "Messaging disabled",
+                    "not available",
+                ]
+                if any(ind.lower() in error_msg.lower() for ind in permanent_indicators):
+                    mark_failed(client, lead_id, error_msg)
+                    return "failed"
+                attempts = mark_lead_retry_later(client, lead, error_msg)
+                if attempts >= LEAD_MESSAGE_ONLY_MAX_RETRIES:
+                    mark_failed(client, lead_id, f"Retry limit reached: {error_msg}")
+                    return "failed"
+                return "retry"
         else:
             # No message button found - might still be pending or profile restricted
             logger.info("No Message button found, connection may still be pending", {"leadId": lead_id})
@@ -1348,11 +1526,15 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
             
     except Exception as e:
         logger.error("Error processing message-only lead", {"leadId": lead_id}, error=e)
+        attempts = mark_lead_retry_later(client, lead, str(e))
+        if attempts >= LEAD_MESSAGE_ONLY_MAX_RETRIES:
+            mark_failed(client, lead_id, f"Retry limit reached: {str(e)}")
+            return "failed"
         try:
             await page.close()
         except Exception:
             pass
-        return "failed"
+        return "retry"
 
 
 def fetch_linkedin_credentials(client: Client) -> Optional[Dict[str, str]]:
@@ -1376,7 +1558,25 @@ async def is_logged_in(context: BrowserContext) -> bool:
     try:
         await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30_000)
         await page.wait_for_timeout(1_000)
-        return "/feed" in page.url and "/login" not in page.url
+        current_url = page.url
+        if "/login" in current_url or "/checkpoint" in current_url:
+            return False
+        if "/feed" in current_url:
+            return True
+        # Fallback for localized/redirected home pages where feed URL is not stable.
+        logged_markers = [
+            page.locator("input[role='combobox'][aria-label*='Search']"),
+            page.locator("a[href*='/mynetwork/']"),
+            page.locator("a[href*='/feed/']"),
+            page.locator("header[role='banner']"),
+        ]
+        for marker in logged_markers:
+            try:
+                if await marker.count() > 0:
+                    return True
+            except Exception:
+                continue
+        return False
     except Exception:
         return False
     finally:
@@ -1389,6 +1589,12 @@ async def login_with_credentials(context: BrowserContext, email: str, password: 
         # Go straight to login
         await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=60_000)
         await page.wait_for_timeout(1_000)
+        current_url = page.url
+        # LinkedIn can redirect already-authenticated sessions away from /login.
+        if "/login" not in current_url and "/checkpoint" not in current_url:
+            if "linkedin.com" in current_url:
+                await context.storage_state(path=str(AUTH_STATE_PATH))
+                return
 
         # Primary (German localization) using role-based selectors
         email_locators = [
@@ -1404,11 +1610,14 @@ async def login_with_credentials(context: BrowserContext, email: str, password: 
             lambda: page.get_by_role("textbox", name="Email or Phone"),
             lambda: page.get_by_role("textbox", name="Email or phone"),
             lambda: page.get_by_role("textbox", name="Email"),
+            lambda: page.locator("input[type='text'][name='session_key']"),
+            lambda: page.locator("input[type='email']"),
             lambda: page.locator("input#username"),
             lambda: page.locator("input[name='session_key']"),
         ]
         password_fallbacks = [
             lambda: page.get_by_role("textbox", name="Password"),
+            lambda: page.locator("input[type='password']"),
             lambda: page.locator("input#password"),
             lambda: page.locator("input[name='session_password']"),
         ]
@@ -1426,7 +1635,28 @@ async def login_with_credentials(context: BrowserContext, email: str, password: 
 
         email_filled = await fill_first(email_locators, email) or await fill_first(email_fallbacks, email)
         pwd_filled = await fill_first(password_locators, password) or await fill_first(password_fallbacks, password)
-        if not email_filled or not pwd_filled:
+        account_preselected = False
+        try:
+            other_account_links = [
+                page.get_by_role("link", name=re.compile(r"Loggen Sie sich bei einem anderen Konto ein", re.I)),
+                page.get_by_role("link", name=re.compile(r"sign in with a different account", re.I)),
+            ]
+            for link in other_account_links:
+                if await link.count() > 0:
+                    account_preselected = True
+                    break
+            if not account_preselected:
+                for marker in [
+                    page.get_by_text(re.compile(r"Schön, dass Sie wieder da sind", re.I)),
+                    page.get_by_text(re.compile(r"Welcome back", re.I)),
+                ]:
+                    if await marker.count() > 0:
+                        account_preselected = True
+                        break
+        except Exception:
+            account_preselected = False
+
+        if not pwd_filled or (not email_filled and not account_preselected):
             raise RuntimeError("Could not locate LinkedIn email/password fields.")
 
         # Click sign in
@@ -1452,7 +1682,20 @@ async def login_with_credentials(context: BrowserContext, email: str, password: 
             except Exception:
                 pass
 
-        await page.wait_for_url("**/feed**", timeout=45_000)
+        try:
+            await page.wait_for_url(
+                lambda url: (
+                    "linkedin.com" in url
+                    and "/login" not in url
+                    and "/checkpoint" not in url
+                ),
+                timeout=45_000,
+            )
+        except Exception:
+            current = page.url
+            if "/login" in current or "/checkpoint" in current:
+                raise RuntimeError(f"LinkedIn login did not reach authenticated page (current: {current})")
+
         # Persist auth for future runs
         await context.storage_state(path=str(AUTH_STATE_PATH))
     finally:
@@ -1483,11 +1726,12 @@ async def main() -> None:
 
     parser = argparse.ArgumentParser(description="Send approved drafts or follow-ups via LinkedIn.")
     parser.add_argument("--lead-id", help="Send only this lead id (bypass queue).")
+    parser.add_argument("--batch-id", type=int, help="Process only leads from this batch id.")
     parser.add_argument("--followup", action="store_true", help="Process APPROVED followups instead of initial outreach.")
     parser.add_argument("--message-only", action="store_true", help="Process CONNECT_ONLY_SENT leads to send messages to accepted connections.")
     args = parser.parse_args()
 
-    mode = "followup" if args.followup else ("message-only" if args.message_only else "outreach")
+    mode = "followup" if args.followup else ("message_only" if args.message_only else "connect_message")
     logger.operation_start(f"sender-{mode}", input_data={"lead_id": args.lead_id, "mode": mode})
 
     try:
@@ -1576,9 +1820,12 @@ async def main() -> None:
                     return
                 leads_to_process = [lead]
             else:
-                leads_to_process = fetch_message_only_leads(client, remaining)
+                leads_to_process = fetch_message_only_leads(client, remaining, args.batch_id)
                 if not leads_to_process:
-                    logger.info("No message-only leads to process (CONNECT_ONLY_SENT/MESSAGE_ONLY_*)")
+                    logger.info(
+                        "No message-only leads to process (CONNECT_ONLY_SENT/MESSAGE_ONLY_*)",
+                        {"batchId": args.batch_id},
+                    )
                     return
 
             logger.info(
@@ -1593,6 +1840,7 @@ async def main() -> None:
                 sent_count = 0
                 pending_count = 0
                 failed_count = 0
+                retry_count = 0
 
                 for lead in leads_to_process:
                     try:
@@ -1601,6 +1849,8 @@ async def main() -> None:
                             sent_count += 1
                         elif result == "pending":
                             pending_count += 1
+                        elif result == "retry":
+                            retry_count += 1
                         else:
                             failed_count += 1
                     except Exception as exc:
@@ -1617,6 +1867,7 @@ async def main() -> None:
                     result={
                         "sent": sent_count,
                         "pending": pending_count,
+                        "retry": retry_count,
                         "failed": failed_count,
                         "total": len(leads_to_process),
                     },
