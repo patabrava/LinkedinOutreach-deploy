@@ -1,0 +1,13 @@
+.git
+.worktrees
+.logs
+node_modules
+apps/web/.next
+apps/web/node_modules
+**/__pycache__
+**/*.pyc
+**/venv
+workers/scraper/auth.json
+workers/sender/auth.json
+*.log
+.DS_Store

@@ -1,17 +1,21 @@
 import "./globals.css";
 import type { Metadata } from "next";
+
 import { NavBar } from "../components/NavBar";
+import { getServerSession } from "../lib/auth";
 
 export const metadata: Metadata = {
   title: "Linkedin Scraper",
   description: "Batch-based LinkedIn outreach workflow with clear intent, progress, and post-acceptance messaging.",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const session = await getServerSession();
+
   return (
     <html lang="en">
       <head>
@@ -22,7 +26,7 @@ export default function RootLayout({
         <a className="skip-link" href="#main">
           Skip to content
         </a>
-        <NavBar />
+        <NavBar authenticated={Boolean(session)} email={session?.user.email ?? null} />
         <main id="main">{children}</main>
       </body>
     </html>

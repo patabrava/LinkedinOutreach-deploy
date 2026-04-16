@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { sendAllApproved } from "../app/actions";
-import { supabaseBrowserClient } from "../lib/supabaseClient";
+import { getOperatorApiHeaders } from "../lib/operatorToken";
+import { isSupabaseBrowserConfigured, supabaseBrowserClient } from "../lib/supabaseClient";
 
 type StatusCounts = Record<string, number>;
 
@@ -78,7 +79,10 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
       setStatusLoading(true);
     }
     try {
-      const res = await fetch(modeConfig.statusUrl, { cache: "no-store" });
+      const res = await fetch(modeConfig.statusUrl, {
+        cache: "no-store",
+        headers: getOperatorApiHeaders(),
+      });
       const data = (await res.json()) as StatusResponse & { error?: string };
       if (!res.ok || data?.ok === false) {
         throw new Error(data?.error || "Failed to fetch enrichment status.");
@@ -106,7 +110,13 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
 
   // Subscribe to real-time lead updates to refresh status immediately
   useEffect(() => {
+    if (!isSupabaseBrowserConfigured()) {
+      return;
+    }
     const supabase = supabaseBrowserClient();
+    if (!supabase) {
+      return;
+    }
     const channel = supabase
       .channel("enrichment-status-updates")
       .on(
@@ -183,8 +193,7 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
     try {
       const res = await fetch(modeConfig.startEndpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        headers: getOperatorApiHeaders(),
       });
       const data = await res.json();
       if (!res.ok || data?.ok === false) {
@@ -204,7 +213,10 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
     setStopping(true);
     setError("");
     try {
-      const res = await fetch("/api/enrich/stop", { method: "POST" });
+      const res = await fetch("/api/enrich/stop", {
+        method: "POST",
+        headers: getOperatorApiHeaders(),
+      });
       const data = await res.json();
       if (!res.ok || data?.ok === false) {
         throw new Error(data?.error || "Failed to stop enrichment.");

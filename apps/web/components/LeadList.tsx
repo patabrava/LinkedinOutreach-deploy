@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
 import type { LeadListRow } from "../app/actions";
-import { supabaseBrowserClient } from "../lib/supabaseClient";
+import { isSupabaseBrowserConfigured, supabaseBrowserClient } from "../lib/supabaseClient";
 
 type LeadFilters = {
   status?: string;
@@ -413,7 +413,13 @@ export function LeadList({
 
   // Subscribe to realtime lead updates so status bar and enrichment details stay fresh
   useEffect(() => {
+    if (!isSupabaseBrowserConfigured()) {
+      return;
+    }
     const supabase = supabaseBrowserClient();
+    if (!supabase) {
+      return;
+    }
     const channel = supabase
       .channel("leads-status-feed")
       .on(

@@ -21,17 +21,19 @@ const isLoopbackIp = (ip: string): boolean => {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 };
 
+export const readOperatorToken = (request: Request): string => {
+  const authHeader = request.headers.get("authorization") || "";
+  const fallbackToken = request.headers.get("x-api-token") || "";
+  return authHeader.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : fallbackToken.trim();
+};
+
 export const requireOperatorAccess = (
   request: Request,
   routePath: string,
   correlationId: string
 ): NextResponse | null => {
   const expectedToken = (process.env.API_OPERATOR_TOKEN || "").trim();
-  const authHeader = request.headers.get("authorization") || "";
-  const fallbackToken = request.headers.get("x-api-token") || "";
-  const providedToken = authHeader.startsWith("Bearer ")
-    ? authHeader.slice("Bearer ".length).trim()
-    : fallbackToken.trim();
+  const providedToken = readOperatorToken(request);
 
   if (expectedToken) {
     if (providedToken && providedToken === expectedToken) {

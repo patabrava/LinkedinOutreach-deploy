@@ -1,13 +1,13 @@
 import { DraftFeed } from "../components/DraftFeed";
 import { SequenceEditor } from "../components/SequenceEditor";
+import { getServerSession } from "../lib/auth";
 import { fetchDraftFeed, fetchLeadBatches, fetchOutreachSequences } from "./actions";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 export default async function MissionControlPage() {
-  // Mission Control is intentionally post-acceptance only.
-  // Under the hood, the post-acceptance queue is represented by the "connect_only" mode.
+  const session = await getServerSession();
   const [drafts, sequences, batches] = await Promise.all([
     fetchDraftFeed("connect_only"),
     fetchOutreachSequences(),
@@ -26,6 +26,21 @@ export default async function MissionControlPage() {
           <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 10 }}>
             <a className="btn secondary" href="/leads">LEAD INTAKE</a>
             <a className="btn secondary" href="/settings">LINKEDIN CREDENTIALS</a>
+          </div>
+          {session?.user.email ? (
+            <div className="pill status-approved" style={{ marginTop: 12 }}>
+              Signed in as {session.user.email}
+            </div>
+          ) : null}
+          <div style={{ marginTop: 8 }}>
+            <a className="muted" href="/leads">
+              Lead Intake (batch progress) →
+            </a>
+          </div>
+          <div style={{ marginTop: 4 }}>
+            <a className="muted" href="/settings">
+              Set LinkedIn credentials →
+            </a>
           </div>
         </div>
       </div>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { supabaseBrowserClient } from "../lib/supabaseClient";
+import { isSupabaseBrowserConfigured, supabaseBrowserClient } from "../lib/supabaseClient";
 import type { FollowupRow } from "../app/actions";
 import { approveFollowup, skipFollowup, generateFollowupDraft, generateAllFollowupDrafts, approveAndSendAllFollowups, triggerFollowupSender, stopFollowups, retryFollowup } from "../app/actions";
 
@@ -51,10 +51,14 @@ export default function FollowupsList({ initial }: Props) {
   }, [initial]);
 
   useEffect(() => {
+    if (!isSupabaseBrowserConfigured()) {
+      return;
+    }
     // Client-side hydration fetch to recover if server fetch returned empty (e.g., env/config issue)
     (async () => {
       try {
         const supabase = supabaseBrowserClient();
+        if (!supabase) return;
         const { data, error } = await supabase
           .from("followups")
           .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, last_reply_at, followup_count, profile_data)")
@@ -77,7 +81,13 @@ export default function FollowupsList({ initial }: Props) {
   }, []);
 
   useEffect(() => {
+    if (!isSupabaseBrowserConfigured()) {
+      return;
+    }
     const supabase = supabaseBrowserClient();
+    if (!supabase) {
+      return;
+    }
     const channel = supabase
       .channel("followups-feed")
       .on(

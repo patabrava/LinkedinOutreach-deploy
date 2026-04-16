@@ -5,6 +5,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$ROOT_DIR/.logs"
+WEB_RUNTIME="${WEB_RUNTIME:-dev}"
 mkdir -p "$LOG_DIR"
 
 SERVICE_PIDS=()
@@ -74,6 +75,17 @@ trap cleanup INT TERM EXIT
 
 load_envs
 
+print_runtime_banner() {
+  echo "[runtime] WEB_RUNTIME=$WEB_RUNTIME"
+  if [ "$WEB_RUNTIME" = "prod" ]; then
+    echo "[runtime] web will use Next production server on port 3000"
+  else
+    echo "[runtime] web will use Next dev server on port 3000"
+  fi
+}
+
+print_runtime_banner
+
 prepare_web_runtime() {
   local web_next_dir="$ROOT_DIR/apps/web/.next"
   local pids=""
@@ -91,14 +103,52 @@ prepare_web_runtime() {
     fi
   fi
   if [ -d "$web_next_dir" ]; then
-    echo "[web] clearing stale Next build cache: $web_next_dir"
-    rm -rf "$web_next_dir"
+    if [ "$WEB_RUNTIME" = "dev" ]; then
+      echo "[web] clearing stale Next build cache: $web_next_dir"
+      rm -rf "$web_next_dir"
+    fi
   fi
+}
+
+ensure_prod_web_build() {
+  local build_id="$ROOT_DIR/apps/web/.next/BUILD_ID"
+  if [ -f "$build_id" ]; then
+    return
+  fi
+
+  echo "[web] production build missing; running npm run build:web"
+  (
+    cd "$ROOT_DIR"
+    npm run build:web
+  )
+}
+
+has_sender_auth_state() {
+  [ -f "$ROOT_DIR/workers/sender/auth.json" ] || [ -f "$ROOT_DIR/workers/scraper/auth.json" ]
+}
+
+web_command() {
+  case "$WEB_RUNTIME" in
+    dev)
+      printf "%s" "cd '$ROOT_DIR' && npm run dev:web"
+      ;;
+    prod)
+      ensure_prod_web_build
+      printf "%s" "cd '$ROOT_DIR' && npm run start:web"
+      ;;
+    *)
+      echo "[web] unsupported WEB_RUNTIME=$WEB_RUNTIME (expected dev or prod)" >&2
+      return 1
+      ;;
+  esac
 }
 
 usage() {
   cat <<'EOF'
 Usage: ./run_all.sh [--web] [--agent] [--sender] [--message-only] [--followup] [--all]
+
+Environment:
+  WEB_RUNTIME=dev|prod   Choose Next.js dev server or production start command (default: dev)
 
 Defaults to launching only the web UI to reduce LinkedIn surface area. Add flags to
 opt-in other workers:
@@ -173,10 +223,10 @@ fi
 
 # Sender (connects + sends APPROVED drafts)
 if [ "$START_SENDER" -eq 1 ]; then
-  if [ -f "$ROOT_DIR/workers/sender/auth.json" ]; then
+  if has_sender_auth_state; then
     run_service "sender" "cd '$ROOT_DIR/workers/sender' && source venv/bin/activate && while true; do python -u sender.py; sleep 20; done"
   else
-    echo "[sender] ⏭ Skipping start (missing workers/sender/auth.json)."
+    echo "[sender] ⏭ Skipping start (missing workers/sender/auth.json and workers/scraper/auth.json)."
   fi
 else
   echo "[sender] ⏭ Skipping (enable with --sender or --all)."
@@ -184,10 +234,10 @@ fi
 
 # Message-only sender poller (checks accepted connections and sends first sequence message)
 if [ "$START_MESSAGE_ONLY" -eq 1 ]; then
-  if [ -f "$ROOT_DIR/workers/sender/auth.json" ]; then
+  if has_sender_auth_state; then
     run_service "sender_message_only" "cd '$ROOT_DIR/workers/sender' && source venv/bin/activate && while true; do python -u sender.py --message-only; sleep 900; done"
   else
-    echo "[sender_message_only] ⏭ Skipping start (missing workers/sender/auth.json)."
+    echo "[sender_message_only] ⏭ Skipping start (missing workers/sender/auth.json and workers/scraper/auth.json)."
   fi
 else
   echo "[sender_message_only] ⏭ Skipping (enable with --message-only or --all)."
@@ -195,10 +245,10 @@ fi
 
 # Follow-up sender poller (checks approved followups and sends nudges)
 if [ "$START_FOLLOWUP" -eq 1 ]; then
-  if [ -f "$ROOT_DIR/workers/sender/auth.json" ]; then
+  if has_sender_auth_state; then
     run_service "sender_followup" "cd '$ROOT_DIR/workers/sender' && source venv/bin/activate && while true; do python -u sender.py --followup; sleep 900; done"
   else
-    echo "[sender_followup] ⏭ Skipping start (missing workers/sender/auth.json)."
+    echo "[sender_followup] ⏭ Skipping start (missing workers/sender/auth.json and workers/scraper/auth.json)."
   fi
 else
   echo "[sender_followup] ⏭ Skipping (enable with --followup or --all)."
@@ -207,7 +257,7 @@ fi
 # Web UI (Mission Control dashboard)
 if [ "$START_WEB" -eq 1 ]; then
   prepare_web_runtime
-  run_service "web" "cd '$ROOT_DIR' && npm run dev:web"
+  run_service "web" "$(web_command)"
 else
   echo "[web] ⏭ Skipping (enable with --web or --all)."
 fi

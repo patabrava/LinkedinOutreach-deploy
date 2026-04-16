@@ -546,6 +546,12 @@ label {
   letter-spacing: 0.05em;
 }
 
+.nav-button {
+  appearance: none;
+  font: inherit;
+  cursor: pointer;
+}
+
 .nav-link:hover {
   background: var(--highlight);
 }

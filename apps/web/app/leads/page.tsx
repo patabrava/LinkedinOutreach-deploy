@@ -3,6 +3,9 @@ import { StartEnrichmentButton } from "../../components/StartEnrichmentButton";
 import { TriggerButton } from "../../components/TriggerButton";
 import { fetchLeadList, triggerFollowupSender } from "../actions";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export default async function LeadsPage({
   searchParams,
 }: {

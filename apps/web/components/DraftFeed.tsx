@@ -6,7 +6,7 @@ import { approveAndSendAllDrafts, approveDraft, fetchDraftFeed, regenerateDraft,
 import type { OutreachMode } from "../lib/outreachModes";
 import { PROMPT_TYPE_LABELS } from "../lib/promptTypes";
 import type { PromptType } from "../lib/promptTypes";
-import { supabaseBrowserClient } from "../lib/supabaseClient";
+import { isSupabaseBrowserConfigured, supabaseBrowserClient } from "../lib/supabaseClient";
 
 export type DraftWithLead = {
   leadId: string;
@@ -275,7 +275,13 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message", var
 
   // Subscribe to real-time updates on leads/drafts table
   useEffect(() => {
+    if (!isSupabaseBrowserConfigured()) {
+      return;
+    }
     const supabase = supabaseBrowserClient();
+    if (!supabase) {
+      return;
+    }
     const channel = supabase.channel(`draft-feed-updates-${outreachMode}`);
 
     const leadStatuses =

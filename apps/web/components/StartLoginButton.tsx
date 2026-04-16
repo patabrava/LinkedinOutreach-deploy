@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 
+import { getOperatorApiHeaders } from "../lib/operatorToken";
+
 type Props = {
   onStart?: () => void;
 };
@@ -15,7 +17,10 @@ export function StartLoginButton({ onStart }: Props) {
     setRunning(true);
     setMsg("");
     try {
-      const res = await fetch("/api/login", { method: "POST" });
+      const res = await fetch("/api/login", {
+        method: "POST",
+        headers: getOperatorApiHeaders(),
+      });
       const data = await res.json();
       if (!res.ok || data?.ok === false) {
         throw new Error(data?.error || "Failed to launch login window.");

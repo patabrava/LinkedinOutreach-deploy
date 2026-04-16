@@ -6,8 +6,11 @@
     "apps/web"
   ],
   "scripts": {
-    "dev:web": "npm --prefix apps/web run dev",
-    "build:web": "npm --prefix apps/web run build",
-    "lint:web": "npm --prefix apps/web run lint"
+    "dev:web": "npm --prefix apps/web run dev -- --hostname 0.0.0.0 --port 3000",
+    "build:web": "npm --prefix apps/web run build -- --no-lint",
+    "start:web": "npm --prefix apps/web run start -- --hostname 0.0.0.0 --port 3000",
+    "lint:web": "npm --prefix apps/web run lint",
+    "runtime:dev": "WEB_RUNTIME=dev ./run_all.sh --web --agent --sender --message-only --followup",
+    "runtime:prod": "WEB_RUNTIME=prod ./run_all.sh --web --agent --sender --message-only --followup"
   }
 }
