@@ -28,7 +28,9 @@ services:
       start_period: 90s
 
   proxy:
-    image: caddy:2.8-alpine
+    build:
+      context: .
+      dockerfile: docker/proxy.Dockerfile
     restart: unless-stopped
     depends_on:
       app:
@@ -41,7 +43,6 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
 
