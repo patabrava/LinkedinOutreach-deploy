@@ -21,11 +21,12 @@ def supabase_client() -> Client:
 
 def get_leads_for_generation(
     client: Client,
-    mode: str = "message",
+    mode: str = "connect_message",
     limit: int = 20,
 ) -> List[Dict[str, Any]]:
-    status_filter = "ENRICHED" if mode == "message" else "CONNECT_ONLY_SENT"
-    outreach_filter = "message" if mode == "message" else "connect_only"
+    normalized_mode = "connect_only" if mode == "connect_only" else "message"
+    status_filter = "ENRICHED" if normalized_mode == "message" else "CONNECT_ONLY_SENT"
+    outreach_filter = "message" if normalized_mode == "message" else "connect_only"
 
     query = (
         client.table("leads")
@@ -118,4 +119,3 @@ def save_draft(
     client.table("drafts").insert(draft).execute()
     client.table("leads").update({"status": next_status}).eq("id", lead_id).execute()
     return draft
-

@@ -3,10 +3,13 @@ import fs from "fs";
 import path from "path";
 import { NextResponse } from "next/server";
 
+import { requireOperatorAccess } from "../../../lib/apiGuard";
 import { logger } from "../../../lib/logger";
 
-export async function POST() {
+export async function POST(request: Request) {
   const correlationId = logger.apiRequest("POST", "/api/login");
+  const guardResponse = requireOperatorAccess(request, "/api/login", correlationId);
+  if (guardResponse) return guardResponse;
   
   try {
     const webDir = process.cwd();

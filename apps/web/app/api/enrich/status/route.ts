@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { requireOperatorAccess } from "../../../../lib/apiGuard";
 import { logger } from "../../../../lib/logger";
 import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 
@@ -57,21 +58,12 @@ export async function GET(request: Request) {
   const requestedMode = url.searchParams.get("mode") === "connect_only" ? "connect_only" : "message";
   const modeConfig = MODE_CONFIG[requestedMode];
   const correlationId = logger.apiRequest("GET", "/api/enrich/status");
+  const guardResponse = requireOperatorAccess(request, "/api/enrich/status", correlationId);
+  if (guardResponse) return guardResponse;
   const dailyCap = getDailyEnrichmentCap();
   
   try {
     const client = supabaseAdmin();
-    // Temporary environment sanity check (masked)
-    const envUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-    const envKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-    logger.debug(
-      "Supabase env check",
-      { correlationId },
-      {
-        urlPrefix: envUrl.slice(0, 32),
-        serviceRoleKeyPrefix: envKey.slice(0, 8),
-      }
-    );
     const counts = createInitialCounts();
 
     logger.debug("Fetching status counts for all lead statuses", { correlationId });

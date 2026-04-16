@@ -1,0 +1,104 @@
+Message 1 (Tag 1 nach Annahme):
+
+Hi {{VORNAME}},
+
+freut mich, dass wir uns hier vernetzen.
+
+Ich bin Katharina von Degura, du hattest deine betriebliche Altersvorsorge damals über uns eingerichtet.
+
+Ich melde mich kurz, weil wir bei vielen ehemaligen Degura Kunden sehen, dass nach einem Arbeitgeberwechsel staatliche Förderung und Arbeitgeberzuschüsse nicht mehr genutzt werden, obwohl sie einem weiterhin zustehen.
+
+Wie ist es bei dir mit der bAV weitergegangen? Läuft der Vertrag noch?
+
+Falls du magst, können wir uns das auch gerne kurz gemeinsam anschauen, dauert nur ein paar Minuten.
+
+Viele Grüße,
+Katharina
+
+Message 2 (Tag 5):
+
+Hi {{VORNAME}},
+
+nur ein kurzer Followup zu meiner letzten Nachricht.
+
+Der Grund, warum mir das Thema wichtig ist: Wenn dein Vertrag beitragsfrei liegt, verzichtest du aktuell auf den Arbeitgeberzuschuss und die steuerliche Förderung, die dir beim neuen Arbeitgeber zustehen.
+
+Das ist bares Geld, das du jeden Monat liegen lässt.
+
+Sollen wir da einmal kurz gemeinsam reinschauen?
+
+Viele Grüße,
+
+Katharina
+
+Message 3 (Tag 12):
+
+Hi {{VORNAME}},
+
+letzte kurze Nachricht von meiner Seite.
+
+Dir stehen aktuell vermutlich drei Dinge zu, die du nicht nutzt:
+
+→ Arbeitgeberzuschuss (mindestens 15%, oft mehr) → Steuerliche Förderung (Beitrag aus dem Brutto) → Sozialversicherungsersparnis
+
+Und noch ein kurzer Ausblick: Ab 2027 kommt das neue Altersvorsorgedepot. Degura wird das ab dem ersten Tag anbieten, als zentrale Plattform für deine komplette Vorsorge, egal bei welchem Arbeitgeber.
+
+Falls du Lust hast, das einmal kurz anzuschauen, ich freue mich auf den Austausch.
+
+Viele Grüße, 
+
+Katharina
+
+SEQUENZ B Ohne Vertrag
+
+Message 1 (Tag 1 nach Annahme):
+
+Hi {{VORNAME}},
+
+freut mich, dass wir uns vernetzen.
+
+Ich bin Katharina von Degura, wir hatten mit deinem früheren Arbeitgeber im Bereich betriebliche Altersvorsorge zusammengearbeitet.
+
+Ich melde mich, weil eine Sache nach einem Arbeitgeberwechsel oft untergeht:
+
+Dein neuer Arbeitgeber ist gesetzlich verpflichtet, dir einen Zuschuss zur Altersvorsorge zu zahlen, viele zahlen sogar deutlich mehr als das Minimum. Trotzdem nutzen die meisten Mitarbeitenden diesen Zuschuss nicht.
+
+Weißt du, ob du den Zuschuss bei deinem aktuellen Arbeitgeber nutzt?
+
+Viele Grüße,
+Katharina
+
+Message 2 (Tag 5):
+
+Hi {{VORNAME}},
+
+nur ein kurzer Followup.
+
+Wir sehen bei sehr vielen Mitarbeitenden nach einem Arbeitgeberwechsel das gleiche Bild:
+
+Der Zuschuss vom Arbeitgeber steht bereit, die steuerliche Förderung auch, aber niemand hat das Thema je angesprochen.
+
+Das bedeutet: Dir entgeht jeden Monat Geld, das dir zusteht.
+
+Soll ich dir einmal kurz zeigen, was dir bei deinem aktuellen Arbeitgeber zusteht? Dauert wirklich nur ein paar Minuten.
+
+Viele Grüße,
+Katharina
+
+Message 3 (Tag 12):
+
+Hi {{VORNAME}},
+
+letzte kurze Nachricht.
+
+Drei Dinge stehen dir bei deinem Arbeitgeber zu:
+
+→ Arbeitgeberzuschuss zur Altersvorsorge (mindestens 15%) → Steuerliche Förderung (Beitrag aus dem Brutto) → Sozialversicherungsersparnis
+
+Dazu kommt ab 2027 das neue Altersvorsorgedepot, eine komplett neue Möglichkeit, steuerlich gefördert in ETFs zu sparen. Degura wird das ab Tag eins anbieten.
+
+Wenn du magst, schauen wir uns das kurz zusammen an, ich freue mich.
+
+Viele Grüße
+
+Katharina

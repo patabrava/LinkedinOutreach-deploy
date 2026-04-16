@@ -252,22 +252,22 @@ def main() -> None:
     parser.add_argument(
         "--mode",
         type=str,
-        default="message",
-        choices=["message", "connect_only"],
-        help="Which outreach pipeline to process: message (connection + DM) or connect_only (message-only mode)",
+        default="connect_message",
+        choices=["connect_message", "connect_only", "message"],
+        help="Which outreach pipeline to process: connect_message (connection + DM) or connect_only (message-only mode)",
     )
     args = parser.parse_args()
     prompt_type = args.prompt_type
-    mode = args.mode
+    mode = "connect_only" if args.mode == "connect_only" else "message"
     
     # Load the appropriate prompt
     prompt_text = load_prompt(prompt_type)
     prompt_name = PROMPT_NAMES.get(prompt_type, "Standard Outreach")
     
-    logger.operation_start("draft-generation", {"promptType": prompt_type, "mode": mode})
+    logger.operation_start("draft-generation", {"promptType": prompt_type, "mode": args.mode})
     logger.info(
         f"Using prompt type: {prompt_name}",
-        data={"promptType": prompt_type, "promptName": prompt_name, "mode": mode},
+        data={"promptType": prompt_type, "promptName": prompt_name, "mode": args.mode},
     )
     
     try:
@@ -281,12 +281,12 @@ def main() -> None:
 
         leads = get_leads_for_generation(client, mode=mode)
         if not leads:
-            logger.info("No leads found for requested mode", data={"mode": mode})
+            logger.info("No leads found for requested mode", data={"mode": args.mode})
             return
         
         logger.info(
             f"Processing {len(leads)} leads",
-            data={"count": len(leads), "promptType": prompt_type, "mode": mode},
+            data={"count": len(leads), "promptType": prompt_type, "mode": args.mode},
         )
 
         # Initialize example pool
@@ -440,7 +440,7 @@ def main() -> None:
             )
             logger.info(f"Draft saved for lead", {"leadId": lead_id})
         
-        logger.operation_complete("draft-generation", result={"processed": len(leads)})
+        logger.operation_complete("draft-generation", result={"processed": len(leads), "mode": args.mode})
     except Exception as exc:
         logger.operation_error("draft-generation", error=exc)
         raise

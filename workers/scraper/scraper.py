@@ -24,6 +24,7 @@ from auth import AUTH_STATE_PATH, is_logged_in, open_browser, save_storage_state
 
 # Import shared logger
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from credential_crypto import decrypt_password
 from shared_logger import get_logger
 
 # Load .env from scraper directory explicitly
@@ -222,7 +223,7 @@ def fetch_linkedin_credentials(client: Client) -> Optional[LinkedinCredentials]:
     )
     value = (resp.data or [{}])[0].get("value") or {}
     email = value.get("email") or value.get("username")
-    password = value.get("password")
+    password = decrypt_password(value)
     has_creds = bool(email and password)
     logger.db_result("select", "settings", {"key": "linkedin_credentials"}, 1 if resp.data else 0)
     logger.info(f"LinkedIn credentials: {'found' if has_creds else 'not found'}")

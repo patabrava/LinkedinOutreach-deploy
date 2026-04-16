@@ -31,6 +31,7 @@ __pycache__/
 /apps/web/.next/
 /.turbo/
 /.cache/
+*.tsbuildinfo
 
 # Credentials & Secrets
 auth.json
@@ -44,3 +45,13 @@ coverage/
 
 # Runtime PIDs
 *.pid
+
+# Runtime / debug artifacts
+.logs/
+.playwright-cli/
+output/
+workers/scraper/output/
+supabase/.temp/
+
+# Local data artifacts
+enriched_contacts.csv

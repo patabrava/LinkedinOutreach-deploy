@@ -53,14 +53,14 @@ cleanup() {
   CLEANED_UP=1
   printf '\n🧹 Stopping all services...\n'
 
-  for pid in "${TAIL_PIDS[@]}"; do
+  for pid in "${TAIL_PIDS[@]-}"; do
     if kill -0 "$pid" >/dev/null 2>&1; then
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
     fi
   done
 
-  for pid in "${SERVICE_PIDS[@]}"; do
+  for pid in "${SERVICE_PIDS[@]-}"; do
     if kill -0 "$pid" >/dev/null 2>&1; then
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
@@ -98,13 +98,14 @@ prepare_web_runtime() {
 
 usage() {
   cat <<'EOF'
-Usage: ./run_all.sh [--web] [--agent] [--sender] [--all]
+Usage: ./run_all.sh [--web] [--agent] [--sender] [--message-only] [--all]
 
 Defaults to launching only the web UI to reduce LinkedIn surface area. Add flags to
 opt-in other workers:
   --web       Start the Next.js UI
   --agent     Start the MCP agent (generates drafts from ENRICHED leads)
   --sender    Start the sender (connect + send APPROVED drafts)
+  --message-only  Start message-only sender poller (checks CONNECT_ONLY_SENT every 15m)
   --all       Start all of the above
 EOF
 }
@@ -112,6 +113,7 @@ EOF
 START_WEB=0
 START_AGENT=0
 START_SENDER=0
+START_MESSAGE_ONLY=0
 
 if [ $# -eq 0 ]; then
   # Safer default: only start the web UI unless explicitly requested.
@@ -122,7 +124,8 @@ else
       --web) START_WEB=1 ;;
       --agent) START_AGENT=1 ;;
       --sender) START_SENDER=1 ;;
-      --all) START_WEB=1; START_AGENT=1; START_SENDER=1 ;;
+      --message-only) START_MESSAGE_ONLY=1 ;;
+      --all) START_WEB=1; START_AGENT=1; START_SENDER=1; START_MESSAGE_ONLY=1 ;;
       -h|--help) usage; exit 0 ;;
       *)
         echo "Unknown option: $1"
@@ -174,6 +177,17 @@ if [ "$START_SENDER" -eq 1 ]; then
   fi
 else
   echo "[sender] ⏭ Skipping (enable with --sender or --all)."
+fi
+
+# Message-only sender poller (checks accepted connections and sends first sequence message)
+if [ "$START_MESSAGE_ONLY" -eq 1 ]; then
+  if [ -f "$ROOT_DIR/workers/sender/auth.json" ]; then
+    run_service "sender_message_only" "cd '$ROOT_DIR/workers/sender' && source venv/bin/activate && while true; do python -u sender.py --message-only; sleep 900; done"
+  else
+    echo "[sender_message_only] ⏭ Skipping start (missing workers/sender/auth.json)."
+  fi
+else
+  echo "[sender_message_only] ⏭ Skipping (enable with --message-only or --all)."
 fi
 
 # Web UI (Mission Control dashboard)

@@ -6,6 +6,7 @@ import path from "path";
 import { revalidatePath } from "next/cache";
 
 import { logger } from "../lib/logger";
+import { encryptLinkedinPassword } from "../lib/credentialCrypto";
 import type { OutreachMode } from "../lib/outreachModes";
 import { normalizeOutreachMode, OUTREACH_MODE_TO_DB } from "../lib/outreachModes";
 import type { PromptType } from "../lib/promptTypes";
@@ -1480,7 +1481,7 @@ export async function fetchLinkedinCredentials(): Promise<LinkedinCredentialSumm
   const value = (data as any)?.value || {};
   return {
     email: value.email || "",
-    hasPassword: Boolean(value.password),
+    hasPassword: Boolean(value.password || value.password_encrypted),
   };
 }
 
@@ -1496,9 +1497,26 @@ export async function saveLinkedinCredentials(
   }
 
   const client = supabaseAdmin();
+  let encryptedPayload;
+  try {
+    encryptedPayload = encryptLinkedinPassword(password);
+  } catch (cryptoError) {
+    logger.error("LinkedIn credentials encryption failed", {}, cryptoError as Error);
+    return { success: false, error: "Credential encryption is not configured." };
+  }
+
   const { error } = await client
     .from("settings")
-    .upsert({ key: "linkedin_credentials", value: { email, password } }, { onConflict: "key" });
+    .upsert(
+      {
+        key: "linkedin_credentials",
+        value: {
+          email,
+          ...encryptedPayload,
+        },
+      },
+      { onConflict: "key" }
+    );
 
   if (error) {
     console.error("saveLinkedinCredentials error", error);

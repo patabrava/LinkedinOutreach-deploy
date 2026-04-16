@@ -17,6 +17,7 @@ from supabase import Client, create_client
 
 # Import shared logger
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from credential_crypto import decrypt_password
 from shared_logger import get_logger
 
 load_dotenv()
@@ -878,12 +879,33 @@ def mark_processing(client: Client, lead_id: str) -> None:
 
 
 def mark_sent(client: Client, lead_id: str) -> None:
-    logger.db_query("update", "leads", {"leadId": lead_id}, {"status": "SENT"})
-    client.table("leads").update({"status": "SENT", "sent_at": datetime.utcnow().isoformat()}).eq(
-        "id", lead_id
-    ).execute()
+    now_iso = datetime.utcnow().isoformat()
+    logger.db_query("update", "leads", {"leadId": lead_id}, {"status": "SENT", "sequence_step": 1})
+    try:
+        client.table("leads").update(
+            {
+                "status": "SENT",
+                "sent_at": now_iso,
+                "sequence_step": 1,
+                "sequence_started_at": now_iso,
+                "sequence_last_sent_at": now_iso,
+            }
+        ).eq("id", lead_id).execute()
+    except Exception:
+        client.table("leads").update({"status": "SENT", "sent_at": now_iso}).eq("id", lead_id).execute()
     logger.db_result("update", "leads", {"leadId": lead_id}, 1)
     logger.info(f"Lead marked as SENT", {"leadId": lead_id})
+
+
+def _step_from_followup(followup_type: Any, attempt: Any) -> Optional[int]:
+    if (str(followup_type or "").upper() != "NUDGE"):
+        return None
+    attempt_i = _safe_int(attempt, 0)
+    if attempt_i == 1:
+        return 2
+    if attempt_i == 2:
+        return 3
+    return None
 
 
 def mark_failed(client: Client, lead_id: str, error_message: str = "") -> None:
@@ -1147,14 +1169,42 @@ def build_followup_message(fu: Dict[str, Any]) -> str:
     return sanitize_followup_message(raw_msg)
 
 
-def mark_followup_sent(client: Client, followup_id: str, message: str) -> None:
+def mark_followup_sent(client: Client, followup_id: str, message: str, followup: Optional[Dict[str, Any]] = None) -> None:
     now_iso = datetime.utcnow().isoformat()
     logger.db_query("update", "followups", {"followupId": followup_id}, {"status": "SENT"})
     client.table("followups").update(
         {"status": "SENT", "sent_text": message, "sent_at": now_iso, "processing_started_at": None}
     ).eq("id", followup_id).execute()
+
+    lead_id: Optional[str] = None
+    step_to_set: Optional[int] = None
+    if isinstance(followup, dict):
+        lead_id = str(followup.get("lead_id") or "") or None
+        step_to_set = _step_from_followup(followup.get("followup_type"), followup.get("attempt"))
+
+    if lead_id:
+        lead_update: Dict[str, Any] = {
+            "sequence_last_sent_at": now_iso,
+            "updated_at": now_iso,
+        }
+        if step_to_set is not None:
+            lead_update["sequence_step"] = step_to_set
+
+        try:
+            client.table("leads").update(lead_update).eq("id", lead_id).execute()
+        except Exception:
+            # Legacy schemas may miss sequence columns.
+            pass
+
     logger.db_result("update", "followups", {"followupId": followup_id}, 1)
-    logger.info(f"Followup marked as SENT", {"followupId": followup_id})
+    logger.info(
+        f"Followup marked as SENT",
+        {
+            "followupId": followup_id,
+            "leadId": lead_id,
+            "sequenceStep": step_to_set,
+        },
+    )
 
 
 def mark_followup_skipped(client: Client, followup_id: str, reason: str) -> None:
@@ -1324,7 +1374,7 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
 
         await send_message(page, message, surface)
         await page.close()
-        mark_followup_sent(client, followup_id, message)
+        mark_followup_sent(client, followup_id, message, followup)
 
         logger.message_send_complete(lead_id or "unknown", {"followupId": followup_id})
         logger.info(f"Followup sent successfully", {"followupId": followup_id, "leadId": lead_id})
@@ -1547,7 +1597,7 @@ def fetch_linkedin_credentials(client: Client) -> Optional[Dict[str, str]]:
     )
     value = (resp.data or [{}])[0].get("value") or {}
     email = value.get("email") or value.get("username")
-    password = value.get("password")
+    password = decrypt_password(value)
     if not email or not password:
         return None
     return {"email": email, "password": password}
