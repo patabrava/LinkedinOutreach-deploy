@@ -291,12 +291,12 @@ export default function FollowupsList({ initial }: Props) {
           <table className="lead-table" style={{ minWidth: 900 }}>
             <thead>
               <tr>
-                <th>LEAD</th>
-                <th>TYPE</th>
-                <th>MESSAGE</th>
-                <th>STATUS</th>
-                <th>DRAFT</th>
-                <th style={{ width: 180 }}>ACTIONS</th>
+                <th scope="col">LEAD</th>
+                <th scope="col">TYPE</th>
+                <th scope="col">MESSAGE</th>
+                <th scope="col">STATUS</th>
+                <th scope="col">DRAFT</th>
+                <th scope="col" style={{ width: 180 }}>ACTIONS</th>
               </tr>
             </thead>
             <tbody>

@@ -20,15 +20,7 @@ export default async function LeadsPage({
 
   return (
     <div className="page">
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "minmax(0, 1fr) 380px",
-          gap: 0,
-          alignItems: "flex-start",
-          marginBottom: 24,
-        }}
-      >
+      <div className="dashboard-grid">
         <div style={{ minWidth: 0 }}>
           <div className="pill">Batch Dashboard</div>
           <h1 style={{ margin: "16px 0 8px 0" }}>BATCHES</h1>

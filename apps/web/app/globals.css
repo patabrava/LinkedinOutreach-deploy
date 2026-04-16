@@ -95,8 +95,20 @@ h3 {
   gap: 20px;
 }
 
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  gap: 0;
+  align-items: flex-start;
+  margin-bottom: 24px;
+}
+
 @media (max-width: 960px) {
   .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-grid {
     grid-template-columns: 1fr;
   }
 
@@ -370,7 +382,9 @@ label {
 }
 
 .pager-btn {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
   padding: 8px 16px;
   border: var(--border-width) var(--border-style) var(--border-color);
   background: var(--bg);
@@ -903,8 +917,13 @@ select.input {
   }
   
   .nav-link {
-    padding: 12px 8px;
-    font-size: 9px;
+    padding: 12px 10px;
+    min-height: 44px;
+    font-size: 10px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
   }
 }
 

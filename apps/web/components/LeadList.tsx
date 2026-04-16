@@ -583,22 +583,22 @@ export function LeadList({
           <table className="lead-table" style={condensed ? { fontSize: 12, lineHeight: 1.4 } : undefined}>
             <thead>
               <tr>
-                <th>
+                <th scope="col">
                   {renderSortButton("LEAD", "name", "lead name")}
                 </th>
-                <th>
+                <th scope="col">
                   {renderSortButton("COMPANY", "company")}
                 </th>
-                <th>
+                <th scope="col">
                   {renderSortButton("STATUS", "status")}
                 </th>
-                <th>
+                <th scope="col">
                   {renderSortButton("FOLLOW-UPS", "followupCount", "follow-ups")}
                 </th>
-                <th>
+                <th scope="col">
                   {renderSortButton("ADDED", "createdAt", "added date")}
                 </th>
-                <th>
+                <th scope="col">
                   {renderSortButton("UPDATED", "updatedAt", "updated date")}
                 </th>
               </tr>
@@ -694,25 +694,31 @@ export function LeadList({
               : `Page ${page}`}
           </div>
           <div className="pager-controls">
-            <Link
-              className={`pager-btn${page <= 1 ? " disabled" : ""}`}
-              href={`${basePath}?page=${Math.max(1, page - 1)}`}
-              prefetch
-              aria-disabled={page <= 1}
-            >
-              ← PREV
-            </Link>
+            {page <= 1 ? (
+              <span className="pager-btn disabled">← PREV</span>
+            ) : (
+              <Link
+                className="pager-btn"
+                href={`${basePath}?page=${Math.max(1, page - 1)}`}
+                prefetch
+              >
+                ← PREV
+              </Link>
+            )}
             <span className="muted" style={{ padding: "0 16px" }}>
               PAGE {page} / {totalPages || 1}
             </span>
-            <Link
-              className={`pager-btn${page >= (totalPages || 1) ? " disabled" : ""}`}
-              href={`${basePath}?page=${Math.min(totalPages || 1, page + 1)}`}
-              prefetch
-              aria-disabled={page >= (totalPages || 1)}
-            >
-              NEXT →
-            </Link>
+            {page >= (totalPages || 1) ? (
+              <span className="pager-btn disabled">NEXT →</span>
+            ) : (
+              <Link
+                className="pager-btn"
+                href={`${basePath}?page=${Math.min(totalPages || 1, page + 1)}`}
+                prefetch
+              >
+                NEXT →
+              </Link>
+            )}
           </div>
         </div>
       ) : null}

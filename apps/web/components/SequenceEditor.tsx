@@ -575,8 +575,8 @@ export function SequenceEditor({ sequences, batches }: Props) {
             <table className="lead-table" style={{ fontSize: 12 }}>
               <thead>
                 <tr>
-                  <th>BATCH</th>
-                  <th>SEQUENCE</th>
+                  <th scope="col">BATCH</th>
+                  <th scope="col">SEQUENCE</th>
                 </tr>
               </thead>
               <tbody>
