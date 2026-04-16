@@ -1024,3 +1024,48 @@ select.input {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--accent);
 }
+
+.login-page {
+  max-width: 480px;
+  margin: var(--space-xl) auto;
+  padding: var(--space-lg);
+}
+
+.login-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  border: var(--border-width) var(--border-style) var(--border-color);
+  padding: var(--space-lg);
+  background: var(--bg);
+}
+
+.login-label {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 11px;
+}
+
+.login-input {
+  border: var(--border-width) var(--border-style) var(--border-color);
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 14px;
+  padding: var(--space-sm);
+  border-radius: 0;
+}
+
+.login-input--error {
+  border-style: dashed;
+}
+
+.login-status {
+  margin: 0;
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  min-height: 1.25em;
+}

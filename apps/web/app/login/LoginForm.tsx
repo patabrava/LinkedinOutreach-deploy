@@ -1,92 +1,54 @@
 "use client";
 
-import { FormEvent, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useFormState, useFormStatus } from "react-dom";
+import { requestMagicLink, type LoginState } from "./actions";
 
-import { isSupabaseBrowserConfigured, supabaseBrowserClient } from "../../lib/supabaseClient";
+const initialState: LoginState = { status: "idle" };
 
-export function LoginForm({ nextPath }: { nextPath: string }) {
-  const router = useRouter();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState("");
-  const supabaseConfigured = isSupabaseBrowserConfigured();
+function SubmitButton({ state }: { state: LoginState }) {
+  const { pending } = useFormStatus();
+  const label = pending ? "SENDING..." : state.status === "ok" ? "LINK SENT →" : "SEND LINK";
+  const className = state.status === "ok" ? "btn accent" : "btn";
+  return (
+    <button type="submit" className={className} disabled={pending}>
+      {label}
+    </button>
+  );
+}
 
-  const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!supabaseConfigured) {
-      setError("Supabase login is not configured yet.");
-      return;
-    }
-    setPending(true);
-    setError("");
+function statusLine(state: LoginState, queryError: string | null): string {
+  if (state.status === "ok") return "IF ALLOWED, A LINK WAS SENT.";
+  if (state.status === "error" && state.code === "AUTH_UNREACHABLE") return "AUTH SYSTEM UNREACHABLE";
+  if (state.status === "error" && state.code === "INVALID_EMAIL") return "INVALID EMAIL";
+  if (queryError === "denied") return "ACCESS DENIED.";
+  if (queryError === "expired") return "LINK EXPIRED. REQUEST A NEW ONE.";
+  return "";
+}
 
-    const supabase = supabaseBrowserClient();
-    if (!supabase) {
-      setPending(false);
-      setError("Supabase login is not configured yet.");
-      return;
-    }
-    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
-
-    if (signInError) {
-      setError(signInError.message);
-      setPending(false);
-      return;
-    }
-
-    router.replace(nextPath);
-    router.refresh();
-  };
+export function LoginForm({
+  nextPath,
+  queryError,
+}: {
+  nextPath: string;
+  queryError: string | null;
+}) {
+  const [state, formAction] = useFormState(requestMagicLink, initialState);
+  const inputClass = state.status === "error" ? "login-input login-input--error" : "login-input";
 
   return (
-    <div className="card" style={{ maxWidth: 640 }}>
-      <div className="pill">Operator Login</div>
-      <h1 style={{ marginTop: 16 }}>Mission Control Access</h1>
-      <p className="muted" style={{ marginBottom: 24 }}>
-        Sign in to reach the outreach dashboard. This gate protects the Mission Control, leads,
-        upload, follow-up, and settings pages.
-      </p>
-
-      <form onSubmit={onSubmit} style={{ display: "grid", gap: 16 }}>
-        <div>
-          <label htmlFor="email">Email</label>
-          <input
-            id="email"
-            className="input"
-            type="email"
-            autoComplete="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            required
-          />
-        </div>
-
-        <div>
-          <label htmlFor="password">Password</label>
-          <input
-            id="password"
-            className="input"
-            type="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            required
-          />
-        </div>
-
-        {error ? <div className="pill status-failed">{error}</div> : null}
-
-        <button className="btn accent" type="submit" disabled={pending || !supabaseConfigured}>
-          {pending ? "Signing in..." : supabaseConfigured ? "Sign in" : "Supabase unavailable"}
-        </button>
-        {!supabaseConfigured ? (
-          <div className="muted" style={{ fontSize: 12 }}>
-            Add `NEXT_PUBLIC_SUPABASE_URL` and a publishable or anon key to enable this login.
-          </div>
-        ) : null}
-      </form>
-    </div>
+    <form action={formAction} className="login-card">
+      <input type="hidden" name="next" value={nextPath} />
+      <label htmlFor="email" className="login-label">EMAIL</label>
+      <input
+        id="email"
+        name="email"
+        type="email"
+        required
+        autoComplete="email"
+        className={inputClass}
+      />
+      <SubmitButton state={state} />
+      <p className="login-status">{statusLine(state, queryError)}</p>
+    </form>
   );
 }
