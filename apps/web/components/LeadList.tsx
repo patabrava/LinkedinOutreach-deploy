@@ -519,7 +519,7 @@ export function LeadList({
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 16, flexWrap: "wrap" }}>
         <div style={{ minWidth: 260 }}>
           <div className="pill">Batch Progress</div>
-          <h3 style={{ margin: "12px 0 8px 0" }}>LEADS</h3>
+          <h3 className="section-title-tight">LEADS</h3>
           <div className="muted">{nextStepHint}</div>
         </div>
 

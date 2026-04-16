@@ -25,6 +25,9 @@
   /* Semantic Status Tokens */
   --success: var(--accent);   /* red = acted / committed */
   --error: var(--fg);         /* error = solid black; distinct from red */
+
+  /* Neutral palette */
+  --neutral-200: #e0e0e0;
 }
 
 * { 
@@ -123,6 +126,25 @@ h3 {
   border: var(--border-width) var(--border-style) var(--border-color);
   padding: var(--space-md) var(--space-sm) var(--space-lg) var(--space-md);
   margin-bottom: var(--space-md);
+}
+
+/* Action Block — Next Actions sidebar bordered boxes */
+.action-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: var(--border-width) var(--border-style) var(--border-color);
+  padding: var(--space-md);
+}
+
+/* Page/Section Title margin utility */
+.page-title {
+  margin: var(--space-md) 0 var(--space-sm) 0;
+}
+
+/* Section title tight — H3 sub-heads (was 12px 0 8px 0; 12px has no token, rounds to --space-sm) */
+.section-title-tight {
+  margin: var(--space-sm) 0 var(--space-sm) 0;
 }
 
 /* Brutalist Buttons */
@@ -321,11 +343,11 @@ label {
 /* Status Variants */
 .status-new { background: var(--bg); }
 .status-enriched { background: var(--highlight); }
-.status-draft { background: #e0e0e0; }
+.status-draft { background: var(--neutral-200); }
 .status-approved { background: var(--fg); color: var(--bg); border-color: var(--fg); }
 .status-sent { background: var(--success); color: var(--bg); border-color: var(--success); }
 .status-rejected { background: var(--error); color: var(--bg); border-color: var(--error); border-style: dashed; }
-.status-pending { background: #e0e0e0; }
+.status-pending { background: var(--neutral-200); }
 .status-processing { background: var(--highlight); }
 .status-failed { background: var(--error); color: var(--bg); border-color: var(--error); border-style: dashed; }
 

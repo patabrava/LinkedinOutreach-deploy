@@ -234,7 +234,7 @@ export default function FollowupsList({ initial }: Props) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
         <div>
           <div className="pill">Follow-ups</div>
-          <h3 style={{ margin: "12px 0 8px 0" }}>FOLLOW-UPS NEEDING REVIEW</h3>
+          <h3 className="section-title-tight">FOLLOW-UPS NEEDING REVIEW</h3>
           <div className="muted">Review replies and nudge opportunities, then draft and send your response.</div>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "flex-end" }}>

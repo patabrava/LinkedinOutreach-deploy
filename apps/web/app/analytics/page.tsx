@@ -29,7 +29,7 @@ export default async function AnalyticsPage({ searchParams }: PageProps) {
         <div className="page">
             <div style={{ marginBottom: 24 }}>
                 <div className="pill">Analytics</div>
-                <h1 style={{ margin: "16px 0 8px 0", textTransform: "uppercase" }}>
+                <h1 className="page-title" style={{ textTransform: "uppercase" }}>
                     Outreach Performance
                 </h1>
                 <div className="muted">

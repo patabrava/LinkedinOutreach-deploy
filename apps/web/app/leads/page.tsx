@@ -23,7 +23,7 @@ export default async function LeadsPage({
       <div className="dashboard-grid">
         <div style={{ minWidth: 0 }}>
           <div className="pill">Batch Dashboard</div>
-          <h1 style={{ margin: "16px 0 8px 0" }}>BATCHES</h1>
+          <h1 className="page-title">BATCHES</h1>
           <div className="muted">
             Upload leads, pick a batch, then run the next step for that batch intent. Connect-only sends invites without a note. Connect + Message prepares leads for messaging after acceptance.
           </div>
@@ -39,11 +39,11 @@ export default async function LeadsPage({
         <div className="card" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16, borderLeft: "none", borderTop: "none", borderBottom: "none" }}>
           <div>
             <div className="pill">Next Actions</div>
-            <h3 style={{ margin: "12px 0 8px 0" }}>RUN WHAT'S NEXT</h3>
+            <h3 className="page-title">RUN WHAT'S NEXT</h3>
             <div className="muted">These actions run across all eligible leads (across batches) for the selected intent.</div>
           </div>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, border: "3px solid #000", padding: 16 }}>
+          <div className="action-block">
             <div>
               <strong>CONNECT + MESSAGE</strong>
               <div className="muted" style={{ marginTop: 4 }}>Step 1: Enrich NEW leads so they're ready for messaging after acceptance.</div>
@@ -51,7 +51,7 @@ export default async function LeadsPage({
             <StartEnrichmentButton mode="message" variant="dashboard" />
           </div>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, border: "3px solid #000", padding: 16 }}>
+          <div className="action-block">
             <div>
               <strong>CONNECT ONLY</strong>
               <div className="muted" style={{ marginTop: 4 }}>Send connection requests without a note for connect-only batches.</div>
@@ -59,7 +59,7 @@ export default async function LeadsPage({
             <StartEnrichmentButton mode="connect_only" variant="dashboard" />
           </div>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, border: "3px solid #000", padding: 16 }}>
+          <div className="action-block">
             <div>
               <strong>MESSAGING + SEQUENCES</strong>
               <div className="muted" style={{ marginTop: 4 }}>Review drafts, approvals, and post-acceptance sequences.</div>
@@ -69,7 +69,7 @@ export default async function LeadsPage({
             </a>
           </div>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, border: "3px solid #000", padding: 16 }}>
+          <div className="action-block">
             <div>
               <strong>FOLLOW-UPS</strong>
               <div className="muted" style={{ marginTop: 4 }}>Send all approved follow-up messages to due leads.</div>

@@ -374,7 +374,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
   return (
     <section className="card" style={{ marginBottom: 24 }}>
       <div className="pill">Post-Acceptance Sequences</div>
-      <h3 style={{ margin: "12px 0 8px 0" }}>SEQUENCES + BATCH ASSIGNMENT</h3>
+      <h3 className="section-title-tight">SEQUENCES + BATCH ASSIGNMENT</h3>
       <div className="muted" style={{ marginBottom: 16 }}>
         Sequences are used only after a connection is accepted. Invite notes are separate. Each imported CSV creates a batch; assign each batch to one sequence.
       </div>
