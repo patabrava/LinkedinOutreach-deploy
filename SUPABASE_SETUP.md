@@ -97,6 +97,34 @@ The following schema has been successfully applied:
    python -c "from tools import supabase_client; print(supabase_client().table('leads').select('*').execute())"
    ```
 
+## Hostinger VPS rollout
+
+When you move the app from local development to the single Hostinger VPS, keep the same Supabase project and use the VPS only as the runtime host.
+
+VPS assumptions:
+- The machine has enough RAM to run Next.js, the Python workers, and Chromium together.
+- Persistent disk is available for LinkedIn auth state and logs.
+- Only the reverse proxy ports (`80` and `443`) are public. The app services remain internal, with the web app on `3000` behind the proxy.
+- The runtime service names stay aligned with the launcher/compose terms: `web`, `agent`, `sender`, `sender_message_only`, and `sender_followup`.
+
+Production launch flow:
+```bash
+docker compose build
+docker compose up -d
+docker compose logs -f --tail=200 web agent sender sender_message_only sender_followup
+docker compose restart web agent sender sender_message_only sender_followup
+```
+
+Rollback:
+```bash
+git checkout HEAD~1
+docker compose up -d --build
+```
+
+Rollout phases:
+1. Public-first: expose the web UI on the domain so the app can be used over the web while the workers stay private on the VPS.
+2. Auth gate later: add Supabase login and gate the web UI and privileged actions before opening the app to broader use.
+
 ## Security Notes
 
 - ⚠️ **NEVER** commit `.env` files to git

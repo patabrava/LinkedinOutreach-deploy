@@ -97,3 +97,17 @@ pre-commit run --all-files
 - [LinkedIn Account Security](https://www.linkedin.com/help/linkedin/answer/a1338610)
 - [OWASP Secrets Management](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html)
 - [Pre-Commit Framework](https://pre-commit.com/)
+
+## Hostinger VPS deployment security
+
+For the single-VPS rollout, treat the VPS as a private runtime with one public edge:
+
+- Keep only the reverse proxy ports open to the internet.
+- Keep only `80` and `443` open publicly; keep the web app on `3000` behind the proxy.
+- Keep `workers/scraper/auth.json`, `workers/sender/auth.json`, and logs on persistent disk.
+- Do not expose the worker processes directly on public ports.
+- Keep the `web`, `agent`, `sender`, `sender_message_only`, and `sender_followup` service names stable across the compose file and runbook so production and troubleshooting stay aligned.
+
+Rollout phases:
+1. Public-first: the web UI is public, but privileged worker entrypoints stay internal.
+2. Auth gate later: once Supabase login lands, require authenticated sessions before reaching protected UI actions or worker-triggering routes.
