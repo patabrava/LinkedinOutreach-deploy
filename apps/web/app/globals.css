@@ -773,7 +773,10 @@ label {
 .funnel__bar {
   height: 100%;
   background: var(--fg);
-  transition: width 0.4s ease;
+  width: 100%;
+  transform-origin: left center;
+  transform: scaleX(var(--bar-scale, 0));
+  transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1); /* ease-out-quart */
 }
 
 .funnel__bar--highlight {
@@ -868,7 +871,10 @@ label {
   width: 100%;
   min-height: 2px;
   background: var(--fg);
-  transition: height 0.3s ease;
+  height: 100%;
+  transform-origin: center bottom;
+  transform: scaleY(var(--bar-scale, 0));
+  transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .daily-chart__bar-wrapper:hover .daily-chart__bar {

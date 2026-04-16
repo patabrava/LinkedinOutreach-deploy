@@ -44,6 +44,7 @@ export default function FollowupsList({ initial }: Props) {
   const [genMessage, setGenMessage] = useState<string | null>(null);
   const [bulkPending, setBulkPending] = useState(false);
   const [bulkMessage, setBulkMessage] = useState<string | null>(null);
+  const [hydrationError, setHydrationError] = useState<string | null>(null);
 
   useEffect(() => {
     setRows(initial || []);
@@ -62,6 +63,7 @@ export default function FollowupsList({ initial }: Props) {
           .limit(100);
         if (error) {
           console.warn("Followups client fetch error", error);
+          setHydrationError("Failed to refresh followups — showing server snapshot. See console.");
           return;
         }
         if (data && data.length) {
@@ -69,6 +71,7 @@ export default function FollowupsList({ initial }: Props) {
         }
       } catch (err) {
         console.warn("Followups client fetch failed", err);
+        setHydrationError("Failed to refresh followups — showing server snapshot. See console.");
       }
     })();
   }, []);
@@ -274,6 +277,13 @@ export default function FollowupsList({ initial }: Props) {
           )}
         </div>
       </div>
+
+      {hydrationError ? (
+        <div className="card" style={{ borderColor: "var(--error)", borderStyle: "dashed", marginBottom: 12 }}>
+          <strong>Warning</strong>
+          <div className="muted">{hydrationError}</div>
+        </div>
+      ) : null}
 
       {rows.length === 0 ? (
         <div className="muted" style={{ marginTop: 16 }}>
