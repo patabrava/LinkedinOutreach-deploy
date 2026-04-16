@@ -32,9 +32,6 @@ export default async function AnalyticsPage({ searchParams }: PageProps) {
                 <h1 className="page-title" style={{ textTransform: "uppercase" }}>
                     Outreach Performance
                 </h1>
-                <div className="muted">
-                    Track your LinkedIn outreach metrics, response rates, and conversion funnel.
-                </div>
             </div>
 
             <AnalyticsDashboard

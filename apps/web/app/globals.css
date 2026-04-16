@@ -128,13 +128,35 @@ h3 {
   margin-bottom: var(--space-md);
 }
 
-/* Action Block — Next Actions sidebar bordered boxes */
-.action-block {
+/* Action Stack — Next Actions sidebar single bordered container */
+.action-stack {
+  border: var(--border-width) var(--border-style) var(--border-color);
+}
+
+.action-stack__row {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  border: var(--border-width) var(--border-style) var(--border-color);
   padding: var(--space-md);
+  border-bottom: 2px solid var(--border-color);
+}
+
+.action-stack__row:last-child {
+  border-bottom: none;
+}
+
+.action-stack__row--primary strong {
+  font-size: 16px;
+}
+
+.action-stack__row strong {
+  font-size: 13px;
+}
+
+.action-stack__header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 /* Page/Section Title margin utility */
@@ -306,8 +328,12 @@ label {
   background: var(--row-alt);
 }
 
-.lead-table tr:hover {
-  background: var(--highlight);
+.lead-table tbody tr {
+  position: relative;
+}
+.lead-table tbody tr:hover {
+  outline: 3px solid var(--fg);
+  outline-offset: -3px;
 }
 
 /* Pills & Status Chips */
