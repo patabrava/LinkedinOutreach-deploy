@@ -1,6 +1,7 @@
 import { LeadList } from "../../components/LeadList";
 import { StartEnrichmentButton } from "../../components/StartEnrichmentButton";
-import { fetchLeadList } from "../actions";
+import { TriggerButton } from "../../components/TriggerButton";
+import { fetchLeadList, triggerFollowupSender } from "../actions";
 
 export default async function LeadsPage({
   searchParams,
@@ -46,14 +47,14 @@ export default async function LeadsPage({
         <div className="card" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16, borderLeft: "none", borderTop: "none", borderBottom: "none" }}>
           <div>
             <div className="pill">Next Actions</div>
-            <h3 style={{ margin: "12px 0 8px 0" }}>RUN WHAT’S NEXT</h3>
+            <h3 style={{ margin: "12px 0 8px 0" }}>RUN WHAT'S NEXT</h3>
             <div className="muted">These actions run across all eligible leads (across batches) for the selected intent.</div>
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8, border: "3px solid #000", padding: 16 }}>
             <div>
               <strong>CONNECT + MESSAGE</strong>
-              <div className="muted" style={{ marginTop: 4 }}>Step 1: Enrich NEW leads so they’re ready for messaging after acceptance.</div>
+              <div className="muted" style={{ marginTop: 4 }}>Step 1: Enrich NEW leads so they're ready for messaging after acceptance.</div>
             </div>
             <StartEnrichmentButton mode="message" variant="dashboard" />
           </div>
@@ -74,6 +75,20 @@ export default async function LeadsPage({
             <a className="btn secondary" href="/">
               OPEN MESSAGING
             </a>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, border: "3px solid #000", padding: 16 }}>
+            <div>
+              <strong>FOLLOW-UPS</strong>
+              <div className="muted" style={{ marginTop: 4 }}>Send all approved follow-up messages to due leads.</div>
+            </div>
+            <TriggerButton
+              action={triggerFollowupSender}
+              label="SEND DUE FOLLOW-UPS"
+              pendingLabel="SENDING…"
+              successMessage="Follow-up sender started."
+              variant="secondary"
+            />
           </div>
 
           <div className="muted" style={{ marginTop: 4 }}>Tip: use the Batch selector below to focus on one upload at a time.</div>
