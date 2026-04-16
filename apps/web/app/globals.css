@@ -507,22 +507,6 @@ label {
   color: var(--bg);
 }
 
-.nav-label {
-  font-weight: 700;
-}
-
-.nav-hint {
-  color: var(--muted);
-  font-size: 9px;
-  letter-spacing: 0.05em;
-  font-weight: 400;
-  text-transform: uppercase;
-}
-
-.nav-link.active .nav-hint {
-  color: var(--bg);
-  opacity: 0.7;
-}
 
 @media (max-width: 1100px) {
   .nav-inner {
@@ -825,7 +809,7 @@ label {
 }
 
 .daily-chart__bar-value {
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   color: var(--fg);
   min-height: 12px;
@@ -844,7 +828,7 @@ label {
 }
 
 .daily-chart__bar-label {
-  font-size: 9px;
+  font-size: 10px;
   color: var(--muted);
   text-align: center;
   text-transform: uppercase;

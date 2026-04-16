@@ -4,12 +4,12 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const NAV_ITEMS = [
-  { href: "/", label: "Mission Control", hint: "Post-acceptance work" },
-  { href: "/leads", label: "Leads", hint: "Batch progress" },
-  { href: "/upload", label: "Upload", hint: "Batch intake" },
-  { href: "/followups", label: "Follow-ups", hint: "Replies & review" },
-  { href: "/analytics", label: "Analytics", hint: "Performance metrics" },
-  { href: "/settings", label: "Settings", hint: "LinkedIn credentials" },
+  { href: "/", label: "Mission Control" },
+  { href: "/leads", label: "Leads" },
+  { href: "/upload", label: "Upload" },
+  { href: "/followups", label: "Follow-ups" },
+  { href: "/analytics", label: "Analytics" },
+  { href: "/settings", label: "Settings" },
 ];
 
 export function NavBar() {
@@ -35,8 +35,7 @@ export function NavBar() {
                 className={`nav-link${isActive ? " active" : ""}`}
                 prefetch
               >
-                <div className="nav-label">{item.label}</div>
-                <div className="nav-hint">{item.hint}</div>
+                {item.label}
               </Link>
             );
           })}
