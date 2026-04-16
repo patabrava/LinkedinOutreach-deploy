@@ -21,6 +21,10 @@
   --border-width: 3px;
   --border-style: solid;
   --border-color: #000000;
+
+  /* Semantic Status Tokens */
+  --success: var(--accent);   /* red = acted / committed */
+  --error: var(--fg);         /* error = solid black; distinct from red */
 }
 
 * { 
@@ -307,11 +311,11 @@ label {
 .status-enriched { background: var(--highlight); }
 .status-draft { background: #e0e0e0; }
 .status-approved { background: var(--fg); color: var(--bg); border-color: var(--fg); }
-.status-sent { background: var(--accent); color: var(--bg); border-color: var(--accent); }
-.status-rejected { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.status-sent { background: var(--success); color: var(--bg); border-color: var(--success); }
+.status-rejected { background: var(--error); color: var(--bg); border-color: var(--error); border-style: dashed; }
 .status-pending { background: #e0e0e0; }
 .status-processing { background: var(--highlight); }
-.status-failed { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.status-failed { background: var(--error); color: var(--bg); border-color: var(--error); border-style: dashed; }
 
 /* Muted Text */
 .muted {
