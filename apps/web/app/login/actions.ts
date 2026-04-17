@@ -3,6 +3,7 @@
 import { headers } from "next/headers";
 import { isAllowed, normalizeEmail } from "../../lib/allowlist";
 import { isSupabaseAuthConfigured } from "../../lib/authConfig";
+import { getCanonicalSiteOrigin } from "../../lib/siteOrigin";
 import { supabaseServerAction } from "../../lib/supabaseServer";
 
 export type LoginState =
@@ -37,8 +38,9 @@ export async function requestMagicLink(
 
   const hdrs = headers();
   const host = hdrs.get("x-forwarded-host") ?? hdrs.get("host");
-  const proto = hdrs.get("x-forwarded-proto") ?? "http";
-  const origin = host ? `${proto}://${host}` : "";
+  const proto = hdrs.get("x-forwarded-proto") ?? "https";
+  const requestOrigin = host ? `${proto}://${host}` : "";
+  const origin = getCanonicalSiteOrigin() || requestOrigin;
 
   const nextRaw = formData.get("next");
   const next = typeof nextRaw === "string" && nextRaw.startsWith("/") ? nextRaw : "/";
