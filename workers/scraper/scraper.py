@@ -1184,6 +1184,26 @@ async def main(limit: int = 10, mode: str = "enrich") -> None:
         raise
 
 
+async def login_only_mode() -> None:
+    """Authenticate LinkedIn and persist auth.json without scraping leads."""
+    logger.operation_start("linkedin-auth", input_data={"mode": "login_only"})
+
+    try:
+        client = get_supabase_client()
+        creds = fetch_linkedin_credentials(client)
+        playwright, browser, context = await open_browser(headless=False)
+        try:
+            logger.info("Browser opened for LinkedIn login attempt")
+            await ensure_linkedin_auth(context, creds)
+            logger.operation_complete("linkedin-auth", result={"session_state": "session_active"})
+        finally:
+            await shutdown(playwright, browser)
+            logger.info("Browser closed")
+    except Exception as exc:
+        logger.operation_error("linkedin-auth", error=exc, input_data={"mode": "login_only"})
+        raise
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="LinkedIn scraper")
     parser.add_argument(
@@ -1208,6 +1228,11 @@ def parse_args() -> argparse.Namespace:
         choices=["enrich", "connect_only"],
         default="enrich",
         help="Execution mode: enrich (default) or connect_only for enrichment + invite without note.",
+    )
+    parser.add_argument(
+        "--login-only",
+        action="store_true",
+        help="Run only the LinkedIn authentication bootstrap and exit.",
     )
     return parser.parse_args()
 
@@ -2068,6 +2093,10 @@ async def inbox_mode(limit: int = 0) -> None:
 
 if __name__ == "__main__":
     args = parse_args()
+    if getattr(args, "login_only", False):
+        asyncio.run(login_only_mode())
+        sys.exit(0)
+
     if not args.run:
         print("Scraper invoked without --run flag. Exiting without processing leads.")
         sys.exit(0)

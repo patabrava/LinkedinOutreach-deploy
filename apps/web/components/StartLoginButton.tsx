@@ -15,7 +15,7 @@ type LoginResponse = {
   error?: string;
 };
 
-export function StartLoginButton({ onStart, label = "LOG IN TO LINKEDIN" }: Props) {
+export function StartLoginButton({ onStart, label = "START LOGIN ATTEMPT" }: Props) {
   const [running, setRunning] = useState(false);
   const [msg, setMsg] = useState<string>("");
 
@@ -30,11 +30,11 @@ export function StartLoginButton({ onStart, label = "LOG IN TO LINKEDIN" }: Prop
       });
       const data = (await res.json()) as LoginResponse;
       if (!res.ok || data?.ok === false) {
-        throw new Error(data?.error || "Failed to launch login window.");
+        throw new Error(data?.error || "Failed to start LinkedIn login attempt.");
       }
       setMsg(
         data?.message ||
-          "Login window launched. Complete login, then return to Settings to recheck session state."
+          "LinkedIn login started on the worker. Recheck session state after it completes."
       );
     } catch (error: unknown) {
       setMsg(error instanceof Error ? error.message : "Network error");

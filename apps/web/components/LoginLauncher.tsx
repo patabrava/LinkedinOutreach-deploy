@@ -17,12 +17,12 @@ const SESSION_COPY: Record<
   no_credentials: {
     label: "NO CREDENTIALS",
     helper: "Save your LinkedIn email and password below before you launch a session.",
-    cta: "LOG IN TO LINKEDIN",
+    cta: "START LOGIN ATTEMPT",
   },
   credentials_saved: {
     label: "CREDENTIALS SAVED",
     helper: "The login details are stored, but this worker has not verified a usable LinkedIn session yet.",
-    cta: "LOG IN TO LINKEDIN",
+    cta: "START LOGIN ATTEMPT",
   },
   session_active: {
     label: "SESSION ACTIVE",
@@ -37,7 +37,7 @@ const SESSION_COPY: Record<
   login_required: {
     label: "LOGIN REQUIRED",
     helper: "LinkedIn needs a fresh login before this worker can continue.",
-    cta: "LOG IN TO LINKEDIN",
+    cta: "START LOGIN ATTEMPT",
   },
 };
 
