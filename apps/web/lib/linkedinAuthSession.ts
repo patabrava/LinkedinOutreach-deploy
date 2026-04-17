@@ -45,6 +45,7 @@ const DEFAULT_STATUS: LinkedinAuthStatus = {
 const getScraperDir = () => {
   const candidates = [
     process.env.LINKEDIN_SCRAPER_DIR?.trim(),
+    "/data/scraper",
     path.resolve(process.cwd(), "workers", "scraper"),
     path.resolve(process.cwd(), "..", "..", "workers", "scraper"),
   ].filter((candidate): candidate is string => Boolean(candidate));

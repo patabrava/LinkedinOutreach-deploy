@@ -26,7 +26,22 @@ load_dotenv()
 logger = get_logger("sender")
 
 # Reuse the scraper's persisted auth state to avoid drift between workers.
-AUTH_STATE_PATH = (Path(__file__).parent.parent / "scraper" / "auth.json").resolve()
+def _resolve_scraper_auth_path() -> Path:
+    candidates = [
+        os.getenv("LINKEDIN_SCRAPER_DIR", "").strip(),
+        "/data/scraper",
+        str((Path(__file__).parent.parent / "scraper").resolve()),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if path.exists():
+            return (path / "auth.json").resolve()
+    return (Path(__file__).parent.parent / "scraper" / "auth.json").resolve()
+
+
+AUTH_STATE_PATH = _resolve_scraper_auth_path()
 DAILY_SEND_DEFAULT = 100
 SEQUENCE_INTERVAL_DEFAULT_DAYS = 3
 LEAD_MESSAGE_ONLY_MAX_RETRIES = 3

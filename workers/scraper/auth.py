@@ -25,9 +25,26 @@ __all__ = [
     "shutdown",
 ]
 
-AUTH_STATE_PATH = Path(__file__).parent / "auth.json"
-AUTH_STATUS_PATH = Path(__file__).parent / "auth_status.json"
-AUTH_STATUS_BACKUP_PATH = Path(__file__).parent / "auth_status.json.bak"
+def _resolve_auth_dir() -> Path:
+    """Prefer the mounted runtime volume, then fall back to the repo-local worker dir."""
+    candidates = [
+        os.getenv("LINKEDIN_SCRAPER_DIR", "").strip(),
+        "/data/scraper",
+        str(Path(__file__).parent),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if path.exists():
+            return path.resolve()
+    return Path(__file__).parent.resolve()
+
+
+AUTH_DIR = _resolve_auth_dir()
+AUTH_STATE_PATH = AUTH_DIR / "auth.json"
+AUTH_STATUS_PATH = AUTH_DIR / "auth_status.json"
+AUTH_STATUS_BACKUP_PATH = AUTH_DIR / "auth_status.json.bak"
 
 
 @dataclass

@@ -14,7 +14,12 @@ export async function POST(request: Request) {
   try {
     const webDir = process.cwd();
     const repoRoot = path.resolve(webDir, "..", "..");
-    const scraperDir = path.join(repoRoot, "workers", "scraper");
+    const runtimeScraperDir = process.env.LINKEDIN_SCRAPER_DIR?.trim();
+    const scraperDir = runtimeScraperDir && fs.existsSync(runtimeScraperDir)
+      ? runtimeScraperDir
+      : fs.existsSync("/data/scraper")
+        ? "/data/scraper"
+        : path.join(repoRoot, "workers", "scraper");
     const authPath = path.join(scraperDir, "auth.json");
 
     logger.debug("Preparing to launch login window", { correlationId }, { scraperDir, authPath });

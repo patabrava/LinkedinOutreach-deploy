@@ -6,6 +6,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$ROOT_DIR/.logs"
 WEB_RUNTIME="${WEB_RUNTIME:-dev}"
+SCRAPER_STATE_DIR="${LINKEDIN_SCRAPER_DIR:-/data/scraper}"
+SENDER_STATE_DIR="${LINKEDIN_SENDER_DIR:-/data/sender}"
 mkdir -p "$LOG_DIR"
 
 SERVICE_PIDS=()
@@ -35,13 +37,13 @@ load_envs() {
 
 check_auth() {
   local missing=0
-  if [ ! -f "$ROOT_DIR/workers/scraper/auth.json" ]; then
-    echo "[scraper] ⚠ Missing auth.json at workers/scraper/auth.json. Login once via:"
+  if [ ! -f "$SCRAPER_STATE_DIR/auth.json" ] && [ ! -f "$ROOT_DIR/workers/scraper/auth.json" ]; then
+    echo "[scraper] ⚠ Missing auth.json at $SCRAPER_STATE_DIR/auth.json (or workers/scraper/auth.json). Login once via:"
     echo "[scraper]   playwright codegen --save-storage=auth.json https://www.linkedin.com/login"
     missing=1
   fi
-  if [ ! -f "$ROOT_DIR/workers/sender/auth.json" ]; then
-    echo "[sender] ⚠ Missing auth.json at workers/sender/auth.json. Copy it from scraper or generate via codegen."
+  if [ ! -f "$SENDER_STATE_DIR/auth.json" ] && [ ! -f "$ROOT_DIR/workers/sender/auth.json" ]; then
+    echo "[sender] ⚠ Missing auth.json at $SENDER_STATE_DIR/auth.json (or workers/sender/auth.json). Copy it from scraper or generate via codegen."
     missing=1
   fi
   return $missing
@@ -124,7 +126,7 @@ ensure_prod_web_build() {
 }
 
 has_sender_auth_state() {
-  [ -f "$ROOT_DIR/workers/sender/auth.json" ] || [ -f "$ROOT_DIR/workers/scraper/auth.json" ]
+  [ -f "$SENDER_STATE_DIR/auth.json" ] || [ -f "$SCRAPER_STATE_DIR/auth.json" ] || [ -f "$ROOT_DIR/workers/sender/auth.json" ] || [ -f "$ROOT_DIR/workers/scraper/auth.json" ]
 }
 
 web_command() {
