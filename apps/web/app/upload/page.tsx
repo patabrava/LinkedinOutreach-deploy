@@ -1,9 +1,11 @@
 import { CSVUploader } from "../../components/CSVUploader";
+import { requireServerSession } from "../../lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-export default function UploadPage() {
+export default async function UploadPage() {
+  await requireServerSession("/upload");
   return (
     <div className="page">
       <div className="pill">Import</div>

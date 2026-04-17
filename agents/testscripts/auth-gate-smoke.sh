@@ -45,6 +45,23 @@ if ! printf '%s\n' "${root_headers}" | grep -Ei '^location: .*/login'; then
   exit 1
 fi
 
+leads_headers="$(curl -sS -D - -o /dev/null "http://127.0.0.1:${PORT}/leads" | tr -d '\r')"
+if ! printf '%s\n' "${leads_headers}" | grep -Eq '^HTTP/.* 30[27] '; then
+  echo "expected /leads to redirect when auth env is missing or auth is enforced" >&2
+  exit 1
+fi
+if ! printf '%s\n' "${leads_headers}" | grep -Ei '^location: .*/login'; then
+  echo "expected /leads to redirect to /login" >&2
+  exit 1
+fi
+
+for _ in {1..30}; do
+  login_status="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/login" || true)"
+  if [[ "${login_status}" == "200" ]]; then
+    break
+  fi
+  sleep 2
+done
 login_html="$(curl -fsS "http://127.0.0.1:${PORT}/login")"
 if ! printf '%s\n' "${login_html}" | grep -Fq "AUTH GATE NOT CONFIGURED"; then
   echo "expected login page to surface the auth misconfiguration" >&2

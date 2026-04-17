@@ -1,13 +1,13 @@
 import { DraftFeed } from "../components/DraftFeed";
 import { SequenceEditor } from "../components/SequenceEditor";
-import { getServerSession } from "../lib/auth";
+import { requireServerSession } from "../lib/auth";
 import { fetchDraftFeed, fetchLeadBatches, fetchOutreachSequences } from "./actions";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 export default async function MissionControlPage() {
-  const session = await getServerSession();
+  const session = await requireServerSession("/");
   const [drafts, sequences, batches] = await Promise.all([
     fetchDraftFeed("connect_only"),
     fetchOutreachSequences(),

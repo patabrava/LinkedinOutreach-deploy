@@ -1,10 +1,12 @@
 import { fetchFollowups, triggerInboxScan, triggerFollowupSender } from "../actions";
 import FollowupsList from "../../components/FollowupsList";
 import { TriggerButton } from "../../components/TriggerButton";
+import { requireServerSession } from "../../lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export default async function FollowupsPage() {
+  await requireServerSession("/followups");
   const initial = await fetchFollowups(["PENDING_REVIEW", "APPROVED"], 100);
   return (
     <main className="container">

@@ -1,6 +1,7 @@
 import { LeadList } from "../../components/LeadList";
 import { StartEnrichmentButton } from "../../components/StartEnrichmentButton";
 import { TriggerButton } from "../../components/TriggerButton";
+import { requireServerSession } from "../../lib/auth";
 import { fetchLeadList, triggerFollowupSender } from "../actions";
 
 export const dynamic = "force-dynamic";
@@ -11,6 +12,7 @@ export default async function LeadsPage({
 }: {
   searchParams?: { page?: string; status?: string; company?: string; name?: string; linkedin?: string };
 }) {
+  await requireServerSession("/leads");
   const currentPage = Math.max(1, Number(searchParams?.page) || 1);
   const filters = {
     status: (searchParams?.status || "").trim(),

@@ -1,6 +1,7 @@
 import { createServerComponentClient } from "@supabase/auth-helpers-nextjs";
 import type { Session, User } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 
 import { isSupabaseAuthConfigured } from "./authConfig";
 
@@ -39,4 +40,21 @@ export async function getServerSession(): Promise<Session | null> {
 export async function getServerUser(): Promise<User | null> {
   const session = await getServerSession();
   return session?.user ?? null;
+}
+
+export async function requireServerSession(nextPath = "/"): Promise<Session> {
+  const session = await getServerSession();
+  if (session?.user) {
+    return session;
+  }
+
+  const search = new URLSearchParams();
+  if (nextPath && nextPath !== "/") {
+    search.set("next", nextPath);
+  }
+  if (!hasSupabaseSessionConfig()) {
+    search.set("e", "config");
+  }
+  const query = search.toString();
+  redirect(query ? `${LOGIN_PATH}?${query}` : LOGIN_PATH);
 }
