@@ -84,9 +84,30 @@ def require_auth_state() -> None:
         )
 
 
+def _should_force_headless(requested_headless: bool) -> bool:
+    """Keep desktop debugging visible, but force headless mode in Linux containers."""
+    if requested_headless:
+        return True
+
+    visible_override = os.getenv("PLAYWRIGHT_VISIBLE_BROWSER", "").strip().lower()
+    if visible_override in {"1", "true", "yes"}:
+        return False
+
+    forced_headless = os.getenv("PLAYWRIGHT_FORCE_HEADLESS", "").strip().lower()
+    if forced_headless in {"1", "true", "yes"}:
+        return True
+
+    if sys.platform.startswith("linux"):
+        has_display = bool(os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY"))
+        return not has_display
+
+    return False
+
+
 async def open_browser(headless: bool = False) -> Tuple[Playwright, Browser, BrowserContext]:
     playwright = await async_playwright().start()
-    browser = await playwright.chromium.launch(headless=headless)
+    effective_headless = _should_force_headless(headless)
+    browser = await playwright.chromium.launch(headless=effective_headless)
     # Use a copy of the auth state to avoid file locking conflicts with scraper
     storage_state = None
     if AUTH_STATE_PATH.exists():

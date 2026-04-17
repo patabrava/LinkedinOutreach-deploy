@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+import os
+import sys
 from typing import Literal, Optional, Tuple
 
 from playwright.async_api import Browser, BrowserContext, Playwright, TimeoutError, async_playwright
@@ -103,11 +105,32 @@ def update_auth_status(**updates) -> LinkedinAuthStatus:
     return status
 
 
+def _should_force_headless(requested_headless: bool) -> bool:
+    """Keep local desktop sessions visible, but force headless mode in Linux containers."""
+    if requested_headless:
+        return True
+
+    visible_override = os.getenv("PLAYWRIGHT_VISIBLE_BROWSER", "").strip().lower()
+    if visible_override in {"1", "true", "yes"}:
+        return False
+
+    forced_headless = os.getenv("PLAYWRIGHT_FORCE_HEADLESS", "").strip().lower()
+    if forced_headless in {"1", "true", "yes"}:
+        return True
+
+    if sys.platform.startswith("linux"):
+        has_display = bool(os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY"))
+        return not has_display
+
+    return False
+
+
 async def open_browser(headless: bool = True) -> Tuple[Playwright, Browser, BrowserContext]:
     """Start Playwright and return playwright, browser, and a context with saved cookies."""
     storage_state = str(AUTH_STATE_PATH) if AUTH_STATE_PATH.exists() else None
     playwright = await async_playwright().start()
-    browser = await playwright.chromium.launch(headless=headless)
+    effective_headless = _should_force_headless(headless)
+    browser = await playwright.chromium.launch(headless=effective_headless)
     context = await browser.new_context(storage_state=storage_state)
     return playwright, browser, context
 
