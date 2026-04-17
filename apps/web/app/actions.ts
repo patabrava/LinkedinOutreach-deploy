@@ -11,7 +11,7 @@ import type { OutreachMode } from "../lib/outreachModes";
 import { normalizeOutreachMode, OUTREACH_MODE_TO_DB } from "../lib/outreachModes";
 import type { PromptType } from "../lib/promptTypes";
 import { validateSequencePlaceholdersByField } from "../lib/sequencePlaceholders";
-import { supabaseAdmin } from "../lib/supabaseAdmin";
+import { isSupabaseAdminConfigured, supabaseAdmin } from "../lib/supabaseAdmin";
 
 type DraftInput = {
   leadId: string;
@@ -382,6 +382,9 @@ export type LeadBatchRow = {
 };
 
 export async function fetchOutreachSequences(): Promise<OutreachSequenceRow[]> {
+  if (!isSupabaseAdminConfigured()) {
+    return [];
+  }
   const client = supabaseAdmin();
   const { data, error } = await client
     .from("outreach_sequences")
@@ -394,6 +397,9 @@ export async function fetchOutreachSequences(): Promise<OutreachSequenceRow[]> {
 }
 
 export async function fetchLeadBatches(): Promise<LeadBatchRow[]> {
+  if (!isSupabaseAdminConfigured()) {
+    return [];
+  }
   const client = supabaseAdmin();
   const { data, error } = await client
     .from("lead_batches")
