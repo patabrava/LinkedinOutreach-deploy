@@ -20,7 +20,7 @@ from playwright.async_api import BrowserContext, Page, TimeoutError
 from supabase import Client, create_client
 from tenacity import retry, stop_after_attempt, wait_fixed
 
-from auth import AUTH_STATE_PATH, is_logged_in, open_browser, save_storage_state, shutdown
+from auth import AUTH_STATE_PATH, is_logged_in, open_browser, save_storage_state, shutdown, update_auth_status
 
 # Import shared logger
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -773,9 +773,14 @@ async def _click_send_without_note(page: Page, url: str, lead_id: Optional[str] 
         return False
 
 
-async def login_with_credentials(context: BrowserContext, creds: LinkedinCredentials) -> None:
+async def login_with_credentials(
+    context: BrowserContext,
+    creds: LinkedinCredentials,
+    login_attempt_at: Optional[str] = None,
+) -> None:
     """Log into LinkedIn using saved credentials and persist auth.json."""
     page = await context.new_page()
+    login_attempt_at = login_attempt_at or now_iso_utc()
     try:
         # Always start by checking if we're already authenticated.
         await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=60_000)
@@ -783,6 +788,14 @@ async def login_with_credentials(context: BrowserContext, creds: LinkedinCredent
         if "/feed" in page.url and "/login" not in page.url:
             print("Already authenticated, skipping login.")
             await save_storage_state(context, path=AUTH_STATE_PATH)
+            update_auth_status(
+                credentials_saved=True,
+                session_state="session_active",
+                auth_file_present=True,
+                last_verified_at=now_iso_utc(),
+                last_login_result="success",
+                last_error=None,
+            )
             return
 
         # Navigate explicitly to the login page.
@@ -866,13 +879,49 @@ async def login_with_credentials(context: BrowserContext, creds: LinkedinCredent
         # Wait for successful navigation to feed (authenticated)
         try:
             await page.wait_for_url("**/feed**", timeout=45_000)
-        except TimeoutError:
+        except TimeoutError as exc:
             # Sometimes LinkedIn shows intermediate checkpoint; consider still saving state
             print(f"Login did not reach feed within timeout. Current URL: {page.url}", file=sys.stderr)
-            raise
-        finally:
-            # Persist whatever state we have in case it helps subsequent runs.
             await save_storage_state(context, path=AUTH_STATE_PATH)
+            update_auth_status(
+                credentials_saved=True,
+                session_state="login_required",
+                auth_file_present=AUTH_STATE_PATH.exists(),
+                last_login_attempt_at=login_attempt_at,
+                last_login_result="failed",
+                last_error=str(exc),
+            )
+            raise RuntimeError(
+                "LinkedIn login requires verification. Complete any challenge in the browser, "
+                "then reconnect from Settings and retry."
+            ) from exc
+
+        # Persist the verified session and publish the success state.
+        await save_storage_state(context, path=AUTH_STATE_PATH)
+        update_auth_status(
+            credentials_saved=True,
+            session_state="session_active",
+            auth_file_present=True,
+            last_verified_at=now_iso_utc(),
+            last_login_attempt_at=login_attempt_at,
+            last_login_result="success",
+            last_error=None,
+        )
+    except Exception as exc:
+        if not isinstance(exc, RuntimeError):
+            update_auth_status(
+                credentials_saved=True,
+                session_state="login_required",
+                auth_file_present=AUTH_STATE_PATH.exists(),
+                last_login_attempt_at=login_attempt_at,
+                last_login_result="failed",
+                last_error=str(exc),
+            )
+            raise RuntimeError(
+                "LinkedIn login requires verification. Complete any challenge in the browser, "
+                "then reconnect from Settings and retry."
+            ) from exc
+        raise
     finally:
         await page.close()
 
@@ -881,20 +930,52 @@ async def ensure_linkedin_auth(context: BrowserContext, creds: Optional[Linkedin
     if await is_logged_in(context):
         if not AUTH_STATE_PATH.exists():
             await save_storage_state(context)
+        update_auth_status(
+            credentials_saved=bool(creds),
+            session_state="session_active",
+            auth_file_present=True,
+            last_verified_at=now_iso_utc(),
+            last_error=None,
+        )
         return
 
     if not creds:
+        update_auth_status(
+            credentials_saved=False,
+            session_state="no_credentials",
+            auth_file_present=AUTH_STATE_PATH.exists(),
+            last_login_result="failed",
+            last_error="LinkedIn credentials are missing from Settings.",
+        )
         raise RuntimeError(
-            "Unable to authenticate with LinkedIn. Upload a fresh auth.json via the login launcher "
-            "or add credentials in Settings so the scraper can sign in automatically."
+            "Unable to authenticate with LinkedIn. Save your LinkedIn credentials in Settings, "
+            "then retry so the scraper can sign in automatically."
         )
 
-    await login_with_credentials(context, creds)
-
-    if not await is_logged_in(context):
-        raise RuntimeError(
-            "LinkedIn login failed. Complete any verification in the opened browser window, then retry."
+    if AUTH_STATE_PATH.exists():
+        update_auth_status(
+            credentials_saved=True,
+            session_state="session_expired",
+            auth_file_present=True,
+            last_login_result="failed",
+            last_error=None,
         )
+        raise RuntimeError(
+            "Your LinkedIn session expired. Open Settings, reconnect your LinkedIn account, "
+            "and retry."
+        )
+
+    login_started_at = now_iso_utc()
+    update_auth_status(
+        credentials_saved=True,
+        session_state="credentials_saved",
+        auth_file_present=False,
+        last_login_attempt_at=login_started_at,
+        last_login_result="verification_required",
+        last_error=None,
+    )
+
+    await login_with_credentials(context, creds, login_attempt_at=login_started_at)
 
 
 def update_lead(
