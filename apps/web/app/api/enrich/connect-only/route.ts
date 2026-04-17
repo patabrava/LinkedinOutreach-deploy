@@ -7,6 +7,35 @@ import { requireOperatorAccess } from "../../../../lib/apiGuard";
 import { logger } from "../../../../lib/logger";
 import { assertScraperLockFree, persistScraperPid } from "../scraperLock";
 
+const mirrorWorkerOutput = (
+  stream: NodeJS.ReadableStream | null,
+  logLevel: "info" | "warn",
+  correlationId: string,
+  label: string,
+) => {
+  if (!stream) return;
+
+  let buffer = "";
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk: string) => {
+    buffer += chunk;
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      logger[logLevel](`Connect-only scraper ${label}`, { correlationId }, { line: trimmed });
+    }
+  });
+
+  stream.on("end", () => {
+    const trimmed = buffer.trim();
+    if (!trimmed) return;
+    logger[logLevel](`Connect-only scraper ${label}`, { correlationId }, { line: trimmed });
+  });
+};
+
 export async function POST(request: Request) {
   const correlationId = logger.apiRequest("POST", "/api/enrich/connect-only");
   const guardResponse = await requireOperatorAccess(request, "/api/enrich/connect-only", correlationId);
@@ -48,13 +77,21 @@ export async function POST(request: Request) {
     logger.workerSpawn("scraper", args, { correlationId, limit, mode: "connect_only" });
 
     const logPath = path.join(repoRoot, ".logs", "scraper-spawn.log");
-    const logFd = fs.openSync(logPath, "a");
-    
     const child = spawn(pythonCmd, args, {
       cwd: scraperDir,
       env: { ...process.env, CORRELATION_ID: correlationId },
-      stdio: ["ignore", logFd, logFd],
+      stdio: ["ignore", "pipe", "pipe"],
       detached: true,
+    });
+
+    const fileStream = fs.createWriteStream(logPath, { flags: "a" });
+    child.stdout?.pipe(fileStream);
+    child.stderr?.pipe(fileStream);
+    mirrorWorkerOutput(child.stdout, "info", correlationId, "stdout");
+    mirrorWorkerOutput(child.stderr, "warn", correlationId, "stderr");
+    child.on("exit", (code, signal) => {
+      logger.info("Connect-only scraper exited", { correlationId, pid: child.pid }, { code, signal });
+      fileStream.end();
     });
     child.unref();
 
