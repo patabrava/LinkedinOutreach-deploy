@@ -7,6 +7,9 @@ import { getServerSession } from "../lib/auth";
 export const metadata: Metadata = {
   title: "Linkedin Scraper",
   description: "Batch-based LinkedIn outreach workflow with clear intent, progress, and post-acceptance messaging.",
+  icons: {
+    icon: "/favicon.svg",
+  },
 };
 
 export default async function RootLayout({

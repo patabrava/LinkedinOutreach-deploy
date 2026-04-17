@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useRef, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 
 import type { LeadBatchRow, OutreachSequenceRow } from "../app/actions";
 import { assignBatchToSequence, saveOutreachSequence } from "../app/actions";
@@ -206,7 +207,9 @@ const extractServerValidationErrors = (error: unknown): {
 };
 
 export function SequenceEditor({ sequences, batches }: Props) {
+  const router = useRouter();
   const placeholderResolver = useMemo(() => createPlaceholderResolver(), []);
+  const [localSequences, setLocalSequences] = useState<OutreachSequenceRow[]>(() => sequences);
   const [draft, setDraft] = useState<Draft>(() => {
     const first = sequences[0];
     return first
@@ -231,13 +234,17 @@ export function SequenceEditor({ sequences, batches }: Props) {
     third_message: null,
   });
 
+  useEffect(() => {
+    setLocalSequences(sequences);
+  }, [sequences]);
+
   const selectedSequence = useMemo(
-    () => sequences.find((sequence) => sequence.id === selectedSequenceId) || null,
-    [sequences, selectedSequenceId]
+    () => localSequences.find((sequence) => sequence.id === selectedSequenceId) || null,
+    [localSequences, selectedSequenceId]
   );
   const sequenceById = useMemo(() => {
-    return new Map(sequences.map((sequence) => [sequence.id, sequence]));
-  }, [sequences]);
+    return new Map(localSequences.map((sequence) => [sequence.id, sequence]));
+  }, [localSequences]);
 
   const batchRows = useMemo(
     () =>
@@ -329,7 +336,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
   };
 
   const onCreate = () => {
-    const tempId = sequences.length ? Math.max(...sequences.map((sequence) => sequence.id)) + 1 : 1;
+    const tempId = localSequences.length ? Math.max(...localSequences.map((sequence) => sequence.id)) + 1 : 1;
     setSelectedSequenceId(tempId);
     setDraft(emptyDraft());
     clearErrors();
@@ -346,13 +353,24 @@ export function SequenceEditor({ sequences, batches }: Props) {
       try {
         const saved = await saveOutreachSequence({
           id: selectedSequenceId || undefined,
-          name: draft.name || `Sequence ${sequences.length + 1}`,
+          name: draft.name || `Sequence ${localSequences.length + 1}`,
           first_message: draft.first_message,
           second_message: draft.second_message,
           third_message: draft.third_message,
           followup_interval_days: draft.followup_interval_days,
         });
         setSelectedSequenceId(saved.id);
+        setLocalSequences((current) => {
+          const next = current.filter((sequence) => sequence.id !== saved.id);
+          const insertAt = next.findIndex((sequence) => sequence.created_at > saved.created_at);
+          if (insertAt === -1) {
+            next.push(saved);
+          } else {
+            next.splice(insertAt, 0, saved);
+          }
+          return next;
+        });
+        router.refresh();
       } catch (error) {
         const parsed = extractServerValidationErrors(error);
         setTopLevelError(parsed.topLevel);
@@ -388,7 +406,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
             </button>
           </div>
           <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
-            {sequences.map((sequence) => (
+            {localSequences.map((sequence) => (
               <button
                 key={sequence.id}
                 className={`btn ${selectedSequenceId === sequence.id ? "warn" : "secondary"}`}
@@ -595,7 +613,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
                         onChange={(event) => onAssign(batch.id, Number(event.target.value))}
                       >
                         <option value="">No sequence</option>
-                        {sequences.map((sequence) => (
+                        {localSequences.map((sequence) => (
                           <option key={sequence.id} value={sequence.id}>
                             {sequence.name}
                           </option>
