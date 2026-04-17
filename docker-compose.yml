@@ -12,8 +12,13 @@ services:
       WEB_RUNTIME: prod
       PORT: "3000"
     shm_size: "1gb"
-    ports:
-      - "3000:3000"
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.linkedin-outreach.rule: Host(`deguraleads.de`) || Host(`www.deguraleads.de`)
+      traefik.http.routers.linkedin-outreach.entrypoints: websecure
+      traefik.http.routers.linkedin-outreach.tls: "true"
+      traefik.http.routers.linkedin-outreach.tls.certresolver: letsencrypt
+      traefik.http.services.linkedin-outreach.loadbalancer.server.port: "3000"
     volumes:
       - scraper_auth:/data/scraper
       - sender_auth:/data/sender
