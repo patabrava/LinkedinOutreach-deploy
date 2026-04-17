@@ -61,6 +61,48 @@ const toStringOrNull = (value: unknown): string | null => {
   return typeof value === "string" && value.trim() ? value : null;
 };
 
+const serializeStatus = (status: LinkedinAuthStatus): string => JSON.stringify(status, null, 2) + "\n";
+
+const persistStatusSnapshot = (scraperDir: string, status: LinkedinAuthStatus): void => {
+  const statusPath = getAuthStatusPath(scraperDir);
+  const backupPath = getAuthStatusBackupPath(scraperDir);
+  if (!statusPath || !backupPath) return;
+
+  const json = serializeStatus(status);
+  const tmpPath = `${statusPath}.tmp`;
+  fs.writeFileSync(tmpPath, json, "utf8");
+  fs.renameSync(tmpPath, statusPath);
+  fs.writeFileSync(backupPath, json, "utf8");
+};
+
+const buildStatusFromAuthFile = (authPath: string): LinkedinAuthStatus => {
+  const now = new Date().toISOString();
+  const authFilePresent = fs.existsSync(authPath);
+  return {
+    ...DEFAULT_STATUS,
+    credentials_saved: false,
+    session_state: authFilePresent ? "session_active" : "no_credentials",
+    auth_file_present: authFilePresent,
+    last_verified_at: authFilePresent ? now : null,
+    last_login_attempt_at: authFilePresent ? now : null,
+    last_login_result: authFilePresent ? "success" : null,
+    last_error: null,
+  };
+};
+
+const ensureAuthStatusSnapshot = (scraperDir: string): void => {
+  const statusPath = getAuthStatusPath(scraperDir);
+  const backupPath = getAuthStatusBackupPath(scraperDir);
+  const authPath = getAuthStatePath(scraperDir);
+  if (!statusPath || !backupPath || !authPath) return;
+
+  const authFilePresent = fs.existsSync(authPath);
+  const hasStatus = fs.existsSync(statusPath) || fs.existsSync(backupPath);
+  if (!authFilePresent || hasStatus) return;
+
+  persistStatusSnapshot(scraperDir, buildStatusFromAuthFile(authPath));
+};
+
 const normalizeStatus = (
   payload: Record<string, unknown> | null | undefined,
   scraperDir: string | null,
@@ -107,6 +149,7 @@ export function readLinkedinAuthStatus(): LinkedinAuthStatus {
     (statusPath && fs.existsSync(statusPath)) || (backupPath && fs.existsSync(backupPath)),
   );
   const hasAuthFile = Boolean(authPath && fs.existsSync(authPath));
+  ensureAuthStatusSnapshot(scraperDir);
   const fallback = {
     ...DEFAULT_STATUS,
     auth_file_present: hasAuthFile,

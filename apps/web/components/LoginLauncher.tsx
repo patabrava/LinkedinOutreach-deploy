@@ -52,6 +52,7 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
   const sessionCopy = SESSION_COPY[authStatus.session_state];
   const lastVerified = formatTimestamp(authStatus.last_verified_at);
   const lastAttempt = formatTimestamp(authStatus.last_login_attempt_at);
+  const recoveredCachedSession = authStatus.session_state === "session_active" && !authStatus.credentials_saved;
 
   return (
     <div className="card" style={{ alignSelf: "flex-start" }}>
@@ -62,6 +63,11 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
       </div>
       <div style={{ marginBottom: 16 }}>
         <div className="muted">{sessionCopy.helper}</div>
+        {recoveredCachedSession ? (
+          <div className="muted" style={{ marginTop: 8, color: "var(--accent)" }}>
+            Recovered from the cached browser session. You can scrape now, and the next successful login will refresh the status file.
+          </div>
+        ) : null}
         <div className="muted" style={{ marginTop: 8 }}>
           Credentials saved: {authStatus.credentials_saved ? "Yes" : "No"} · Cached session file:{" "}
           {authStatus.auth_file_present ? "Present" : "Missing"}
