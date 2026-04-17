@@ -20,10 +20,12 @@ from playwright.async_api import BrowserContext, Page, TimeoutError
 from supabase import Client, create_client
 from tenacity import retry, stop_after_attempt, wait_fixed
 
+sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from auth import AUTH_STATE_PATH, is_logged_in, open_browser, save_storage_state, shutdown, update_auth_status
 
 # Import shared logger
-sys.path.insert(0, str(Path(__file__).parent.parent))
 from credential_crypto import decrypt_password
 from shared_logger import get_logger
 
@@ -793,6 +795,7 @@ async def login_with_credentials(
                 session_state="session_active",
                 auth_file_present=True,
                 last_verified_at=now_iso_utc(),
+                last_login_attempt_at=login_attempt_at,
                 last_login_result="success",
                 last_error=None,
             )
@@ -882,7 +885,6 @@ async def login_with_credentials(
         except TimeoutError as exc:
             # Sometimes LinkedIn shows intermediate checkpoint; consider still saving state
             print(f"Login did not reach feed within timeout. Current URL: {page.url}", file=sys.stderr)
-            await save_storage_state(context, path=AUTH_STATE_PATH)
             update_auth_status(
                 credentials_saved=True,
                 session_state="login_required",
@@ -952,28 +954,26 @@ async def ensure_linkedin_auth(context: BrowserContext, creds: Optional[Linkedin
             "then retry so the scraper can sign in automatically."
         )
 
+    login_started_at = now_iso_utc()
+
     if AUTH_STATE_PATH.exists():
         update_auth_status(
             credentials_saved=True,
             session_state="session_expired",
             auth_file_present=True,
+            last_login_attempt_at=login_started_at,
             last_login_result="failed",
+            last_error="Cached LinkedIn session was rejected. Reconnecting now.",
+        )
+    else:
+        update_auth_status(
+            credentials_saved=True,
+            session_state="credentials_saved",
+            auth_file_present=False,
+            last_login_attempt_at=login_started_at,
+            last_login_result="verification_required",
             last_error=None,
         )
-        raise RuntimeError(
-            "Your LinkedIn session expired. Open Settings, reconnect your LinkedIn account, "
-            "and retry."
-        )
-
-    login_started_at = now_iso_utc()
-    update_auth_status(
-        credentials_saved=True,
-        session_state="credentials_saved",
-        auth_file_present=False,
-        last_login_attempt_at=login_started_at,
-        last_login_result="verification_required",
-        last_error=None,
-    )
 
     await login_with_credentials(context, creds, login_attempt_at=login_started_at)
 

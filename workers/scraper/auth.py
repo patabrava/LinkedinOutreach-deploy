@@ -25,6 +25,7 @@ __all__ = [
 
 AUTH_STATE_PATH = Path(__file__).parent / "auth.json"
 AUTH_STATUS_PATH = Path(__file__).parent / "auth_status.json"
+AUTH_STATUS_BACKUP_PATH = Path(__file__).parent / "auth_status.json.bak"
 
 
 @dataclass
@@ -48,36 +49,55 @@ def _default_auth_status() -> LinkedinAuthStatus:
     return LinkedinAuthStatus()
 
 
-def read_auth_status() -> LinkedinAuthStatus:
-    """Read the non-secret auth status sidecar or return a safe default."""
-    if not AUTH_STATUS_PATH.exists():
-        return _default_auth_status()
+def _status_to_payload(status: LinkedinAuthStatus) -> str:
+    return json.dumps(asdict(status), indent=2, ensure_ascii=False) + "\n"
 
+
+def _read_status_path(path: Path) -> Optional[LinkedinAuthStatus]:
     try:
-        raw = json.loads(AUTH_STATUS_PATH.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
-            return _default_auth_status()
+            return None
         defaults = asdict(_default_auth_status())
         values = {key: raw.get(key, defaults[key]) for key in defaults}
         return LinkedinAuthStatus(**values)
     except Exception:
-        return _default_auth_status()
+        return None
+
+
+def read_auth_status() -> LinkedinAuthStatus:
+    """Read the non-secret auth status sidecar or return a safe default."""
+    for candidate in (AUTH_STATUS_PATH, AUTH_STATUS_BACKUP_PATH):
+        if candidate.exists():
+            loaded = _read_status_path(candidate)
+            if loaded is not None:
+                return loaded
+
+    if AUTH_STATUS_PATH.exists() or AUTH_STATUS_BACKUP_PATH.exists():
+        return LinkedinAuthStatus(
+            session_state="login_required",
+            last_error="LinkedIn auth status file is unreadable. Reconnect LinkedIn from Settings.",
+        )
+
+    return _default_auth_status()
 
 
 def write_auth_status(status: LinkedinAuthStatus) -> None:
     """Persist auth status using stable snake_case keys."""
-    AUTH_STATUS_PATH.write_text(
-        json.dumps(asdict(status), indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    payload = _status_to_payload(status)
+    tmp_path = AUTH_STATUS_PATH.with_suffix(".json.tmp")
+    tmp_path.write_text(payload, encoding="utf-8")
+    tmp_path.replace(AUTH_STATUS_PATH)
+    AUTH_STATUS_BACKUP_PATH.write_text(payload, encoding="utf-8")
 
 
 def update_auth_status(**updates) -> LinkedinAuthStatus:
     """Merge updates into the current auth status and persist them."""
     current = asdict(read_auth_status())
     for key, value in updates.items():
-        if key in current:
-            current[key] = value
+        if key not in current:
+            raise KeyError(f"Unknown auth status field: {key}")
+        current[key] = value
     status = LinkedinAuthStatus(**current)
     write_auth_status(status)
     return status

@@ -42,17 +42,30 @@ const DEFAULT_STATUS: LinkedinAuthStatus = {
   last_error: null,
 };
 
-const getScraperDir = () => path.resolve(process.cwd(), "..", "..", "workers", "scraper");
+const getScraperDir = () => {
+  const candidates = [
+    process.env.LINKEDIN_SCRAPER_DIR?.trim(),
+    path.resolve(process.cwd(), "workers", "scraper"),
+    path.resolve(process.cwd(), "..", "..", "workers", "scraper"),
+  ].filter((candidate): candidate is string => Boolean(candidate));
 
-const getAuthStatePath = () => path.join(getScraperDir(), "auth.json");
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
+};
 
-const getAuthStatusPath = () => path.join(getScraperDir(), "auth_status.json");
+const getAuthStatePath = (scraperDir: string | null) => (scraperDir ? path.join(scraperDir, "auth.json") : null);
+
+const getAuthStatusPath = (scraperDir: string | null) => (scraperDir ? path.join(scraperDir, "auth_status.json") : null);
+const getAuthStatusBackupPath = (scraperDir: string | null) => (scraperDir ? path.join(scraperDir, "auth_status.json.bak") : null);
 
 const toStringOrNull = (value: unknown): string | null => {
   return typeof value === "string" && value.trim() ? value : null;
 };
 
-const normalizeStatus = (payload: Record<string, unknown> | null | undefined): LinkedinAuthStatus => {
+const normalizeStatus = (
+  payload: Record<string, unknown> | null | undefined,
+  scraperDir: string | null,
+): LinkedinAuthStatus => {
+  const authPath = getAuthStatePath(scraperDir);
   const sessionState = payload?.session_state;
   const lastLoginResult = payload?.last_login_result;
 
@@ -63,7 +76,9 @@ const normalizeStatus = (payload: Record<string, unknown> | null | undefined): L
         ? (sessionState as LinkedinAuthSessionState)
         : DEFAULT_STATUS.session_state,
     auth_file_present:
-      typeof payload?.auth_file_present === "boolean" ? payload.auth_file_present : fs.existsSync(getAuthStatePath()),
+      typeof payload?.auth_file_present === "boolean"
+        ? payload.auth_file_present
+        : Boolean(authPath && fs.existsSync(authPath)),
     last_verified_at: toStringOrNull(payload?.last_verified_at),
     last_login_attempt_at: toStringOrNull(payload?.last_login_attempt_at),
     last_login_result:
@@ -76,22 +91,43 @@ const normalizeStatus = (payload: Record<string, unknown> | null | undefined): L
 };
 
 export function readLinkedinAuthStatus(): LinkedinAuthStatus {
-  const statusPath = getAuthStatusPath();
-  if (!fs.existsSync(statusPath)) {
+  const scraperDir = getScraperDir();
+  if (!scraperDir) {
     return {
       ...DEFAULT_STATUS,
-      auth_file_present: fs.existsSync(getAuthStatePath()),
+      session_state: "login_required",
+      last_error: "LinkedIn scraper directory was not found. Configure the worker path and reconnect LinkedIn.",
     };
   }
 
-  try {
-    const raw = fs.readFileSync(statusPath, "utf8");
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return normalizeStatus(parsed);
-  } catch {
+  const statusPath = getAuthStatusPath(scraperDir);
+  const backupPath = getAuthStatusBackupPath(scraperDir);
+  const authPath = getAuthStatePath(scraperDir);
+  const hadStatusFile = Boolean(
+    (statusPath && fs.existsSync(statusPath)) || (backupPath && fs.existsSync(backupPath)),
+  );
+  const fallback = {
+    ...DEFAULT_STATUS,
+    auth_file_present: Boolean(authPath && fs.existsSync(authPath)),
+  };
+
+  for (const candidate of [statusPath, backupPath]) {
+    if (!candidate || !fs.existsSync(candidate)) continue;
+    try {
+      const raw = fs.readFileSync(candidate, "utf8");
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      return normalizeStatus(parsed, scraperDir);
+    } catch {
+      continue;
+    }
+  }
+
+  if (hadStatusFile) {
     return {
-      ...DEFAULT_STATUS,
-      auth_file_present: fs.existsSync(getAuthStatePath()),
+      ...fallback,
+      last_error: "LinkedIn auth status file could not be read. Reconnect LinkedIn from Settings.",
     };
   }
+
+  return fallback;
 }
