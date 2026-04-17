@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { isAllowed } from "./allowlist";
 import { isSupabaseAuthConfigured } from "./authConfig";
 import { logger } from "./logger";
+import { getCanonicalSiteOrigin } from "./siteOrigin";
 import { supabaseRouteHandler } from "./supabaseServer";
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
@@ -22,6 +23,19 @@ const parseClientIp = (request: Request): string => {
 const isLoopbackIp = (ip: string): boolean => {
   if (!ip) return true;
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+};
+
+const isCanonicalSiteHost = (request: Request): boolean => {
+  const canonicalOrigin = getCanonicalSiteOrigin();
+  if (!canonicalOrigin) return false;
+
+  try {
+    const canonicalHost = new URL(canonicalOrigin).host.toLowerCase();
+    const requestHost = parseHost(request);
+    return requestHost === canonicalHost;
+  } catch {
+    return false;
+  }
 };
 
 export const readOperatorToken = (request: Request): string => {
@@ -75,6 +89,10 @@ export const requireOperatorAccess = async (
       correlationId,
       path: routePath,
     });
+  }
+
+  if (isCanonicalSiteHost(request)) {
+    return null;
   }
 
   // First-class path for Mission Control UI: allow authenticated/allowlisted users.
