@@ -11,7 +11,13 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 SCHEME = "aes-256-gcm-v1"
 KEY_BYTES = 32
 KEY_FILE_ENV = "LINKEDIN_CREDENTIALS_KEY_FILE"
-DEFAULT_KEY_FILE = Path(__file__).resolve().parents[1] / ".linkedin_credentials_key"
+
+
+def _default_key_file() -> Path:
+    persistent_home = Path("/data/home")
+    if persistent_home.exists():
+        return persistent_home / ".linkedin_credentials_key"
+    return Path(__file__).resolve().parents[1] / ".linkedin_credentials_key"
 
 
 def _decode_key(raw_key: str) -> Optional[bytes]:
@@ -30,7 +36,7 @@ def _decode_key(raw_key: str) -> Optional[bytes]:
 
 def _key_file_path() -> Path:
     raw_path = (os.getenv(KEY_FILE_ENV) or "").strip()
-    return Path(raw_path) if raw_path else DEFAULT_KEY_FILE
+    return Path(raw_path) if raw_path else _default_key_file()
 
 
 def _read_key_file(path: Path) -> Optional[bytes]:

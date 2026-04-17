@@ -5,7 +5,14 @@ import path from "path";
 const CREDENTIALS_SCHEME = "aes-256-gcm-v1";
 const KEY_BYTES = 32;
 const KEY_FILE_ENV = "LINKEDIN_CREDENTIALS_KEY_FILE";
-const DEFAULT_KEY_FILE = path.resolve(process.cwd(), "..", "..", ".linkedin_credentials_key");
+
+const defaultKeyFile = (): string => {
+  const persistentHome = "/data/home";
+  if (fs.existsSync(persistentHome)) {
+    return path.join(persistentHome, ".linkedin_credentials_key");
+  }
+  return path.resolve(process.cwd(), "..", "..", ".linkedin_credentials_key");
+};
 
 const decodeKey = (rawKey: string): Buffer | null => {
   const trimmed = rawKey.trim();
@@ -18,7 +25,7 @@ const decodeKey = (rawKey: string): Buffer | null => {
 
 const getKeyFilePath = (): string => {
   const rawPath = (process.env[KEY_FILE_ENV] || "").trim();
-  return rawPath || DEFAULT_KEY_FILE;
+  return rawPath || defaultKeyFile();
 };
 
 const readKeyFile = (filePath: string): Buffer | null => {
