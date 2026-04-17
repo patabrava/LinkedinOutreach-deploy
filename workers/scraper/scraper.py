@@ -43,6 +43,7 @@ DAILY_ENRICHMENT_CAP = 50
 DAILY_INBOX_SCAN_LIMIT = 60
 INBOX_SCAN_COOLDOWN_HOURS = 24  # skip re-opening profiles scanned within this window
 PENDING_INVITE_BACKOFF_DAYS = 7  # skip pending invites for this many days
+CONNECT_DIALOG_TIMEOUT_MS = 15_000
 
 
 @dataclass
@@ -258,6 +259,12 @@ async def safe_click(page: Page, selector: str) -> None:
     await wiggle_mouse(page)
     await page.click(selector, timeout=15_000)
     await random_pause()
+
+
+async def wait_for_connection_dialog(page: Page) -> None:
+    """Wait for the LinkedIn connect/invite dialog to become usable."""
+    await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=CONNECT_DIALOG_TIMEOUT_MS)
+    await page.wait_for_timeout(500)
 
 
 def safe_text(value: Optional[str]) -> str:
@@ -644,7 +651,7 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
         try:
             await invite_link.first.click(timeout=8_000)
             logger.element_click("Invite link", success=True)
-            await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
+            await wait_for_connection_dialog(page)
             await random_pause()
             logger.dialog_detected("connection_invite", context={"path": 1})
             logger.path_attempt("Invite link", 1, success=True)
@@ -669,7 +676,7 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
                 logger.debug("connect-only: matched connect anchor", data={"selector": css})
                 await direct_connect_anchor.first.click(timeout=8_000)
                 logger.element_click(f"Connect anchor: {css}", success=True)
-                await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
+                await wait_for_connection_dialog(page)
                 await random_pause()
                 logger.dialog_detected("connection_direct_anchor", context={"path": 2, "selector": css})
                 logger.path_attempt(f"Direct Connect anchor ({css})", 2, success=True)
@@ -680,7 +687,7 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
 
     direct_connect_btn = profile_container.get_by_role(
         "button",
-        name=re.compile(r"(Vernetzen|Als Kontakt|als Kontakt)", re.I),
+        name=re.compile(r"(Vernetzen|Als Kontakt|als Kontakt|Connect|Einladen|Kontaktanfrage)", re.I),
     )
     direct_connect_count = await direct_connect_btn.count()
     logger.element_search("Vernetzen/Connect button", direct_connect_count, role="button", context={"path": 2})
@@ -689,7 +696,7 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
         try:
             await direct_connect_btn.first.click(timeout=8_000)
             logger.element_click("Vernetzen button", success=True)
-            await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
+            await wait_for_connection_dialog(page)
             await random_pause()
             logger.dialog_detected("connection_direct", context={"path": 2})
             logger.path_attempt("Direct Connect button", 2, success=True)
@@ -707,11 +714,20 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
         try:
             await more_button.first.click(timeout=8_000)
             logger.element_click("More button", success=True)
-            await page.wait_for_timeout(300)
+            await page.wait_for_timeout(1_000)
             
             # Look for Invite/Connect menuitem
-            invite_menuitem = page.get_by_role("menuitem", name=re.compile(r"(Invite|Einladen|Connect|Vernetzen)", re.I))
+            invite_menuitem = page.get_by_role(
+                "menuitem",
+                name=re.compile(r"(Invite|Einladen|Connect|Vernetzen|Kontakt|Kontaktanfrage|Anfrage)", re.I),
+            )
             invite_count = await invite_menuitem.count()
+            if invite_count == 0:
+                invite_menuitem = page.get_by_role(
+                    "button",
+                    name=re.compile(r"(Invite|Einladen|Connect|Vernetzen|Kontakt|Kontaktanfrage|Anfrage)", re.I),
+                )
+                invite_count = await invite_menuitem.count()
             logger.element_search("Invite/Connect menuitem", invite_count, role="menuitem", context={"path": 3})
             
             if invite_count > 0:
@@ -719,7 +735,7 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
                 logger.element_click("Invite menuitem", success=True)
                 
                 # Wait for connection dialog
-                await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
+                await wait_for_connection_dialog(page)
                 await random_pause()
                 logger.dialog_detected("connection_more_menu", context={"path": 3})
                 logger.path_attempt("More -> Invite", 3, success=True)
@@ -750,7 +766,7 @@ async def _click_send_without_note(page: Page, url: str, lead_id: Optional[str] 
     if send_count == 0:
         send_label = page.get_by_role(
             "button",
-            name=re.compile(r"(Send without a note|Send now|Send|Einladung senden|Senden)", re.I),
+            name=re.compile(r"(Send without a note|Send now|Send|Einladung senden|Senden|Kontaktanfrage senden|Ohne Notiz senden)", re.I),
         )
         send_count = await send_label.count()
         logger.element_search("Send button (fallback regex)", send_count, role="button")

@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 
 import { requireOperatorAccess } from "../../../lib/apiGuard";
 import { logger } from "../../../lib/logger";
+import { assertScraperLockFree, persistScraperPid } from "./scraperLock";
 
 export async function POST(request: Request) {
   const correlationId = logger.apiRequest("POST", "/api/enrich");
@@ -28,6 +29,14 @@ export async function POST(request: Request) {
     const pythonCmd = fs.existsSync(venvPython) ? venvPython : (fs.existsSync(systemPython) ? systemPython : "python3");
 
     const pidFile = path.join(scraperDir, "enrichment.pid");
+    const lockState = assertScraperLockFree(pidFile);
+    if (!lockState.ok) {
+      logger.warn("Scraper already running", { correlationId }, { pid: lockState.activePid, pidFile });
+      return NextResponse.json(
+        { ok: false, error: `Scraper already running (pid ${lockState.activePid}). Wait for it to finish before starting another run.` },
+        { status: 409 },
+      );
+    }
 
     const { limit } = (await request.json().catch(() => ({}))) as { limit?: number };
     const limitArg = typeof limit === "number" && limit > 0 ? ["--limit", String(limit)] : [];
@@ -46,14 +55,7 @@ export async function POST(request: Request) {
     });
     child.unref();
 
-    try {
-      fs.writeFileSync(pidFile, String(child.pid));
-    } catch (writeErr) {
-      logger.warn("Failed to persist scraper PID", { correlationId }, {
-        pidFile,
-        error: (writeErr as Error)?.message || String(writeErr),
-      });
-    }
+    persistScraperPid(child, pidFile);
 
     logger.info("Scraper process started successfully", { correlationId, pid: child.pid });
     logger.apiResponse("POST", "/api/enrich", 200, { correlationId });
