@@ -47,7 +47,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       ok: true,
-      message: "Login window launched. Complete login and close it to save auth.json.",
+      message: "Login window launched. Complete login, then return to Settings to recheck session state.",
     });
   } catch (err: any) {
     logger.error("Failed to launch login window", { correlationId }, err);

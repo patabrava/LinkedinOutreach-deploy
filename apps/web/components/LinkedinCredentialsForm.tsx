@@ -29,7 +29,7 @@ export function LinkedinCredentialsForm({ existing, useCard = true }: Props) {
       <div className="pill">LinkedIn Auth</div>
       <h3 className="section-title-tight">CREDENTIALS</h3>
       <div className="muted" style={{ marginBottom: 16 }}>
-        Stored securely in Supabase settings. Used by the Playwright scraper to log in and cache auth.json.
+        Stored securely in Supabase settings. These credentials are separate from the cached LinkedIn session on the worker, so saving them alone does not mean the scraper is ready.
       </div>
 
       <label htmlFor="email">

@@ -6,9 +6,16 @@ import { getOperatorApiHeaders } from "../lib/operatorToken";
 
 type Props = {
   onStart?: () => void;
+  label?: string;
 };
 
-export function StartLoginButton({ onStart }: Props) {
+type LoginResponse = {
+  ok?: boolean;
+  message?: string;
+  error?: string;
+};
+
+export function StartLoginButton({ onStart, label = "LOG IN TO LINKEDIN" }: Props) {
   const [running, setRunning] = useState(false);
   const [msg, setMsg] = useState<string>("");
 
@@ -21,13 +28,16 @@ export function StartLoginButton({ onStart }: Props) {
         method: "POST",
         headers: getOperatorApiHeaders(),
       });
-      const data = await res.json();
+      const data = (await res.json()) as LoginResponse;
       if (!res.ok || data?.ok === false) {
         throw new Error(data?.error || "Failed to launch login window.");
       }
-      setMsg(data?.message || "Login window launched. Complete login and close it to save auth.json.");
-    } catch (e: any) {
-      setMsg(e?.message || "Network error");
+      setMsg(
+        data?.message ||
+          "Login window launched. Complete login, then return to Settings to recheck session state."
+      );
+    } catch (error: unknown) {
+      setMsg(error instanceof Error ? error.message : "Network error");
     } finally {
       setRunning(false);
     }
@@ -40,7 +50,7 @@ export function StartLoginButton({ onStart }: Props) {
         disabled={running}
         className="btn"
       >
-        {running ? "LAUNCHING…" : "LOGIN TO LINKEDIN (OPENS BROWSER)"}
+        {running ? "LAUNCHING…" : label}
       </button>
       {msg ? (
         <div style={{ marginTop: 12, fontSize: 12, color: "var(--muted)" }}>{msg}</div>

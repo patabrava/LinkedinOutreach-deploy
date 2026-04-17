@@ -7,11 +7,11 @@ Minimal Playwright scraper that enriches leads in Supabase.
 - Install Playwright browsers once: `python -m playwright install chromium`.  
 - Copy `.env.example` to `.env` and fill Supabase keys.
 - In the web app, open **Settings → LinkedIn credentials** and save your LinkedIn login (email + password).  
-  - The scraper pulls these credentials from the `settings` table and will automatically log in + persist `auth.json` on first run.  
-  - If `auth.json` already exists locally, that cached session will be reused.
+  - These are only the saved login details. They do not by themselves mean LinkedIn is currently signed in.
+  - The scraper also keeps a cached browser session in `auth.json`. If that file exists locally, Playwright can usually reuse it without logging in again.
 
 ## Usage
 - `python scraper.py` enriches up to 10 `NEW` leads: it fetches profile + recent activity, writes JSON, and moves status to `ENRICHED`.
-- If `auth.json` is missing and credentials were saved via the UI, the scraper will log into LinkedIn once, cache the session, and continue scraping.
+- If `auth.json` is missing, the worker needs a fresh LinkedIn login even if credentials were already saved in Settings. Saving credentials is setup; having a usable session is the separate readiness check.
 
 Safety measures: random waits (3.5–7.2s) and Bezier-like mouse wiggles before actions to reduce bot signatures.
