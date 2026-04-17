@@ -58,7 +58,7 @@ export async function GET(request: Request) {
   const requestedMode = url.searchParams.get("mode") === "connect_only" ? "connect_only" : "message";
   const modeConfig = MODE_CONFIG[requestedMode];
   const correlationId = logger.apiRequest("GET", "/api/enrich/status");
-  const guardResponse = requireOperatorAccess(request, "/api/enrich/status", correlationId);
+  const guardResponse = await requireOperatorAccess(request, "/api/enrich/status", correlationId);
   if (guardResponse) return guardResponse;
   const dailyCap = getDailyEnrichmentCap();
   

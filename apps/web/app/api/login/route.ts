@@ -8,7 +8,7 @@ import { logger } from "../../../lib/logger";
 
 export async function POST(request: Request) {
   const correlationId = logger.apiRequest("POST", "/api/login");
-  const guardResponse = requireOperatorAccess(request, "/api/login", correlationId);
+  const guardResponse = await requireOperatorAccess(request, "/api/login", correlationId);
   if (guardResponse) return guardResponse;
   
   try {

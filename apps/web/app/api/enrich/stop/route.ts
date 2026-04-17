@@ -10,7 +10,7 @@ const PID_FILENAME = "enrichment.pid";
 
 export async function POST(request: Request) {
   const correlationId = logger.apiRequest("POST", "/api/enrich/stop");
-  const guardResponse = requireOperatorAccess(request, "/api/enrich/stop", correlationId);
+  const guardResponse = await requireOperatorAccess(request, "/api/enrich/stop", correlationId);
   if (guardResponse) return guardResponse;
 
   try {

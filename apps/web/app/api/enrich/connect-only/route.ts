@@ -9,7 +9,7 @@ import { assertScraperLockFree, persistScraperPid } from "../scraperLock";
 
 export async function POST(request: Request) {
   const correlationId = logger.apiRequest("POST", "/api/enrich/connect-only");
-  const guardResponse = requireOperatorAccess(request, "/api/enrich/connect-only", correlationId);
+  const guardResponse = await requireOperatorAccess(request, "/api/enrich/connect-only", correlationId);
   if (guardResponse) return guardResponse;
 
   try {
