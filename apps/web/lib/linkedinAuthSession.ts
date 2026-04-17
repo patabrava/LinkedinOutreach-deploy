@@ -106,10 +106,19 @@ export function readLinkedinAuthStatus(): LinkedinAuthStatus {
   const hadStatusFile = Boolean(
     (statusPath && fs.existsSync(statusPath)) || (backupPath && fs.existsSync(backupPath)),
   );
+  const hasAuthFile = Boolean(authPath && fs.existsSync(authPath));
   const fallback = {
     ...DEFAULT_STATUS,
-    auth_file_present: Boolean(authPath && fs.existsSync(authPath)),
+    auth_file_present: hasAuthFile,
   };
+
+  if (!hadStatusFile && hasAuthFile) {
+    return {
+      ...fallback,
+      session_state: "session_active",
+      last_login_result: "success",
+    };
+  }
 
   for (const candidate of [statusPath, backupPath]) {
     if (!candidate || !fs.existsSync(candidate)) continue;

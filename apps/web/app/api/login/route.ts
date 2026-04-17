@@ -26,23 +26,72 @@ export async function POST(request: Request) {
 
     const venvPython = path.join(scraperDir, "venv", "bin", "python");
     const pythonCmd = fs.existsSync(venvPython) ? venvPython : "python3";
+    const statusPath = path.join(scraperDir, "auth_status.json");
+    const backupPath = path.join(scraperDir, "auth_status.json.bak");
 
     const args = ["-m", "playwright", "codegen", `--save-storage=${authPath}`, "https://www.linkedin.com/login"];
     logger.workerSpawn("playwright-codegen", args, { correlationId });
 
-    const child = spawn(
-      pythonCmd,
-      args,
-      {
-        cwd: scraperDir,
-        env: { ...process.env, CORRELATION_ID: correlationId },
-        stdio: "ignore",
-        detached: true,
-      }
-    );
-    child.unref();
+    const launchScript = `
+const { spawn } = require("child_process");
+const fs = require("fs");
 
-    logger.info("Login window launched successfully", { correlationId, pid: child.pid });
+const pythonCmd = ${JSON.stringify(pythonCmd)};
+const args = ${JSON.stringify(args)};
+const cwd = ${JSON.stringify(scraperDir)};
+const authPath = ${JSON.stringify(authPath)};
+const statusPath = ${JSON.stringify(statusPath)};
+const backupPath = ${JSON.stringify(backupPath)};
+const env = { ...process.env, CORRELATION_ID: ${JSON.stringify(correlationId)} };
+
+const child = spawn(pythonCmd, args, { cwd, env, stdio: "ignore" });
+
+child.on("exit", (code) => {
+  try {
+    if (code === 0 && fs.existsSync(authPath)) {
+      const now = new Date().toISOString();
+      const payload = {
+        credentials_saved: true,
+        session_state: "session_active",
+        auth_file_present: true,
+        last_verified_at: now,
+        last_login_attempt_at: now,
+        last_login_result: "success",
+        last_error: null,
+      };
+      const json = JSON.stringify(payload, null, 2) + "\\n";
+      fs.writeFileSync(statusPath, json, "utf8");
+      fs.writeFileSync(backupPath, json, "utf8");
+    } else if (!fs.existsSync(authPath)) {
+      const now = new Date().toISOString();
+      const payload = {
+        credentials_saved: false,
+        session_state: "login_required",
+        auth_file_present: false,
+        last_verified_at: null,
+        last_login_attempt_at: now,
+        last_login_result: "failed",
+        last_error: "LinkedIn login window closed without saving a session.",
+      };
+      const json = JSON.stringify(payload, null, 2) + "\\n";
+      fs.writeFileSync(statusPath, json, "utf8");
+      fs.writeFileSync(backupPath, json, "utf8");
+    }
+  } catch (error) {
+    // Best-effort status persistence only.
+  }
+});
+`;
+
+    const wrapper = spawn(process.execPath, ["-e", launchScript], {
+      cwd: scraperDir,
+      env: { ...process.env, CORRELATION_ID: correlationId },
+      stdio: "ignore",
+      detached: true,
+    });
+    wrapper.unref();
+
+    logger.info("Login window launched successfully", { correlationId, pid: wrapper.pid });
     logger.apiResponse("POST", "/api/login", 200, { correlationId });
 
     return NextResponse.json({
