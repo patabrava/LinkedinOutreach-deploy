@@ -3,16 +3,16 @@
 import { headers } from "next/headers";
 import { isAllowed, normalizeEmail } from "../../lib/allowlist";
 import { isSupabaseAuthConfigured } from "../../lib/authConfig";
-import { getCanonicalSiteOrigin } from "../../lib/siteOrigin";
+import { resolveAuthRedirectOrigin } from "../../lib/siteOrigin";
 import { supabaseServerAction } from "../../lib/supabaseServer";
 
 export type LoginState =
   | { status: "idle" }
   | { status: "ok" }
   | {
-      status: "error";
-      code: "AUTH_NOT_CONFIGURED" | "AUTH_UNREACHABLE" | "INVALID_EMAIL" | "RATE_LIMITED";
-    };
+    status: "error";
+    code: "AUTH_NOT_CONFIGURED" | "AUTH_UNREACHABLE" | "INVALID_EMAIL" | "RATE_LIMITED" | "SITE_URL_MISSING";
+  };
 
 export async function requestMagicLink(
   _prev: LoginState,
@@ -40,7 +40,11 @@ export async function requestMagicLink(
   const host = hdrs.get("x-forwarded-host") ?? hdrs.get("host");
   const proto = hdrs.get("x-forwarded-proto") ?? "https";
   const requestOrigin = host ? `${proto}://${host}` : "";
-  const origin = getCanonicalSiteOrigin() || requestOrigin;
+  const origin = resolveAuthRedirectOrigin(requestOrigin);
+
+  if (!origin) {
+    return { status: "error", code: "SITE_URL_MISSING" };
+  }
 
   const nextRaw = formData.get("next");
   const next = typeof nextRaw === "string" && nextRaw.startsWith("/") ? nextRaw : "/";

@@ -48,10 +48,10 @@ const MODE_CONFIG: Record<EnrichmentMode, {
   message: {
     statusUrl: "/api/enrich/status",
     startEndpoint: "/api/enrich",
-    startLabel: "RUN ENRICHMENT",
+    startLabel: "CONNECT + MESSAGE",
     runningLabel: "STARTING…",
     buttonClass: "btn",
-    defaultStartMessage: "Enrichment started.",
+    defaultStartMessage: "Connect + message run started.",
   },
   connect_only: {
     statusUrl: "/api/enrich/status?mode=connect_only",
@@ -85,7 +85,7 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
       });
       const data = (await res.json()) as StatusResponse & { error?: string };
       if (!res.ok || data?.ok === false) {
-        throw new Error(data?.error || "Failed to fetch enrichment status.");
+        throw new Error(data?.error || "Failed to fetch workflow status.");
       }
       setStatus(data);
       setError("");
@@ -96,7 +96,7 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
         setPolling(false);
       }
     } catch (err: any) {
-      setError(err?.message || "Unable to load status.");
+      setError(err?.message || "Unable to load workflow status.");
     } finally {
       if (!silent) {
         setStatusLoading(false);
@@ -197,7 +197,7 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
       });
       const data = await res.json();
       if (!res.ok || data?.ok === false) {
-        throw new Error(data?.error || "Failed to start scraper.");
+        throw new Error(data?.error || "Failed to start workflow.");
       }
       setMessage(data?.message || modeConfig.defaultStartMessage);
       setPolling(true);
@@ -219,14 +219,14 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
       });
       const data = await res.json();
       if (!res.ok || data?.ok === false) {
-        throw new Error(data?.error || "Failed to stop enrichment.");
+        throw new Error(data?.error || "Failed to stop workflow.");
       }
-      setMessage(data?.message || "Enrichment stop requested.");
+      setMessage(data?.message || "Workflow stop requested.");
       setPolling(false);
       setRunning(false);
       await refreshStatus({ silent: true });
     } catch (e: any) {
-      setError(e?.message || "Unable to stop enrichment.");
+      setError(e?.message || "Unable to stop workflow.");
     } finally {
       setStopping(false);
     }

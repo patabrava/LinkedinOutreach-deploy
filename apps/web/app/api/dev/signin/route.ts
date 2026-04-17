@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { isAllowed, normalizeEmail } from "../../../../lib/allowlist";
 import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 import { supabaseRouteHandler } from "../../../../lib/supabaseServer";
+import { getCanonicalSiteOrigin } from "../../../../lib/siteOrigin";
 
 export async function POST(req: NextRequest) {
   if (process.env.NODE_ENV === "production") {
@@ -41,5 +42,6 @@ export async function POST(req: NextRequest) {
 
   const nextRaw = form.get("next");
   const next = typeof nextRaw === "string" && nextRaw.startsWith("/") ? nextRaw : "/";
-  return NextResponse.redirect(new URL(next, req.url), { status: 303 });
+  const redirectOrigin = getCanonicalSiteOrigin() || "http://localhost:3000";
+  return NextResponse.redirect(new URL(next, redirectOrigin), { status: 303 });
 }

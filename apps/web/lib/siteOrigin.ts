@@ -10,3 +10,21 @@ export const getCanonicalSiteOrigin = (): string => {
 
   return "";
 };
+
+export const resolveAuthRedirectOrigin = (requestOrigin: string): string => {
+  const canonicalOrigin = getCanonicalSiteOrigin();
+  if (canonicalOrigin) {
+    return canonicalOrigin;
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    return "";
+  }
+
+  const trimmedRequestOrigin = trimTrailingSlash(requestOrigin.trim());
+  if (trimmedRequestOrigin.includes("localhost:3000")) {
+    return trimmedRequestOrigin;
+  }
+
+  return "http://localhost:3000";
+};

@@ -52,7 +52,7 @@ export default async function LeadsPage({
             <div className="action-stack__row action-stack__row--primary">
               <div className="action-stack__header">
                 <strong>CONNECT + MESSAGE</strong>
-                <div className="muted">Step 1: Enrich NEW leads so they&apos;re ready for messaging after acceptance.</div>
+                <div className="muted">Step 1: Send the connection request for this batch, then message after acceptance.</div>
               </div>
               <StartEnrichmentButton mode="message" variant="dashboard" />
             </div>

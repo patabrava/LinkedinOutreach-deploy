@@ -27,6 +27,8 @@ function statusLine(state: LoginState, queryError: string | null): string {
   if (state.status === "ok") return "IF ALLOWED, A LINK WAS SENT.";
   if (state.status === "error" && state.code === "AUTH_NOT_CONFIGURED")
     return "AUTH CONFIG MISSING ON THIS DEPLOYMENT.";
+  if (state.status === "error" && state.code === "SITE_URL_MISSING")
+    return "NEXT_PUBLIC_SITE_URL IS MISSING. SET THE PRODUCTION SITE URL BEFORE SENDING MAGIC LINKS.";
   if (state.status === "error" && state.code === "AUTH_UNREACHABLE") return "AUTH SYSTEM UNREACHABLE";
   if (state.status === "error" && state.code === "INVALID_EMAIL") return "INVALID EMAIL";
   if (state.status === "error" && state.code === "RATE_LIMITED")

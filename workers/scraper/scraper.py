@@ -1080,8 +1080,6 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
 
         page = await context.new_page()
         try:
-            await enrich_one(page, client, lead)
-            logger.info(f"Lead {lead.id} enriched successfully", {"leadId": lead.id})
             if mode == "connect_only":
                 try:
                     sent = await send_connection_request(page, lead)
@@ -1104,12 +1102,17 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
                         {"leadId": lead.id},
                         error=exc,
                     )
+            else:
+                await enrich_one(page, client, lead)
+                logger.info(f"Lead {lead.id} enriched successfully", {"leadId": lead.id})
         except TimeoutError as exc:
-            logger.error(f"Timeout enriching {lead.id}", {"leadId": lead.id}, error=exc)
-            mark_enrich_failed(client, lead.id, reason=f"Timeout: {exc}")
+            logger.error(f"Timeout processing {lead.id}", {"leadId": lead.id, "mode": mode}, error=exc)
+            if mode != "connect_only":
+                mark_enrich_failed(client, lead.id, reason=f"Timeout: {exc}")
         except Exception as exc:
-            logger.error(f"Failed to enrich {lead.id}", {"leadId": lead.id}, error=exc)
-            mark_enrich_failed(client, lead.id, reason=str(exc))
+            logger.error(f"Failed to process {lead.id}", {"leadId": lead.id, "mode": mode}, error=exc)
+            if mode != "connect_only":
+                mark_enrich_failed(client, lead.id, reason=str(exc))
         finally:
             try:
                 await page.close()
