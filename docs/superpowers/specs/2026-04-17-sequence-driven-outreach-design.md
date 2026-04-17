@@ -76,24 +76,39 @@ SENT
 
 `DRAFT_READY`, `APPROVED`, `MESSAGE_ONLY_READY`, `MESSAGE_ONLY_APPROVED` become dead statuses for the sequence-driven path. They remain in the schema for legacy rows; no new rows are written in those states.
 
-### 4.4 Enrichment decoupling
+### 4.4 Enrichment fully relocated — not part of the send path
 
-Enrichment runs in parallel with send. Concretely:
+Enrichment is removed from the friend-request pipeline entirely. The send path never calls the scraper. The existing `RUN ENRICHMENT` button on the leads page is repurposed into **`SEND INVITES`** — it only renders step 0 from CSV slots and queues connect sends via `sender.py`. No scraper invocation.
 
-- `RUN ENRICHMENT` button (from `StartEnrichmentButton.tsx`, mode=message) triggers *both* workers instead of only `scraper.py`. New single endpoint spawns: (a) connect-send pass, (b) enrichment pass.
-- Enrichment worker unchanged internally. It writes to `leads.profile` / `leads.activity` and sets `enrichment_ready=true`.
-- `sender.py --message-only` consults `enrichment_ready` before rendering step 1. If false after M poll cycles, step 1 renders with slot fallbacks and sends.
+Enrichment becomes its own independent loop:
 
-Rate-limiting constraint: running scraper (enrichment) and sender (connect sends) concurrently doubles the LinkedIn session footprint on the same account. See §9.
+- **New worker loop:** `run_all.sh` gains `--enrichment` that runs `scraper.py --mode enrich` on a polling cadence (default 10 min idle between batches). Worker selects leads with `enrichment_ready=false` regardless of lead status — it doesn't care about the send state.
+- **Worker contract:** read `leads` WHERE `enrichment_ready=false` AND `linkedin_url IS NOT NULL` → scrape → write `profile` / `activity` → set `enrichment_ready=true`. That's its entire interface with the rest of the system.
+- **Separate UI surface:** the leads page gets a small `ENRICHMENT STATUS` card showing last-run time, queue depth, worker state. Not a trigger — monitor only. (If an on-demand trigger is desired later, it can be added without coupling back to send.)
+- **No synchronous invocation from web actions.** `/api/enrich` endpoints either redirect to send (for the button) or return status only. The scraper is never spawned in response to a user clicking an outreach button.
+
+This cleanly separates two concerns:
+
+| Concern | Lives in | Trigger |
+|---|---|---|
+| Sending invites / post-acceptance messages | `sender.py`, web actions | Operator clicks `SEND INVITES`, or acceptance detected |
+| Enriching lead data | `scraper.py`, background loop | Independent schedule, no human in the loop |
+
+`sender.py --message-only` consults `leads.enrichment_ready` before rendering step 1. If false after M retries (§6.4), step 1 renders with slot fallbacks and sends.
+
+**Future path (out of scope for this spec, preserved by the interface):** enrichment can later be lifted into a separate repo or service. The web app and sender only read `leads.profile` / `leads.activity` / `enrichment_ready` — swapping the scraper for an external pipeline (Apollo, Clay, a custom service) is a drop-in replacement behind that contract. Nothing in this spec couples the scraper's implementation to the web app.
+
+Rate-limiting benefit: send and enrichment no longer run *because of the same click*, so concurrent-session risk drops to whatever the operator schedules. See §9.
 
 ## 5. UI changes
 
 ### 5.1 Leads page
 
-- `RUN ENRICHMENT` button: unchanged label, new behavior — fires the full pipeline (connect sends + enrichment + post-acceptance arming).
-- `SEND INVITES` button (connect_only mode) collapses into the same trigger; mode toggle determines whether step 0 is authored as non-empty.
+- **`RUN ENRICHMENT` button is renamed to `SEND INVITES`** and its behavior changes: it only triggers `sender.py` to render step 0 from CSV slots and send connect requests. It does **not** run the scraper.
+- The separate `SEND INVITES` button (connect_only mode) collapses into this single button; mode toggle determines whether step 0 is authored as non-empty.
 - `SEND MESSAGE AFTER FRIEND REQUEST ACCEPTANCE` button becomes redundant (post-acceptance send is auto-armed) — remove.
 - New per-lead column: `enrichment: ✓ / pending / failed`.
+- New small `ENRICHMENT STATUS` card (or footer strip): last-run time, queue depth, worker heartbeat. Read-only.
 
 ### 5.2 Sequence editor
 
@@ -118,14 +133,17 @@ Legacy `DraftFeed` approval flow stays accessible only for leads that were creat
 
 | File | Change |
 |---|---|
-| `apps/web/components/StartEnrichmentButton.tsx` | Call new unified pipeline endpoint; drop connect_only-specific "send after acceptance" button. |
-| `apps/web/app/api/enrich/route.ts` | Rename effectively → orchestrate both workers; spawn sender for queued connects in parallel with scraper. |
-| `apps/web/app/api/enrich/connect-only/route.ts` | Collapse into the unified endpoint or keep as alias. |
+| `apps/web/components/StartEnrichmentButton.tsx` | Rename label to `SEND INVITES`; call new send-only endpoint. Drop connect_only-specific "send after acceptance" button. No scraper invocation. |
+| `apps/web/app/api/enrich/route.ts` | Replace with send-only orchestration: spawn `sender.py` for queued connects. Remove scraper spawn entirely. Consider renaming route to `/api/send-invites` for clarity. |
+| `apps/web/app/api/enrich/connect-only/route.ts` | Collapse into the unified send endpoint or delete. |
+| `apps/web/app/api/enrich/status/route.ts` | Repurpose to return enrichment worker status (queue depth, last-run, heartbeat) for the status card. Read-only. |
+| `apps/web/components/EnrichmentStatusCard.tsx` (new, ~80 LOC) | Small read-only card on leads page showing enrichment worker state. Subscribes to `leads.enrichment_ready` updates. |
+| `run_all.sh` | Add `--enrichment` flag that loops `scraper.py --mode enrich` on a polling cadence. |
 | `apps/web/components/DraftFeed.tsx` | Remove `mission_control` variant; demote to legacy-only; new monitor component renders rendered-preview rows. |
 | `apps/web/components/SequenceEditor*` (existing sequence UI) | Add step 0 field, slot tier validation, char counter. |
 | `apps/web/app/actions.ts` | Remove `approveAndSendAllDrafts`, `approveDraft`, `regenerateDraft` from sequence-driven path; keep for legacy until removal. Add `triggerOutreachPipeline(batchId)` as the single-button action. |
 | `workers/sender/sender.py` | Add "render step 0 from sequence + CSV slots → send connect" mode. Auto-arm step 1: after acceptance, render step 1 with enriched+CSV slots and send. Remove dependency on `drafts` table for sequence-driven sends. |
-| `workers/scraper/scraper.py` | No functional change; called in parallel rather than as a gate. |
+| `workers/scraper/scraper.py` | No functional change internally. Invocation moves from web-action spawn to the `run_all.sh --enrichment` loop. Scraper now polls `leads` WHERE `enrichment_ready=false`. |
 | `mcp-server/run_agent.py` | Not called for sequence-driven leads. Preserved for any legacy fallback; can be deleted once legacy is gone. |
 | Supabase schema | Add `leads.enrichment_ready bool`, `outreach_sequences.connect_note text`, `outreach_sequences.slot_fallbacks jsonb`. |
 
@@ -175,11 +193,11 @@ Before rendering step 1, sender reads `leads.enrichment_ready`. If false, sender
 
 ## 9. Risks
 
-**9.1 Concurrent LinkedIn session.** Scraper + sender running in parallel from the same LinkedIn account increases anti-automation signal. Mitigations (pick one during implementation, not in this spec):
+**9.1 Concurrent LinkedIn session.** Because enrichment is now its own loop on a polling cadence rather than co-triggered with send, concurrency is a scheduling choice, not an emergent coupling. Mitigations (pick one during implementation):
 
-- Time-slice: sender runs during business hours, scraper off-hours. Default.
+- Time-slice: sender runs during business hours, enrichment loop off-hours. Default.
 - Session-separate: use two LinkedIn accounts (sender, enrichment). Requires account provisioning.
-- Serialize with small interleave: `run_all.sh` runs one at a time but alternates, so neither blocks the other for long.
+- Mutex via `run_all.sh`: enrichment loop holds a lock file while scraping; sender checks and defers. Cheapest if sender runs are short.
 
 **9.2 Step 1 fires before enrichment completes.** Acceptance lag is typically days, so this is rare. Fallback rendering (§6.4) covers the edge case. Worst case: step 1 goes out with `{about_excerpt}` replaced by the declared fallback. Acceptable.
 
