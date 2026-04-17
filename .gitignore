@@ -36,6 +36,10 @@ __pycache__/
 # Credentials & Secrets
 auth.json
 **/auth.json
+.linkedin_credentials_key
+**/.linkedin_credentials_key
+workers/scraper/auth_status.json
+workers/scraper/auth_status.json.bak
 *.credentials.json
 *.secret.json
 
