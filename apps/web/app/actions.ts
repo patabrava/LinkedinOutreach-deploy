@@ -1508,7 +1508,10 @@ export async function saveLinkedinCredentials(
     encryptedPayload = encryptLinkedinPassword(password);
   } catch (cryptoError) {
     logger.error("LinkedIn credentials encryption failed", {}, cryptoError as Error);
-    return { success: false, error: "Credential encryption is not configured." };
+    return {
+      success: false,
+      error: "Credential encryption key is missing or unreadable. Set LINKEDIN_CREDENTIALS_KEY or make LINKEDIN_CREDENTIALS_KEY_FILE writable.",
+    };
   }
 
   const { error } = await client

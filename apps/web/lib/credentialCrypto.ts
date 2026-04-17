@@ -1,7 +1,11 @@
 import { createCipheriv, randomBytes } from "crypto";
+import fs from "fs";
+import path from "path";
 
 const CREDENTIALS_SCHEME = "aes-256-gcm-v1";
 const KEY_BYTES = 32;
+const KEY_FILE_ENV = "LINKEDIN_CREDENTIALS_KEY_FILE";
+const DEFAULT_KEY_FILE = path.resolve(process.cwd(), "..", "..", ".linkedin_credentials_key");
 
 const decodeKey = (rawKey: string): Buffer | null => {
   const trimmed = rawKey.trim();
@@ -12,9 +16,54 @@ const decodeKey = (rawKey: string): Buffer | null => {
   return key.length === KEY_BYTES ? key : null;
 };
 
-const getCredentialsKey = (): Buffer | null => {
-  const rawKey = process.env.LINKEDIN_CREDENTIALS_KEY || "";
-  return decodeKey(rawKey);
+const getKeyFilePath = (): string => {
+  const rawPath = (process.env[KEY_FILE_ENV] || "").trim();
+  return rawPath || DEFAULT_KEY_FILE;
+};
+
+const readKeyFile = (filePath: string): Buffer | null => {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    return decodeKey(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+};
+
+const persistKeyFile = (filePath: string, key: Buffer): boolean => {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  try {
+    fs.writeFileSync(filePath, `${key.toString("base64")}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    return true;
+  } catch (error) {
+    if (typeof error === "object" && error && "code" in error && (error as { code?: string }).code === "EEXIST") {
+      return false;
+    }
+    throw error;
+  }
+};
+
+export const resolveCredentialsKey = (): Buffer | null => {
+  const envKey = decodeKey(process.env.LINKEDIN_CREDENTIALS_KEY || "");
+  if (envKey) return envKey;
+
+  const filePath = getKeyFilePath();
+  const fileKey = readKeyFile(filePath);
+  if (fileKey) return fileKey;
+  if (fs.existsSync(filePath)) return null;
+
+  const generated = randomBytes(KEY_BYTES);
+  try {
+    persistKeyFile(filePath, generated);
+  } catch {
+    return null;
+  }
+
+  return readKeyFile(filePath) || generated;
 };
 
 export type EncryptedPasswordPayload = {
@@ -23,10 +72,10 @@ export type EncryptedPasswordPayload = {
 };
 
 export const encryptLinkedinPassword = (password: string): EncryptedPasswordPayload => {
-  const key = getCredentialsKey();
+  const key = resolveCredentialsKey();
   if (!key) {
     throw new Error(
-      "LINKEDIN_CREDENTIALS_KEY is missing or invalid. Provide a 32-byte key (base64 or hex)."
+      "Credential encryption key is missing or unreadable. Set LINKEDIN_CREDENTIALS_KEY or make LINKEDIN_CREDENTIALS_KEY_FILE writable."
     );
   }
 
