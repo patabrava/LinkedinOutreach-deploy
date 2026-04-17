@@ -1039,6 +1039,23 @@ def mark_connect_sent(client: Client, lead_id: str) -> None:
     logger.info("Lead marked CONNECT_ONLY_SENT", {"leadId": lead_id})
 
 
+def mark_connect_failed(client: Client, lead_id: str, reason: Optional[str] = None) -> None:
+    """Mark a lead as FAILED so connect-only retries do not stall in PROCESSING."""
+    now_iso = datetime.datetime.utcnow().isoformat()
+    logger.db_query(
+        "update",
+        "leads",
+        {"leadId": lead_id},
+        {"status": "FAILED", "reason": (reason or "")[:240]},
+    )
+    update_data = {"status": "FAILED", "updated_at": now_iso}
+    if reason:
+        update_data["error_message"] = reason[:500]
+    client.table("leads").update(update_data).eq("id", lead_id).execute()
+    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
+    logger.warn("Lead marked FAILED", {"leadId": lead_id}, error=reason)
+
+
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 async def enrich_one(page: Page, client: Client, lead: Lead) -> None:
     logger.scrape_start(lead.id, lead.linkedin_url)
@@ -1091,12 +1108,14 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
                             {"mode": mode},
                         )
                     else:
+                        mark_connect_failed(client, lead.id, reason="No connect button or invite dialog exhausted.")
                         logger.info(
                             f"No connect button for {lead.id}",
                             {"leadId": lead.id},
                             {"mode": mode},
                         )
                 except Exception as exc:
+                    mark_connect_failed(client, lead.id, reason=str(exc))
                     logger.warn(
                         f"Connection request failed for {lead.id}",
                         {"leadId": lead.id},
