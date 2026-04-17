@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isAllowed } from "../../../lib/allowlist";
+import { isSupabaseAuthConfigured } from "../../../lib/authConfig";
 import { supabaseRouteHandler } from "../../../lib/supabaseServer";
 
 export async function GET(req: NextRequest) {
@@ -8,6 +9,10 @@ export async function GET(req: NextRequest) {
   const nextParam = url.searchParams.get("next");
   const next = nextParam && nextParam.startsWith("/") ? nextParam : "/";
   const origin = url.origin;
+
+  if (!isSupabaseAuthConfigured()) {
+    return NextResponse.redirect(`${origin}/login?e=config`);
+  }
 
   if (!code) {
     return NextResponse.redirect(`${origin}/login?e=expired`);

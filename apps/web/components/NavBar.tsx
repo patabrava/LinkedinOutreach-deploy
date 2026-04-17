@@ -52,7 +52,11 @@ export function NavBar({ authenticated = false, email = null }: NavBarProps) {
               <button type="submit" className="nav-signout">[SIGN OUT]</button>
             </form>
           </div>
-        ) : null}
+        ) : (
+          <Link href="/login" className="nav-link nav-signin">
+            SIGN IN
+          </Link>
+        )}
       </div>
     </nav>
   );

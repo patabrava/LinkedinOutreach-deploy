@@ -2,6 +2,8 @@ import { createServerComponentClient } from "@supabase/auth-helpers-nextjs";
 import type { Session, User } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 
+import { isSupabaseAuthConfigured } from "./authConfig";
+
 export const LOGIN_PATH = "/login";
 
 export const PROTECTED_ROUTE_PREFIXES = [
@@ -18,11 +20,7 @@ export const isProtectedRoute = (pathname: string): boolean =>
 export const isAuthPublicRoute = (pathname: string): boolean =>
   pathname === LOGIN_PATH || pathname.startsWith("/api/") || pathname.startsWith("/_next/") || pathname === "/favicon.ico";
 
-const hasSupabaseSessionConfig = (): boolean =>
-  Boolean(
-    process.env.NEXT_PUBLIC_SUPABASE_URL &&
-      (process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)
-  );
+const hasSupabaseSessionConfig = (): boolean => isSupabaseAuthConfigured();
 
 export async function getServerSession(): Promise<Session | null> {
   if (!hasSupabaseSessionConfig()) {

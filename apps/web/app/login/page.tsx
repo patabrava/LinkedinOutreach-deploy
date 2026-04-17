@@ -1,4 +1,5 @@
 import { LoginForm } from "./LoginForm";
+import { getAuthConfigStatus } from "../../lib/authConfig";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -14,11 +15,18 @@ export default function LoginPage({
   const queryError = searchParams?.e ?? null;
   const devBypass = process.env.NODE_ENV !== "production";
   const devBypassEmail = process.env.DEV_BYPASS_EMAIL ?? "caposk817@gmail.com";
+  const authConfigured = getAuthConfigStatus().configured;
 
   return (
     <section className="login-page">
       <h1 className="page-title">SIGN IN</h1>
-      <LoginForm nextPath={nextPath} queryError={queryError} />
+      {!authConfigured ? (
+        <div className="login-banner">
+          AUTH GATE NOT CONFIGURED. ADD THE SUPABASE PUBLIC URL AND PUBLIC KEY ENV VARS ON HOSTINGER,
+          THEN REDEPLOY.
+        </div>
+      ) : null}
+      <LoginForm nextPath={nextPath} queryError={queryError} authConfigured={authConfigured} />
       {devBypass ? (
         <form action="/api/dev/signin" method="post" className="dev-bypass">
           <input type="hidden" name="next" value={nextPath} />

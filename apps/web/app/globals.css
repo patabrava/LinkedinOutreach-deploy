@@ -1070,6 +1070,22 @@ select.input {
   min-height: 1.25em;
 }
 
+.login-status--warning {
+  color: var(--accent);
+}
+
+.login-banner {
+  margin-bottom: var(--space-sm);
+  border: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+  color: var(--fg);
+  padding: var(--space-sm);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
 .nav-user {
   display: flex;
   align-items: center;
@@ -1102,6 +1118,10 @@ select.input {
 .nav-signout:hover {
   background: var(--fg);
   color: var(--bg);
+}
+
+.nav-signin {
+  margin-left: auto;
 }
 
 .dev-bypass {

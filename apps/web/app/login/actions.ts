@@ -2,12 +2,16 @@
 
 import { headers } from "next/headers";
 import { isAllowed, normalizeEmail } from "../../lib/allowlist";
+import { isSupabaseAuthConfigured } from "../../lib/authConfig";
 import { supabaseServerAction } from "../../lib/supabaseServer";
 
 export type LoginState =
   | { status: "idle" }
   | { status: "ok" }
-  | { status: "error"; code: "AUTH_UNREACHABLE" | "INVALID_EMAIL" | "RATE_LIMITED" };
+  | {
+      status: "error";
+      code: "AUTH_NOT_CONFIGURED" | "AUTH_UNREACHABLE" | "INVALID_EMAIL" | "RATE_LIMITED";
+    };
 
 export async function requestMagicLink(
   _prev: LoginState,
@@ -20,6 +24,10 @@ export async function requestMagicLink(
   const email = normalizeEmail(raw);
   if (!email.includes("@")) {
     return { status: "error", code: "INVALID_EMAIL" };
+  }
+
+  if (!isSupabaseAuthConfigured()) {
+    return { status: "error", code: "AUTH_NOT_CONFIGURED" };
   }
 
   // Always return generic ok for disallowed emails — never reveal membership.
