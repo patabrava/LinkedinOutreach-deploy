@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 from dataclasses import asdict, dataclass
-from pathlib import Path
 import os
+from pathlib import Path
+import shutil
 import sys
 from typing import Literal, Optional, Tuple
 
@@ -14,13 +16,19 @@ from playwright.async_api import Browser, BrowserContext, Playwright, TimeoutErr
 __all__ = [
     "AUTH_STATUS_PATH",
     "AUTH_STATE_PATH",
+    "REMOTE_BROWSER_CDP_URL",
+    "REMOTE_BROWSER_PROFILE_DIR",
     "LinkedinAuthStatus",
     "read_auth_status",
     "write_auth_status",
     "update_auth_status",
     "open_browser",
+    "connect_remote_browser",
+    "disconnect_remote_browser",
     "save_storage_state",
     "is_logged_in",
+    "sync_remote_session_to_auth",
+    "reset_remote_login_state",
     "require_auth_state",
     "shutdown",
 ]
@@ -45,6 +53,8 @@ AUTH_DIR = _resolve_auth_dir()
 AUTH_STATE_PATH = AUTH_DIR / "auth.json"
 AUTH_STATUS_PATH = AUTH_DIR / "auth_status.json"
 AUTH_STATUS_BACKUP_PATH = AUTH_DIR / "auth_status.json.bak"
+REMOTE_BROWSER_CDP_URL = os.getenv("LINKEDIN_BROWSER_CDP_URL", "http://linkedin-browser:9222")
+REMOTE_BROWSER_PROFILE_DIR = AUTH_DIR / "interactive-profile"
 
 
 @dataclass
@@ -62,6 +72,13 @@ class LinkedinAuthStatus:
     last_login_attempt_at: Optional[str] = None
     last_login_result: Optional[str] = None
     last_error: Optional[str] = None
+
+
+@dataclass
+class RemoteSessionResetResult:
+    auth_state_cleared: bool
+    profile_dir_cleared: bool
+    remote_browser_reachable: bool
 
 
 def _default_auth_status() -> LinkedinAuthStatus:
@@ -122,6 +139,16 @@ def update_auth_status(**updates) -> LinkedinAuthStatus:
     return status
 
 
+def _now_iso_utc() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _resolve_credentials_saved(explicit: Optional[bool]) -> bool:
+    if explicit is None:
+        return read_auth_status().credentials_saved
+    return explicit
+
+
 def _should_force_headless(requested_headless: bool) -> bool:
     """Keep local desktop sessions visible, but force headless mode in Linux containers."""
     if requested_headless:
@@ -152,6 +179,19 @@ async def open_browser(headless: bool = True) -> Tuple[Playwright, Browser, Brow
     return playwright, browser, context
 
 
+async def connect_remote_browser() -> Tuple[Playwright, Browser, BrowserContext]:
+    """Attach to the shared remote Chromium instance over CDP."""
+    playwright = await async_playwright().start()
+    browser = await playwright.chromium.connect_over_cdp(REMOTE_BROWSER_CDP_URL)
+    context = browser.contexts[0] if browser.contexts else await browser.new_context()
+    return playwright, browser, context
+
+
+async def disconnect_remote_browser(playwright: Playwright) -> None:
+    """Disconnect from the remote browser without shutting the container browser down."""
+    await playwright.stop()
+
+
 async def save_storage_state(context: BrowserContext, path: Path = AUTH_STATE_PATH) -> None:
     """Persist cookies/session to disk after a successful login."""
     await context.storage_state(path=str(path))
@@ -171,6 +211,81 @@ async def is_logged_in(context: BrowserContext) -> bool:
         return False
     finally:
         await page.close()
+
+
+async def sync_remote_session_to_auth(credentials_saved: Optional[bool] = None) -> None:
+    """Export the authenticated remote browser session into the shared auth.json."""
+    playwright, browser, context = await connect_remote_browser()
+    try:
+        has_credentials = _resolve_credentials_saved(credentials_saved)
+        if not await is_logged_in(context):
+            update_auth_status(
+                credentials_saved=has_credentials,
+                session_state="login_required",
+                auth_file_present=AUTH_STATE_PATH.exists(),
+                last_login_attempt_at=_now_iso_utc(),
+                last_login_result="failed",
+                last_error="Remote browser is open, but LinkedIn is not logged in yet.",
+            )
+            raise RuntimeError("Remote LinkedIn browser is not authenticated yet.")
+
+        await save_storage_state(context, path=AUTH_STATE_PATH)
+        update_auth_status(
+            credentials_saved=has_credentials,
+            session_state="session_active",
+            auth_file_present=True,
+            last_verified_at=_now_iso_utc(),
+            last_login_result="success",
+            last_error=None,
+        )
+    finally:
+        del browser
+        await disconnect_remote_browser(playwright)
+
+
+async def reset_remote_login_state(credentials_saved: Optional[bool] = None) -> RemoteSessionResetResult:
+    """Clear exported auth and only clear the remote profile when the remote browser is offline."""
+    remote_browser_reachable = False
+    try:
+        playwright, browser, _context = await connect_remote_browser()
+        remote_browser_reachable = True
+        del browser
+        await disconnect_remote_browser(playwright)
+    except Exception:
+        remote_browser_reachable = False
+
+    auth_state_cleared = False
+    for target in (AUTH_STATE_PATH,):
+        try:
+            existed = target.exists()
+            target.unlink(missing_ok=True)
+            auth_state_cleared = auth_state_cleared or existed
+        except Exception:
+            pass
+
+    profile_dir_cleared = False
+    if not remote_browser_reachable:
+        shutil.rmtree(REMOTE_BROWSER_PROFILE_DIR, ignore_errors=True)
+        profile_dir_cleared = not REMOTE_BROWSER_PROFILE_DIR.exists()
+
+    has_credentials = _resolve_credentials_saved(credentials_saved)
+    update_auth_status(
+        credentials_saved=has_credentials,
+        session_state="login_required" if has_credentials else "no_credentials",
+        auth_file_present=AUTH_STATE_PATH.exists(),
+        last_login_attempt_at=_now_iso_utc(),
+        last_login_result="verification_required" if has_credentials else "failed",
+        last_error=(
+            "Remote browser is still running, so only auth.json was cleared. Restart the linkedin-browser service to fully reset the interactive LinkedIn session."
+            if remote_browser_reachable
+            else "Remote browser auth artifacts were cleared. Open the remote LinkedIn browser from Settings and sign in again."
+        ),
+    )
+    return RemoteSessionResetResult(
+        auth_state_cleared=auth_state_cleared,
+        profile_dir_cleared=profile_dir_cleared,
+        remote_browser_reachable=remote_browser_reachable,
+    )
 
 
 def require_auth_state() -> None:

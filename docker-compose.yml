@@ -31,6 +31,32 @@ services:
       timeout: 5s
       retries: 3
       start_period: 90s
+  linkedin-browser:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: docker/playwright-remote/Dockerfile
+    environment:
+      HOME: /data/home
+      DISPLAY: ":99"
+      CHROME_USER_DATA_DIR: /data/scraper/interactive-profile
+      LINKEDIN_LOGIN_URL: https://www.linkedin.com/login
+    shm_size: "1gb"
+    volumes:
+      - scraper_auth:/data/scraper
+      - app_home:/data/home
+    ports:
+      - "127.0.0.1:6080:6080"
+      - "127.0.0.1:9222:9222"
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.linkedin-browser.rule: (Host(`deguraleads.de`) || Host(`www.deguraleads.de`)) && PathPrefix(`/linkedin-browser`)
+      traefik.http.routers.linkedin-browser.entrypoints: websecure
+      traefik.http.routers.linkedin-browser.tls: "true"
+      traefik.http.routers.linkedin-browser.tls.certresolver: letsencrypt
+      traefik.http.routers.linkedin-browser.middlewares: linkedin-browser-strip
+      traefik.http.middlewares.linkedin-browser-strip.stripprefix.prefixes: /linkedin-browser
+      traefik.http.services.linkedin-browser.loadbalancer.server.port: "6080"
 
 volumes:
   scraper_auth:

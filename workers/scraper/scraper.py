@@ -23,7 +23,16 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from auth import AUTH_STATE_PATH, is_logged_in, open_browser, save_storage_state, shutdown, update_auth_status
+from auth import (
+    AUTH_STATE_PATH,
+    is_logged_in,
+    open_browser,
+    reset_remote_login_state,
+    save_storage_state,
+    shutdown,
+    sync_remote_session_to_auth,
+    update_auth_status,
+)
 
 # Import shared logger
 from credential_crypto import decrypt_password
@@ -1185,22 +1194,85 @@ async def main(limit: int = 10, mode: str = "enrich") -> None:
 
 
 async def login_only_mode() -> None:
-    """Authenticate LinkedIn and persist auth.json without scraping leads."""
+    """Try the existing worker login path first, then fall back to the remote-browser flow."""
     logger.operation_start("linkedin-auth", input_data={"mode": "login_only"})
 
     try:
         client = get_supabase_client()
         creds = fetch_linkedin_credentials(client)
+        if not creds:
+            update_auth_status(
+                credentials_saved=False,
+                session_state="no_credentials",
+                auth_file_present=AUTH_STATE_PATH.exists(),
+                last_login_attempt_at=now_iso_utc(),
+                last_login_result="failed",
+                last_error="LinkedIn credentials are missing from Settings.",
+            )
+            raise RuntimeError("LinkedIn credentials are missing from Settings.")
+
         playwright, browser, context = await open_browser(headless=False)
         try:
             logger.info("Browser opened for LinkedIn login attempt")
-            await ensure_linkedin_auth(context, creds)
-            logger.operation_complete("linkedin-auth", result={"session_state": "session_active"})
+            try:
+                await ensure_linkedin_auth(context, creds)
+                logger.operation_complete("linkedin-auth", result={"session_state": "session_active"})
+                return
+            except RuntimeError:
+                update_auth_status(
+                    credentials_saved=True,
+                    session_state="login_required",
+                    auth_file_present=AUTH_STATE_PATH.exists(),
+                    last_login_attempt_at=now_iso_utc(),
+                    last_login_result="verification_required",
+                    last_error="Automatic LinkedIn login could not complete. Open the remote LinkedIn browser from Settings, complete login there, then click Capture Session.",
+                )
+                logger.info("Automatic LinkedIn login requires remote browser follow-up")
+                logger.operation_complete(
+                    "linkedin-auth",
+                    result={"session_state": "login_required", "remote_browser_required": True},
+                )
+                return
         finally:
             await shutdown(playwright, browser)
             logger.info("Browser closed")
     except Exception as exc:
         logger.operation_error("linkedin-auth", error=exc, input_data={"mode": "login_only"})
+        raise
+
+
+async def sync_remote_session_mode() -> None:
+    """Export the current authenticated remote browser session into auth.json."""
+    logger.operation_start("linkedin-auth", input_data={"mode": "sync_remote_session"})
+    try:
+        client = get_supabase_client()
+        creds = fetch_linkedin_credentials(client)
+        await sync_remote_session_to_auth(credentials_saved=bool(creds))
+        logger.operation_complete("linkedin-auth", result={"session_state": "session_active", "source": "remote_browser"})
+    except Exception as exc:
+        logger.operation_error("linkedin-auth", error=exc, input_data={"mode": "sync_remote_session"})
+        raise
+
+
+async def reset_remote_session_mode() -> None:
+    """Clear the remote interactive browser profile and local auth artifacts."""
+    logger.operation_start("linkedin-auth", input_data={"mode": "reset_remote_session"})
+    try:
+        client = get_supabase_client()
+        creds = fetch_linkedin_credentials(client)
+        result = await reset_remote_login_state(credentials_saved=bool(creds))
+        logger.operation_complete(
+            "linkedin-auth",
+            result={
+                "session_state": "login_required" if creds else "no_credentials",
+                "source": "remote_browser",
+                "auth_state_cleared": result.auth_state_cleared,
+                "profile_dir_cleared": result.profile_dir_cleared,
+                "remote_browser_reachable": result.remote_browser_reachable,
+            },
+        )
+    except Exception as exc:
+        logger.operation_error("linkedin-auth", error=exc, input_data={"mode": "reset_remote_session"})
         raise
 
 
@@ -1233,6 +1305,16 @@ def parse_args() -> argparse.Namespace:
         "--login-only",
         action="store_true",
         help="Run only the LinkedIn authentication bootstrap and exit.",
+    )
+    parser.add_argument(
+        "--sync-remote-session",
+        action="store_true",
+        help="Export the authenticated remote browser session into auth.json and exit.",
+    )
+    parser.add_argument(
+        "--reset-remote-session",
+        action="store_true",
+        help="Clear the remote browser profile plus local auth artifacts and exit.",
     )
     return parser.parse_args()
 
@@ -2093,6 +2175,14 @@ async def inbox_mode(limit: int = 0) -> None:
 
 if __name__ == "__main__":
     args = parse_args()
+    if getattr(args, "sync_remote_session", False):
+        asyncio.run(sync_remote_session_mode())
+        sys.exit(0)
+
+    if getattr(args, "reset_remote_session", False):
+        asyncio.run(reset_remote_session_mode())
+        sys.exit(0)
+
     if getattr(args, "login_only", False):
         asyncio.run(login_only_mode())
         sys.exit(0)

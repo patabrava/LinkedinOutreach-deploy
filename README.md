@@ -17,6 +17,47 @@ Workspace that hosts the web UI, scraping/sending workers, and MCP agent.
 5) **Sender**: `cd workers/sender && pip install -e . && python -m playwright install chromium` then `python sender.py` to type/send APPROVED drafts (obeys `DAILY_SEND_LIMIT`). `monitor.py` flags replies.  
 6) **Web**: `npm install` then `npm run dev:web` to open Mission Control (draft feed, approve/reject/regenerate, CSV importer).  
 
+## Self-hosted remote LinkedIn login
+- The login flow now opens the remote browser UI instead of launching a hidden worker browser. `POST /api/login` returns `{ ok, browserUrl, status, message }`.
+- The browser UI lives at `/linkedin-browser/vnc.html?autoconnect=1&resize=remote` behind the `linkedin-browser` compose service.
+- After completing LinkedIn sign-in in that remote browser, `POST /api/linkedin-auth/remote-session` with `{"action":"sync"}` exports the session into the shared scraper auth volume.
+- If the interactive profile gets stuck, `POST /api/linkedin-auth/remote-session` with `{"action":"reset"}` clears the exported auth and resets the remote session state.
+
+Local checks:
+```bash
+docker compose config --services | grep -E '^(app|linkedin-browser)$'
+curl -fsSI 'http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=remote'
+curl -fsS -X POST 'http://127.0.0.1:3000/api/login' \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $API_OPERATOR_TOKEN" \
+  -d '{}' | python3 -m json.tool
+curl -fsS -X POST 'http://127.0.0.1:3000/api/linkedin-auth/remote-session' \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $API_OPERATOR_TOKEN" \
+  -d '{"action":"sync"}' | python3 -m json.tool
+curl -fsS -X POST 'http://127.0.0.1:3000/api/linkedin-auth/remote-session' \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $API_OPERATOR_TOKEN" \
+  -d '{"action":"reset"}' | python3 -m json.tool
+```
+
+Live checks:
+```bash
+curl -fsSI 'https://deguraleads.de/linkedin-browser/vnc.html?autoconnect=1&resize=remote'
+curl -fsS -X POST 'https://deguraleads.de/api/login' \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $API_OPERATOR_TOKEN" \
+  -d '{}' | python3 -m json.tool
+curl -fsS -X POST 'https://deguraleads.de/api/linkedin-auth/remote-session' \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $API_OPERATOR_TOKEN" \
+  -d '{"action":"sync"}' | python3 -m json.tool
+curl -fsS -X POST 'https://deguraleads.de/api/linkedin-auth/remote-session' \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $API_OPERATOR_TOKEN" \
+  -d '{"action":"reset"}' | python3 -m json.tool
+```
+
 ## Hostinger single-VPS deployment
 This repo is designed to run on one Hostinger VPS with one public reverse proxy and the app services behind it.
 

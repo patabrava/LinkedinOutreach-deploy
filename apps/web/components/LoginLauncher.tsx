@@ -1,8 +1,12 @@
 "use client";
 
+import { useState } from "react";
+
 import type { LinkedinCredentialSummary } from "../app/actions";
 import type { LinkedinAuthStatus } from "../lib/linkedinAuthSession";
+import { getOperatorApiHeaders } from "../lib/operatorToken";
 import { LinkedinCredentialsForm } from "./LinkedinCredentialsForm";
+import { RemoteLinkedinBrowser } from "./RemoteLinkedinBrowser";
 import { StartLoginButton } from "./StartLoginButton";
 
 type Props = {
@@ -12,31 +16,26 @@ type Props = {
 
 const SESSION_COPY: Record<
   LinkedinAuthStatus["session_state"],
-  { label: string; helper: string; cta: string }
+  { label: string; cta: string }
 > = {
   no_credentials: {
     label: "NO CREDENTIALS",
-    helper: "Save your LinkedIn email and password below before you launch a session.",
     cta: "START LOGIN ATTEMPT",
   },
   credentials_saved: {
     label: "CREDENTIALS SAVED",
-    helper: "The login details are stored, but this worker has not verified a usable LinkedIn session yet.",
     cta: "START LOGIN ATTEMPT",
   },
   session_active: {
     label: "SESSION ACTIVE",
-    helper: "A cached LinkedIn session is available on the worker.",
     cta: "RECHECK SESSION",
   },
   session_expired: {
     label: "SESSION EXPIRED",
-    helper: "The cached session was rejected. Launch LinkedIn login again to refresh it.",
     cta: "RECONNECT SESSION",
   },
   login_required: {
     label: "LOGIN REQUIRED",
-    helper: "LinkedIn needs a fresh login before this worker can continue.",
     cta: "START LOGIN ATTEMPT",
   },
 };
@@ -48,11 +47,84 @@ const formatTimestamp = (value: string | null) => {
   return parsed.toLocaleString();
 };
 
+type LoginStartResponse = {
+  ok?: boolean;
+  message?: string;
+  error?: string;
+  browserUrl?: string;
+  status?: LinkedinAuthStatus;
+};
+
+type RemoteSessionResponse = {
+  ok?: boolean;
+  message?: string;
+  error?: string;
+  status?: LinkedinAuthStatus;
+};
+
+const OPERATOR_SEQUENCE = [
+  "Start the remote browser session.",
+  "Complete LinkedIn login, challenge, and 2FA directly in the embedded browser.",
+  "Wait until LinkedIn is fully authenticated in that browser window.",
+  "Click Capture Session to sync the live browser state back to the worker.",
+];
+
 export function LoginLauncher({ existingCreds, authStatus }: Props) {
-  const sessionCopy = SESSION_COPY[authStatus.session_state];
-  const lastVerified = formatTimestamp(authStatus.last_verified_at);
-  const lastAttempt = formatTimestamp(authStatus.last_login_attempt_at);
-  const recoveredCachedSession = authStatus.session_state === "session_active" && !authStatus.credentials_saved;
+  const [currentStatus, setCurrentStatus] = useState(authStatus);
+  const [browserUrl, setBrowserUrl] = useState("");
+  const [sessionMessage, setSessionMessage] = useState("");
+  const [sessionError, setSessionError] = useState("");
+  const [sessionAction, setSessionAction] = useState<"sync" | "reset" | null>(null);
+
+  const sessionCopy = SESSION_COPY[currentStatus.session_state];
+  const lastVerified = formatTimestamp(currentStatus.last_verified_at);
+  const lastAttempt = formatTimestamp(currentStatus.last_login_attempt_at);
+  const recoveredCachedSession =
+    currentStatus.session_state === "session_active" && !currentStatus.credentials_saved;
+
+  const handleStartResult = (result: LoginStartResponse) => {
+    if (result.status) {
+      setCurrentStatus(result.status);
+    }
+    setBrowserUrl(result.browserUrl || "");
+    setSessionMessage(result.message || "");
+    setSessionError(result.ok === false ? result.error || result.message || "Failed to start login." : "");
+  };
+
+  const runRemoteSessionAction = async (action: "sync" | "reset") => {
+    setSessionAction(action);
+    setSessionMessage("");
+    setSessionError("");
+
+    try {
+      const response = await fetch("/api/linkedin-auth/remote-session", {
+        method: "POST",
+        headers: {
+          ...getOperatorApiHeaders(),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ action }),
+      });
+
+      const result = (await response.json()) as RemoteSessionResponse;
+      if (result.status) {
+        setCurrentStatus(result.status);
+      }
+
+      if (!response.ok || result.ok === false) {
+        throw new Error(result.error || result.message || `Remote session ${action} failed.`);
+      }
+
+      if (action === "reset") {
+        setBrowserUrl("");
+      }
+      setSessionMessage(result.message || `Remote session ${action} completed.`);
+    } catch (error: unknown) {
+      setSessionError(error instanceof Error ? error.message : `Remote session ${action} failed.`);
+    } finally {
+      setSessionAction(null);
+    }
+  };
 
   return (
     <div className="card" style={{ alignSelf: "flex-start" }}>
@@ -62,15 +134,32 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
         {sessionCopy.label}
       </div>
       <div style={{ marginBottom: 16 }}>
-        <div className="muted">{sessionCopy.helper}</div>
+        <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+          Operator sequence:
+        </div>
+        <ol
+          style={{
+            marginTop: 0,
+            marginBottom: 0,
+            paddingLeft: 18,
+            display: "grid",
+            gap: 6,
+            fontSize: 12,
+            color: "var(--muted)",
+          }}
+        >
+          {OPERATOR_SEQUENCE.map((step) => (
+            <li key={step}>{step}</li>
+          ))}
+        </ol>
         {recoveredCachedSession ? (
           <div className="muted" style={{ marginTop: 8, color: "var(--accent)" }}>
             Recovered from the cached browser session. You can scrape now, and the next successful login will refresh the status file.
           </div>
         ) : null}
         <div className="muted" style={{ marginTop: 8 }}>
-          Credentials saved: {authStatus.credentials_saved ? "Yes" : "No"} · Cached session file:{" "}
-          {authStatus.auth_file_present ? "Present" : "Missing"}
+          Credentials saved: {currentStatus.credentials_saved ? "Yes" : "No"} · Cached session file:{" "}
+          {currentStatus.auth_file_present ? "Present" : "Missing"}
         </div>
         {lastVerified ? (
           <div className="muted" style={{ marginTop: 4 }}>
@@ -82,23 +171,53 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
             Last login attempt: {lastAttempt}
           </div>
         ) : null}
-        {authStatus.last_login_result ? (
+        {currentStatus.last_login_result ? (
           <div className="muted" style={{ marginTop: 4 }}>
-            Last login result: {authStatus.last_login_result}
+            Last login result: {currentStatus.last_login_result}
           </div>
         ) : null}
-        {authStatus.last_error ? (
+        {currentStatus.last_error ? (
           <div className="muted" style={{ marginTop: 4, color: "var(--accent)" }}>
-            Last error: {authStatus.last_error}
+            Last error: {currentStatus.last_error}
           </div>
         ) : null}
       </div>
 
-      <StartLoginButton label={sessionCopy.cta} />
+      <StartLoginButton label={sessionCopy.cta} browserUrl={browserUrl} onResult={handleStartResult} />
+
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 16 }}>
+        <button
+          type="button"
+          className="btn secondary"
+          disabled={sessionAction !== null}
+          onClick={() => runRemoteSessionAction("sync")}
+        >
+          {sessionAction === "sync" ? "CAPTURING…" : "CAPTURE SESSION"}
+        </button>
+        <button
+          type="button"
+          className="btn secondary"
+          disabled={sessionAction !== null}
+          onClick={() => runRemoteSessionAction("reset")}
+        >
+          {sessionAction === "reset" ? "RESETTING…" : "RESET BROWSER"}
+        </button>
+      </div>
+
+      {sessionMessage ? (
+        <div style={{ marginTop: 12, fontSize: 12, color: "var(--muted)" }}>{sessionMessage}</div>
+      ) : null}
+      {sessionError ? (
+        <div style={{ marginTop: 12, fontSize: 12, color: "var(--accent)" }}>{sessionError}</div>
+      ) : null}
 
       <div style={{ marginTop: 16 }}>
         <LinkedinCredentialsForm existing={existingCreds} useCard={false} />
       </div>
+
+      {browserUrl ? (
+        <RemoteLinkedinBrowser browserUrl={browserUrl} helperMessage={sessionMessage || undefined} />
+      ) : null}
     </div>
   );
 }

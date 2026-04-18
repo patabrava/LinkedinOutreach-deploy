@@ -3,19 +3,29 @@
 import { useState } from "react";
 
 import { getOperatorApiHeaders } from "../lib/operatorToken";
+import type { LinkedinAuthStatus } from "../lib/linkedinAuthSession";
 
 type Props = {
   onStart?: () => void;
+  onResult?: (result: LoginResponse) => void;
   label?: string;
+  browserUrl?: string;
 };
 
 type LoginResponse = {
   ok?: boolean;
   message?: string;
   error?: string;
+  browserUrl?: string;
+  status?: LinkedinAuthStatus;
 };
 
-export function StartLoginButton({ onStart, label = "START LOGIN ATTEMPT" }: Props) {
+export function StartLoginButton({
+  onStart,
+  onResult,
+  label = "START LOGIN ATTEMPT",
+  browserUrl = "",
+}: Props) {
   const [running, setRunning] = useState(false);
   const [msg, setMsg] = useState<string>("");
 
@@ -28,16 +38,21 @@ export function StartLoginButton({ onStart, label = "START LOGIN ATTEMPT" }: Pro
         method: "POST",
         headers: getOperatorApiHeaders(),
       });
-      const data = (await res.json()) as LoginResponse;
+      const data = (await res.json().catch(() => ({}))) as LoginResponse;
       if (!res.ok || data?.ok === false) {
-        throw new Error(data?.error || "Failed to start LinkedIn login attempt.");
+        const message = data?.error || data?.message || "Failed to start LinkedIn login attempt.";
+        onResult?.({ ...data, ok: false, error: message, message });
+        throw new Error(message);
       }
+      onResult?.(data);
       setMsg(
         data?.message ||
-          "LinkedIn login started on the worker. Recheck session state after it completes."
+          "Open the remote LinkedIn browser, complete login there, then capture the session."
       );
     } catch (error: unknown) {
-      setMsg(error instanceof Error ? error.message : "Network error");
+      const message = error instanceof Error ? error.message : "Network error";
+      setMsg(message);
+      onResult?.({ ok: false, error: message, message });
     } finally {
       setRunning(false);
     }
@@ -45,13 +60,17 @@ export function StartLoginButton({ onStart, label = "START LOGIN ATTEMPT" }: Pro
 
   return (
     <div>
-      <button
-        onClick={start}
-        disabled={running}
-        className="btn"
-      >
+      <button onClick={start} disabled={running} className="btn">
         {running ? "LAUNCHING…" : label}
       </button>
+      {browserUrl ? (
+        <div style={{ marginTop: 12, fontSize: 12, color: "var(--muted)" }}>
+          Remote browser ready:{" "}
+          <a href={browserUrl} target="_blank" rel="noreferrer">
+            {browserUrl}
+          </a>
+        </div>
+      ) : null}
       {msg ? (
         <div style={{ marginTop: 12, fontSize: 12, color: "var(--muted)" }}>{msg}</div>
       ) : null}
