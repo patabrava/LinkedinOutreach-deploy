@@ -8,8 +8,10 @@ import type { LinkedinAuthStatus } from "../lib/linkedinAuthSession";
 type Props = {
   onStart?: () => void;
   onResult?: (result: LoginResponse) => void;
+  onBusyChange?: (busy: boolean) => void;
   label?: string;
   browserUrl?: string;
+  disabled?: boolean;
 };
 
 type LoginResponse = {
@@ -23,15 +25,19 @@ type LoginResponse = {
 export function StartLoginButton({
   onStart,
   onResult,
+  onBusyChange,
   label = "START LOGIN ATTEMPT",
   browserUrl = "",
+  disabled = false,
 }: Props) {
   const [running, setRunning] = useState(false);
   const [msg, setMsg] = useState<string>("");
 
   const start = async () => {
+    if (running || disabled) return;
     onStart?.();
     setRunning(true);
+    onBusyChange?.(true);
     setMsg("");
     try {
       const res = await fetch("/api/login", {
@@ -41,8 +47,9 @@ export function StartLoginButton({
       const data = (await res.json().catch(() => ({}))) as LoginResponse;
       if (!res.ok || data?.ok === false) {
         const message = data?.error || data?.message || "Failed to start LinkedIn login attempt.";
-        onResult?.({ ...data, ok: false, error: message, message });
-        throw new Error(message);
+        onResult?.({ ...data, ok: false, error: message, message, browserUrl: "" });
+        setMsg(message);
+        return;
       }
       onResult?.(data);
       setMsg(
@@ -55,12 +62,13 @@ export function StartLoginButton({
       onResult?.({ ok: false, error: message, message });
     } finally {
       setRunning(false);
+      onBusyChange?.(false);
     }
   };
 
   return (
     <div>
-      <button onClick={start} disabled={running} className="btn">
+      <button onClick={start} disabled={running || disabled} className="btn">
         {running ? "LAUNCHING…" : label}
       </button>
       {browserUrl ? (
@@ -72,7 +80,13 @@ export function StartLoginButton({
         </div>
       ) : null}
       {msg ? (
-        <div style={{ marginTop: 12, fontSize: 12, color: "var(--muted)" }}>{msg}</div>
+        <div
+          style={{ marginTop: 12, fontSize: 12, color: "var(--muted)" }}
+          role="status"
+          aria-live="polite"
+        >
+          {msg}
+        </div>
       ) : null}
     </div>
   );

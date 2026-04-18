@@ -71,6 +71,7 @@ const OPERATOR_SEQUENCE = [
 
 export function LoginLauncher({ existingCreds, authStatus }: Props) {
   const [currentStatus, setCurrentStatus] = useState(authStatus);
+  const [isLaunching, setIsLaunching] = useState(false);
   const [browserUrl, setBrowserUrl] = useState("");
   const [sessionMessage, setSessionMessage] = useState("");
   const [sessionError, setSessionError] = useState("");
@@ -81,12 +82,15 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
   const lastAttempt = formatTimestamp(currentStatus.last_login_attempt_at);
   const recoveredCachedSession =
     currentStatus.session_state === "session_active" && !currentStatus.credentials_saved;
+  const isBusy = isLaunching || sessionAction !== null;
 
   const handleStartResult = (result: LoginStartResponse) => {
     if (result.status) {
       setCurrentStatus(result.status);
     }
-    setBrowserUrl(result.browserUrl || "");
+    if (typeof result.browserUrl === "string") {
+      setBrowserUrl(result.browserUrl);
+    }
     setSessionMessage(result.message || "");
     setSessionError(result.ok === false ? result.error || result.message || "Failed to start login." : "");
   };
@@ -183,13 +187,19 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
         ) : null}
       </div>
 
-      <StartLoginButton label={sessionCopy.cta} browserUrl={browserUrl} onResult={handleStartResult} />
+      <StartLoginButton
+        label={sessionCopy.cta}
+        browserUrl={browserUrl}
+        disabled={isBusy}
+        onBusyChange={setIsLaunching}
+        onResult={handleStartResult}
+      />
 
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 16 }}>
         <button
           type="button"
           className="btn secondary"
-          disabled={sessionAction !== null}
+          disabled={isBusy}
           onClick={() => runRemoteSessionAction("sync")}
         >
           {sessionAction === "sync" ? "CAPTURING…" : "CAPTURE SESSION"}
@@ -197,7 +207,7 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
         <button
           type="button"
           className="btn secondary"
-          disabled={sessionAction !== null}
+          disabled={isBusy}
           onClick={() => runRemoteSessionAction("reset")}
         >
           {sessionAction === "reset" ? "RESETTING…" : "RESET BROWSER"}
@@ -205,10 +215,22 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
       </div>
 
       {sessionMessage ? (
-        <div style={{ marginTop: 12, fontSize: 12, color: "var(--muted)" }}>{sessionMessage}</div>
+        <div
+          style={{ marginTop: 12, fontSize: 12, color: "var(--muted)" }}
+          role="status"
+          aria-live="polite"
+        >
+          {sessionMessage}
+        </div>
       ) : null}
       {sessionError ? (
-        <div style={{ marginTop: 12, fontSize: 12, color: "var(--accent)" }}>{sessionError}</div>
+        <div
+          style={{ marginTop: 12, fontSize: 12, color: "var(--accent)" }}
+          role="alert"
+          aria-live="assertive"
+        >
+          {sessionError}
+        </div>
       ) : null}
 
       <div style={{ marginTop: 16 }}>

@@ -30,6 +30,8 @@ export function RemoteLinkedinBrowser({ browserUrl, helperMessage }: Props) {
         <div
           className="muted"
           style={{ fontSize: 12, color: "var(--accent)", border: "2px solid #000", padding: 10 }}
+          role="status"
+          aria-live="polite"
         >
           {helperMessage}
         </div>
