@@ -2005,10 +2005,8 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
             return
         
         replies_detected = 0
-        nudges_detected = 0
         skipped_existing = 0
         skipped_no_conversation = 0
-        skipped_too_recent = 0
         skipped_ambiguous = 0
         skipped_recently_scanned = 0
         skipped_pending_invite = 0
@@ -2166,73 +2164,7 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
                 replies_detected += 1
                 logger.info(f"✓ Created followup for REPLY from {lead_full_name}", {"leadId": lead_id})
                 print(f"  ✓ REPLY detected from: {lead_full_name}")
-                
-            elif is_outbound:
-                # This is a NUDGE opportunity - we sent but they haven't replied
-                # IMPORTANT: Only create NUDGE if we verified conversation history exists
-                if not convo_info.get("has_history"):
-                    logger.debug(
-                        f"Skipping NUDGE for {lead_full_name} - no verified conversation history",
-                        {"leadId": lead_id}
-                    )
-                    skipped_no_conversation += 1
-                    continue
-                
-                # Check if we sent a message recently (within 48 hours)
-                try:
-                    draft_resp = execute_with_retry(
-                        client.table("drafts")
-                        .select("sent_at")
-                        .eq("lead_id", lead_id)
-                        .not_.is_("sent_at", "null")
-                        .order("sent_at", desc=True)
-                        .limit(1),
-                        desc=f"Fetch last sent draft for lead {lead_id}",
-                    )
-                    if draft_resp.data:
-                        last_sent = draft_resp.data[0].get("sent_at")
-                        if last_sent:
-                            sent_dt = datetime.datetime.fromisoformat(last_sent.replace("Z", "+00:00"))
-                            now = datetime.datetime.now(datetime.timezone.utc)
-                            hours_since_sent = (now - sent_dt).total_seconds() / 3600
-                            if hours_since_sent < 48:
-                                logger.debug(
-                                    f"Skipping nudge for {lead_full_name}, message sent {round(hours_since_sent, 1)}h ago",
-                                    {"leadId": lead_id}
-                                )
-                                # Still update scan timestamp even when skipping
-                                execute_with_retry(
-                                    client.table("leads").update({
-                                        "last_inbox_scan_at": scan_ts,
-                                        "pending_invite": False,
-                                    }).eq("id", lead_id),
-                                    desc=f"Update last_inbox_scan_at for skipped nudge {lead_id}",
-                                )
-                                skipped_too_recent += 1
-                                continue
-                except Exception as exc:
-                    logger.warn(
-                        f"Failed to check last sent time for {lead_full_name}",
-                        {"leadId": lead_id},
-                        error=exc
-                    )
-                
-                # Create nudge followup
-                # For nudges, the last message is from us (the outbound message)
-                upsert_followup_for_reply(
-                    client,
-                    lead_id=lead_id,
-                    reply_id=None,
-                    reply_snippet="",  # Empty = no reply, this is a nudge
-                    reply_timestamp=reply_ts,
-                    followup_type="NUDGE",
-                    last_message_text=text[:2000] if text else "",
-                    last_message_from="us",
-                )
-                nudges_detected += 1
-                logger.info(f"✓ Created NUDGE for {lead_full_name} (no reply yet)", {"leadId": lead_id})
-                print(f"  ✓ NUDGE opportunity: {lead_full_name}")
-            
+
             # Update lead with scan timestamp after processing (reply or nudge)
             execute_with_retry(
                 client.table("leads").update({
@@ -2250,10 +2182,8 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
             f"Inbox scan complete",
             data={
                 "replies": replies_detected,
-                "nudges": nudges_detected,
                 "skipped_existing": skipped_existing,
                 "skipped_no_conversation": skipped_no_conversation,
-                "skipped_too_recent": skipped_too_recent,
                 "skipped_ambiguous": skipped_ambiguous,
                 "skipped_recently_scanned": skipped_recently_scanned,
                 "skipped_pending_invite": skipped_pending_invite,
@@ -2265,10 +2195,8 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
         print(f"{'='*50}")
         print(f"  Leads checked: {len(sent_leads)}")
         print(f"  Replies detected: {replies_detected}")
-        print(f"  Nudges created: {nudges_detected}")
         print(f"  Already pending: {skipped_existing}")
         print(f"  No conversation: {skipped_no_conversation}")
-        print(f"  Too recent (48h): {skipped_too_recent}")
         print(f"  Recently scanned ({INBOX_SCAN_COOLDOWN_HOURS}h): {skipped_recently_scanned}")
         print(f"  Pending invite ({PENDING_INVITE_BACKOFF_DAYS}d): {skipped_pending_invite}")
         print(f"{'='*50}")
