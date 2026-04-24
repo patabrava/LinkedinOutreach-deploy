@@ -2140,7 +2140,7 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
                 # Sender doesn't match lead name and isn't a standard "you" indicator.
                 # Since we opened this conversation from the lead's profile, if the sender
                 # is NOT the lead, it must be US (the logged-in user, e.g. "Simon Vestner").
-                # This means the last message is outbound - treat as NUDGE candidate.
+                # This means the last message is outbound; the sender worker owns nudge scheduling.
                 logger.debug(
                     f"Sender '{sender}' doesn't match lead '{lead_full_name}' - treating as our outbound message",
                     {"leadId": lead_id, "sender": sender, "leadName": lead_full_name}
