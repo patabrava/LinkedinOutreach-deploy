@@ -3,12 +3,13 @@ import { NextResponse } from "next/server";
 import { requireOperatorAccess } from "../../../../lib/apiGuard";
 import { logger } from "../../../../lib/logger";
 import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
+import { listActiveWorkers } from "../../../../lib/workerControl";
 
 // Force dynamic rendering - disable all caching
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-const DEFAULT_DAILY_ENRICHMENT_CAP = 50;
+const DEFAULT_DAILY_ENRICHMENT_CAP = 20;
 
 const getDailyEnrichmentCap = () => {
   const parsedCap = parseInt(process.env.DAILY_ENRICHMENT_CAP || "", 10);
@@ -52,6 +53,24 @@ const MODE_CONFIG = {
     completedStatuses: ["CONNECT_ONLY_SENT"] as StatusKey[],
   },
 } as const;
+
+const WEEKLY_LIMIT_PATTERNS = [
+  "weekly limit",
+  "weekly invitation limit",
+  "invitation limit",
+  "contact request limit",
+  "contact requests",
+  "wöchentliche limit",
+  "wöchentliche kontaktanfragen",
+  "kontaktanfragen",
+  "nächste woche",
+  "next week",
+];
+
+const detectWeeklyLimit = (text: string | null | undefined) => {
+  const normalized = (text || "").toLowerCase();
+  return WEEKLY_LIMIT_PATTERNS.some((pattern) => normalized.includes(pattern));
+};
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -118,6 +137,8 @@ export async function GET(request: Request) {
 
     let completedToday = 0;
     let completedTodayError: any = null;
+    let limitReached = false;
+    let limitMessage: string | null = null;
 
     if (isConnectOnly) {
       logger.dbQuery(
@@ -158,6 +179,46 @@ export async function GET(request: Request) {
 
       // Queue for connect_only means unsent leads that still can be processed.
       remaining = (counts.NEW || 0) + (counts.PROCESSING || 0) + (counts.ENRICHED || 0);
+
+      const { data: recentFailed, error: recentFailedError } = await client
+        .from("leads")
+        .select("id, error_message, updated_at")
+        .eq("outreach_mode", modeConfig.outreachMode)
+        .eq("status", "FAILED")
+        .gte("updated_at", startIso)
+        .order("updated_at", { ascending: false })
+        .limit(10);
+
+      if (recentFailedError) {
+        logger.error("Failed to inspect recent connect-only failures", { correlationId }, recentFailedError);
+        throw recentFailedError;
+      }
+
+      const limitHit = (recentFailed || []).find((row) => detectWeeklyLimit(row.error_message));
+      if (limitHit) {
+        limitReached = true;
+        limitMessage = "LinkedIn weekly invite limit reached. Stop until next week.";
+      }
+
+      if (!limitReached) {
+        const { data: pausedLeads, error: pausedLeadsError } = await client
+          .from("leads")
+          .select("id, profile_data, updated_at")
+          .eq("outreach_mode", modeConfig.outreachMode)
+          .eq("status", "NEW")
+          .contains("profile_data", { meta: { connect_only_limit_reached: true } })
+          .limit(1);
+
+        if (pausedLeadsError) {
+          logger.error("Failed to inspect requeued connect-only leads", { correlationId }, pausedLeadsError);
+          throw pausedLeadsError;
+        }
+
+        if ((pausedLeads || []).length > 0) {
+          limitReached = true;
+          limitMessage = "LinkedIn weekly invite limit reached. Some leads were requeued into NEW for later retry.";
+        }
+      }
     } else {
       logger.dbQuery(
         "select-count",
@@ -211,6 +272,7 @@ export async function GET(request: Request) {
     const response = {
       ok: true,
       mode: requestedMode,
+      workerActive: listActiveWorkers({ kinds: ["scraper_outreach"] }).length > 0,
       counts,
       remaining,
       completed,
@@ -219,6 +281,8 @@ export async function GET(request: Request) {
       remainingToday,
       queueRemaining: remaining,
       nextLead: nextLead || null,
+      limitReached,
+      limitMessage,
     };
 
     logger.info("Status fetched successfully", { correlationId }, { remaining, completed, nextLeadId: nextLead?.id });

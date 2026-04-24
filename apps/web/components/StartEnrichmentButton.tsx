@@ -9,6 +9,7 @@ type StatusCounts = Record<string, number>;
 
 type StatusResponse = {
   ok: boolean;
+  workerActive?: boolean;
   counts: StatusCounts;
   remaining: number;
   completed: number;
@@ -16,6 +17,8 @@ type StatusResponse = {
   completedToday?: number;
   remainingToday?: number;
   queueRemaining?: number;
+  limitReached?: boolean;
+  limitMessage?: string | null;
   nextLead: {
     id: string;
     linkedin_url: string;
@@ -90,7 +93,9 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
       setStatus(data);
       setError("");
       const pending = typeof data.remainingToday === "number" ? data.remainingToday : data.remaining;
-      if (pending > 0) {
+      if (data.limitReached) {
+        setPolling(false);
+      } else if (data.workerActive || pending > 0) {
         setPolling(true);
       } else {
         setPolling(false);
@@ -273,7 +278,7 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
   }, [status]);
 
   const showDetails = variant === "details";
-  const showStop = showDetails || polling || stopping;
+  const showStop = showDetails || polling || stopping || Boolean(status?.workerActive);
 
   return (
     <div style={{ width: "100%" }}>
@@ -352,6 +357,21 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
             {progress.backlogRemaining
               ? ` • IN QUEUE: ${progress.backlogRemaining}`
               : ""}
+          </div>
+        ) : null}
+        {status?.limitReached ? (
+          <div
+            style={{
+              marginTop: 10,
+              padding: "10px 12px",
+              border: "2px solid var(--accent)",
+              background: "rgba(255, 0, 0, 0.04)",
+              fontSize: 12,
+              color: "var(--accent)",
+              fontWeight: 700,
+            }}
+          >
+            {status.limitMessage || "LinkedIn weekly invite limit reached. Stop until next week."}
           </div>
         ) : null}
         {nextLeadLabel ? (

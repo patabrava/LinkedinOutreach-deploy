@@ -149,6 +149,29 @@ def _resolve_credentials_saved(explicit: Optional[bool]) -> bool:
     return explicit
 
 
+def _candidate_remote_browser_cdp_urls() -> list[str]:
+    """Return a de-duplicated list of CDP endpoints to try in order."""
+    configured = os.getenv("LINKEDIN_BROWSER_CDP_URL", "").strip()
+    candidates = [
+        configured,
+        REMOTE_BROWSER_CDP_URL,
+        "http://linkedin-browser:9222",
+        "http://127.0.0.1:9222",
+        "http://localhost:9222",
+        "http://host.docker.internal:9222",
+    ]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        ordered.append(candidate)
+    return ordered
+
+
 def _should_force_headless(requested_headless: bool) -> bool:
     """Keep local desktop sessions visible, but force headless mode in Linux containers."""
     if requested_headless:
@@ -182,9 +205,21 @@ async def open_browser(headless: bool = True) -> Tuple[Playwright, Browser, Brow
 async def connect_remote_browser() -> Tuple[Playwright, Browser, BrowserContext]:
     """Attach to the shared remote Chromium instance over CDP."""
     playwright = await async_playwright().start()
-    browser = await playwright.chromium.connect_over_cdp(REMOTE_BROWSER_CDP_URL)
-    context = browser.contexts[0] if browser.contexts else await browser.new_context()
-    return playwright, browser, context
+    last_error: Exception | None = None
+
+    for endpoint in _candidate_remote_browser_cdp_urls():
+        try:
+            browser = await playwright.chromium.connect_over_cdp(endpoint)
+            context = browser.contexts[0] if browser.contexts else await browser.new_context()
+            return playwright, browser, context
+        except Exception as exc:
+            last_error = exc
+
+    await playwright.stop()
+    raise RuntimeError(
+        "Unable to connect to the remote LinkedIn browser. "
+        "Set LINKEDIN_BROWSER_CDP_URL to a reachable CDP endpoint or start the linkedin-browser service."
+    ) from last_error
 
 
 async def disconnect_remote_browser(playwright: Playwright) -> None:

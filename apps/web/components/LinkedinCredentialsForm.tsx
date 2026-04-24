@@ -56,7 +56,7 @@ export function LinkedinCredentialsForm({ existing, useCard = true }: Props) {
         name="password"
         type="password"
         placeholder={existing.hasPassword ? "Password stored. Enter to replace." : "LinkedIn password"}
-        required
+        required={!existing.hasPassword}
         autoComplete="current-password"
         style={{ marginBottom: 20 }}
       />

@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 
 import { requireOperatorAccess } from "../../../../lib/apiGuard";
 import { logger } from "../../../../lib/logger";
+import { listActiveWorkers, stopWorkers } from "../../../../lib/workerControl";
 
 const PID_FILENAME = "enrichment.pid";
 
@@ -18,8 +19,25 @@ export async function POST(request: Request) {
     const repoRoot = path.resolve(webDir, "..", "..");
     const scraperDir = path.join(repoRoot, "workers", "scraper");
     const pidFile = path.join(scraperDir, PID_FILENAME);
+    const trackedWorkers = listActiveWorkers({ kinds: ["scraper_outreach"] });
 
     if (!fs.existsSync(pidFile)) {
+      if (trackedWorkers.length > 0) {
+        const result = stopWorkers({ kinds: ["scraper_outreach"] });
+        const stopped = result.stopped.length > 0;
+        logger.info("Enrichment process stop requested via registry only", {
+          correlationId,
+          stopped,
+          pids: result.stopped.map((worker) => worker.pid),
+        });
+        logger.apiResponse("POST", "/api/enrich/stop", 200, { correlationId }, { stopped });
+        return NextResponse.json({
+          ok: true,
+          stopped,
+          message: stopped ? "Enrichment stopped." : "Process not running.",
+        });
+      }
+
       logger.warn("No enrichment PID file present", { correlationId }, { pidFile });
       logger.apiResponse("POST", "/api/enrich/stop", 200, { correlationId }, { stopped: false });
       return NextResponse.json({ ok: true, stopped: false, message: "No enrichment process found." });
@@ -37,8 +55,14 @@ export async function POST(request: Request) {
 
     let stopped = false;
     try {
-      process.kill(pid, "SIGTERM");
-      stopped = true;
+      const result = stopWorkers({ kinds: ["scraper_outreach"] });
+      stopped = result.stopped.some((worker) => worker.pid === pid);
+      if (!stopped && result.notRunning.some((worker) => worker.pid === pid)) {
+        stopped = false;
+      } else if (!stopped) {
+        process.kill(pid, "SIGTERM");
+        stopped = true;
+      }
     } catch (killErr: any) {
       if (killErr?.code !== "ESRCH") {
         logger.error("Failed to stop enrichment process", { correlationId, pid }, killErr as Error);

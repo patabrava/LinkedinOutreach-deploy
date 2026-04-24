@@ -48,11 +48,25 @@ print(f"[SCRAPER] .env exists: {env_path.exists()}", file=sys.stderr)
 logger = get_logger("scraper")
 
 # Avoid tripping LinkedIn automation warnings by capping daily enrichments.
-DAILY_ENRICHMENT_CAP = 50
+DEFAULT_DAILY_ENRICHMENT_CAP = 20
 DAILY_INBOX_SCAN_LIMIT = 60
 INBOX_SCAN_COOLDOWN_HOURS = 24  # skip re-opening profiles scanned within this window
 PENDING_INVITE_BACKOFF_DAYS = 7  # skip pending invites for this many days
 CONNECT_DIALOG_TIMEOUT_MS = 15_000
+
+
+def get_daily_enrichment_cap() -> int:
+    env_limit = os.getenv("DAILY_ENRICHMENT_CAP", "").strip()
+    try:
+        parsed_limit = int(env_limit) if env_limit else DEFAULT_DAILY_ENRICHMENT_CAP
+    except Exception:
+        parsed_limit = DEFAULT_DAILY_ENRICHMENT_CAP
+    return max(parsed_limit, 1)
+
+
+class WeeklyInviteLimitReached(RuntimeError):
+    """Raised when LinkedIn blocks additional invites for the week."""
+    pass
 
 
 @dataclass
@@ -104,6 +118,41 @@ async def capture_connect_failure_screenshot(page: Page, reason: str, lead_id: O
         return None
 
 
+async def detect_weekly_invite_limit(page: Page) -> Optional[str]:
+    """Best-effort detection for LinkedIn's weekly invite cap dialog."""
+    text_candidates: List[str] = []
+    for selector in ["section[role='dialog']", "div[role='dialog']", "body"]:
+        try:
+            text = await page.locator(selector).first.inner_text(timeout=2_000)
+            if text:
+                text_candidates.append(text)
+        except Exception:
+            continue
+
+    normalized_text = " ".join(text_candidates).lower()
+    if not normalized_text:
+        return None
+
+    patterns = [
+        "weekly limit",
+        "weekly invitation limit",
+        "invitation limit",
+        "contact requests",
+        "contact request limit",
+        "wöchentliche limit",
+        "wöchentliche kontaktanfragen",
+        "kontaktanfragen",
+        "kontaktanfrage",
+        "nächste woche",
+        "next week",
+    ]
+
+    if any(pattern in normalized_text for pattern in patterns):
+        return "LinkedIn weekly invite limit reached. Please retry next week."
+
+    return None
+
+
 def execute_with_retry(query, desc: str, attempts: int = 3, delay: float = 1.0):
     """Execute a Supabase query with basic retry/backoff for transient network errors."""
     last_exc = None
@@ -133,7 +182,19 @@ def extract_profile_meta(profile_data: Optional[Dict[str, Any]]) -> Dict[str, An
 def update_profile_meta(client: Client, lead_id: str, profile_data: Optional[Dict[str, Any]], meta_updates: Dict[str, Any]) -> None:
     """Persist meta flags inside profile_data.meta without schema changes."""
     base = profile_data if isinstance(profile_data, dict) else {}
-    meta = extract_profile_meta(profile_data)
+    if not base:
+        try:
+            resp = (
+                client.table("leads")
+                .select("profile_data")
+                .eq("id", lead_id)
+                .limit(1)
+                .execute()
+            )
+            base = (resp.data or [{}])[0].get("profile_data") or {}
+        except Exception:
+            base = {}
+    meta = extract_profile_meta(base if isinstance(base, dict) else profile_data)
     meta.update(meta_updates)
     new_profile = {**base, "meta": meta}
     execute_with_retry(
@@ -219,7 +280,7 @@ def fetch_today_enrichment_count(client: Client) -> int:
     logger.db_result("select-count", "leads", {"status": tracked_statuses}, count)
     logger.info(
         f"Enriched today: {count}",
-        data={"count": count, "cap": DAILY_ENRICHMENT_CAP, "statuses": tracked_statuses},
+        data={"count": count, "cap": get_daily_enrichment_cap(), "statuses": tracked_statuses},
     )
     return count
 
@@ -790,9 +851,20 @@ async def _click_send_without_note(page: Page, url: str, lead_id: Optional[str] 
         await send_label.first.wait_for(state="visible", timeout=5_000)
         await send_label.first.click(timeout=8_000)
         await random_pause(0.8, 1.3)
+        limit_reason = await detect_weekly_invite_limit(page)
+        if limit_reason:
+            screenshot_path = await capture_connect_failure_screenshot(page, "weekly_invite_limit_reached", lead_id)
+            logger.connection_flow(
+                "send_button",
+                "LIMIT_REACHED",
+                data={"url": url, "reason": limit_reason, "screenshot": screenshot_path},
+            )
+            raise WeeklyInviteLimitReached(limit_reason)
         logger.element_click("Send button", success=True)
         logger.connection_flow("send_button", "CLICKED", data={"url": url})
         return True
+    except WeeklyInviteLimitReached:
+        raise
     except Exception as exc:
         logger.element_click("Send button", success=False)
         screenshot_path = await capture_connect_failure_screenshot(page, "send_button_click_failed", lead_id)
@@ -1044,6 +1116,10 @@ def mark_connect_sent(client: Client, lead_id: str) -> None:
             "connection_sent_at": now_iso,
         }
     ).eq("id", lead_id).execute()
+    try:
+        update_profile_meta(client, lead_id, None, {"connect_only_limit_reached": False})
+    except Exception:
+        pass
     logger.db_result("update", "leads", {"leadId": lead_id}, 1)
     logger.info("Lead marked CONNECT_ONLY_SENT", {"leadId": lead_id})
 
@@ -1063,6 +1139,39 @@ def mark_connect_failed(client: Client, lead_id: str, reason: Optional[str] = No
     client.table("leads").update(update_data).eq("id", lead_id).execute()
     logger.db_result("update", "leads", {"leadId": lead_id}, 1)
     logger.warn("Lead marked FAILED", {"leadId": lead_id}, error=reason)
+
+
+def requeue_connect_only_limit_hit(client: Client, lead_id: str, reason: Optional[str] = None) -> None:
+    """Return a blocked invite to the NEW queue and remember why it was paused."""
+    now_iso = datetime.datetime.utcnow().isoformat()
+    logger.db_query(
+        "update",
+        "leads",
+        {"leadId": lead_id},
+        {"status": "NEW", "error_message": (reason or "")[:240]},
+    )
+    update_data = {
+        "status": "NEW",
+        "updated_at": now_iso,
+        "connection_sent_at": None,
+        "error_message": None,
+    }
+    client.table("leads").update(update_data).eq("id", lead_id).execute()
+    try:
+        update_profile_meta(
+            client,
+            lead_id,
+            None,
+            {
+                "connect_only_limit_reached": True,
+                "connect_only_limit_reached_at": now_iso,
+                "connect_only_limit_reached_reason": reason or "Weekly invite limit reached",
+            },
+        )
+    except Exception:
+        pass
+    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
+    logger.warn("Lead requeued to NEW after weekly invite limit", {"leadId": lead_id}, error=reason)
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
@@ -1124,6 +1233,14 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
                             {"mode": mode},
                         )
                 except Exception as exc:
+                    if isinstance(exc, WeeklyInviteLimitReached):
+                        requeue_connect_only_limit_hit(client, lead.id, reason=str(exc))
+                        logger.warn(
+                            f"Connection request blocked by weekly invite limit for {lead.id}",
+                            {"leadId": lead.id},
+                            error=exc,
+                        )
+                        raise
                     mark_connect_failed(client, lead.id, reason=str(exc))
                     logger.warn(
                         f"Connection request failed for {lead.id}",
@@ -1139,6 +1256,8 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
                 mark_enrich_failed(client, lead.id, reason=f"Timeout: {exc}")
         except Exception as exc:
             logger.error(f"Failed to process {lead.id}", {"leadId": lead.id, "mode": mode}, error=exc)
+            if mode == "connect_only" and isinstance(exc, WeeklyInviteLimitReached):
+                raise
             if mode != "connect_only":
                 mark_enrich_failed(client, lead.id, reason=str(exc))
         finally:
@@ -1150,20 +1269,21 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
         await random_pause()
 
 
-async def main(limit: int = 10, mode: str = "enrich") -> None:
+async def main(limit: int = 0, mode: str = "enrich") -> None:
     logger.operation_start("enrichment", input_data={"limit": limit, "mode": mode})
     
     try:
         client = get_supabase_client()
         creds = fetch_linkedin_credentials(client)
         enriched_today = fetch_today_enrichment_count(client)
-        remaining_quota = max(0, DAILY_ENRICHMENT_CAP - enriched_today)
+        daily_cap = get_daily_enrichment_cap()
+        remaining_quota = max(0, daily_cap - enriched_today)
 
         if remaining_quota <= 0:
-            logger.warn(f"Daily enrichment cap reached", data={"cap": DAILY_ENRICHMENT_CAP, "enrichedToday": enriched_today})
+            logger.warn(f"Daily enrichment cap reached", data={"cap": daily_cap, "enrichedToday": enriched_today})
             return
 
-        effective_limit = min(limit, remaining_quota)
+        effective_limit = remaining_quota if limit <= 0 else min(limit, remaining_quota)
         if effective_limit <= 0:
             logger.info("No quota left for today")
             return
@@ -2197,6 +2317,6 @@ if __name__ == "__main__":
         limit = args.limit if isinstance(args.limit, int) and args.limit >= 0 else 0
         asyncio.run(inbox_mode(limit=limit))
     else:
-        limit = args.limit if isinstance(args.limit, int) and args.limit > 0 else 10
+        limit = args.limit if isinstance(args.limit, int) and args.limit >= 0 else 0
         mode = getattr(args, "mode", "enrich")
         asyncio.run(main(limit=limit, mode=mode))

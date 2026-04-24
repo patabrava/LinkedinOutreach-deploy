@@ -1,5 +1,6 @@
 import { DraftFeed } from "../components/DraftFeed";
 import { SequenceEditor } from "../components/SequenceEditor";
+import { WorkerControlPanel } from "../components/WorkerControlPanel";
 import { requireServerSession } from "../lib/auth";
 import { fetchDraftFeed, fetchLeadBatches, fetchOutreachSequences } from "./actions";
 
@@ -46,6 +47,15 @@ export default async function MissionControlPage() {
       </div>
 
       <SequenceEditor sequences={sequences} batches={batches} />
+
+      <div style={{ marginTop: 24 }}>
+        <WorkerControlPanel
+          title="STOP MESSAGING WORKERS"
+          description="Stops post-acceptance first-message sends, sequence sends, and draft-generation runs from Mission Control."
+          kinds={["sender_outreach", "draft_agent"]}
+          stopLabel="STOP MESSAGING"
+        />
+      </div>
 
       <DraftFeed drafts={drafts} variant="mission_control" />
     </div>

@@ -9,6 +9,7 @@ import { logger } from "./logger";
 import { supabaseRouteHandler } from "./supabaseServer";
 
 const DEFAULT_REMOTE_BROWSER_URL = "/linkedin-browser/vnc.html?autoconnect=1&resize=remote";
+const LOCAL_REMOTE_BROWSER_URL = "http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=remote";
 
 const resolveScraperDir = () => {
   const runtimeScraperDir = process.env.LINKEDIN_SCRAPER_DIR?.trim();
@@ -46,8 +47,67 @@ const resolvePythonCommand = (scraperDir: string) => {
   return "python3";
 };
 
-export const getRemoteBrowserUrl = () =>
-  process.env.NEXT_PUBLIC_LINKEDIN_REMOTE_BROWSER_URL?.trim() || DEFAULT_REMOTE_BROWSER_URL;
+const getRemoteBrowserUrlCandidates = (): string[] => {
+  const configured = process.env.NEXT_PUBLIC_LINKEDIN_REMOTE_BROWSER_URL?.trim() || "";
+  const candidates = [
+    configured,
+    process.env.NODE_ENV === "production" ? "" : LOCAL_REMOTE_BROWSER_URL,
+    DEFAULT_REMOTE_BROWSER_URL,
+  ];
+
+  return [...new Set(candidates.filter(Boolean))];
+};
+
+const buildReachabilityProbeUrl = (browserUrl: string): string | null => {
+  if (browserUrl.startsWith("http://") || browserUrl.startsWith("https://")) {
+    return browserUrl;
+  }
+
+  if (process.env.NODE_ENV !== "production") {
+    return null;
+  }
+
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
+  if (!siteUrl) {
+    return null;
+  }
+
+  try {
+    return new URL(browserUrl, siteUrl).toString();
+  } catch {
+    return null;
+  }
+};
+
+const isRemoteBrowserReachable = async (browserUrl: string): Promise<boolean> => {
+  const probeUrl = buildReachabilityProbeUrl(browserUrl);
+  if (!probeUrl) {
+    return false;
+  }
+
+  try {
+    const response = await fetch(probeUrl, {
+      method: "HEAD",
+      redirect: "follow",
+      cache: "no-store",
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+};
+
+export const resolveRemoteBrowserUrl = async (): Promise<string | null> => {
+  for (const candidate of getRemoteBrowserUrlCandidates()) {
+    if (await isRemoteBrowserReachable(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+};
+
+export const getRemoteBrowserUrl = () => getRemoteBrowserUrlCandidates()[0] || DEFAULT_REMOTE_BROWSER_URL;
 
 const readOperatorToken = (request: Request): string => {
   const authHeader = request.headers.get("authorization") || "";

@@ -12,6 +12,7 @@ import { normalizeOutreachMode, OUTREACH_MODE_TO_DB } from "../lib/outreachModes
 import type { PromptType } from "../lib/promptTypes";
 import { validateSequencePlaceholdersByField } from "../lib/sequencePlaceholders";
 import { isSupabaseAdminConfigured, supabaseAdmin } from "../lib/supabaseAdmin";
+import { trackWorkerChild, type WorkerKind } from "../lib/workerControl";
 
 type DraftInput = {
   leadId: string;
@@ -40,6 +41,41 @@ export type LinkedinCredentialState = {
   error?: string;
 };
 
+type SpawnTrackedWorkerInput = {
+  execPath: string;
+  args: string[];
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+  stdio?: "ignore" | ["ignore", "inherit", "inherit"];
+  kind: WorkerKind;
+  label: string;
+};
+
+function spawnTrackedWorker({
+  execPath,
+  args,
+  cwd,
+  env,
+  stdio = "ignore",
+  kind,
+  label,
+}: SpawnTrackedWorkerInput) {
+  const proc = spawn(execPath, args, {
+    cwd,
+    stdio,
+    detached: true,
+    env: env || { ...process.env },
+  });
+  trackWorkerChild({
+    child: proc,
+    kind,
+    label,
+    args,
+  });
+  proc.unref();
+  return proc;
+}
+
 function startDraftAgent(
   correlationId: string | undefined,
   promptType: PromptType = 1,
@@ -67,13 +103,15 @@ function startDraftAgent(
       correlationId ? { correlationId, promptType, outreachMode } : { promptType, outreachMode }
     );
 
-    const proc = spawn(execToUse, args, {
+    spawnTrackedWorker({
+      execPath: execToUse,
+      args,
       cwd: repoRoot,
       stdio: "ignore",
-      detached: true,
       env: { ...process.env, ...(correlationId ? { CORRELATION_ID: correlationId } : {}) },
+      kind: "draft_agent",
+      label: "Draft generation",
     });
-    proc.unref();
   } catch (err) {
     logger.error("startDraftAgent error", correlationId ? { correlationId } : {}, err as Error);
   }
@@ -582,13 +620,15 @@ export async function approveFollowup(followupId: string, draftText: string) {
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
     const args = [senderPath, "--followup"];
-    const proc = spawn(execToUse, args, {
+    spawnTrackedWorker({
+      execPath: execToUse,
+      args,
       cwd: repoRoot,
       stdio: "ignore",
-      detached: true,
       env: { ...process.env },
+      kind: "sender_followup",
+      label: "Follow-up sender",
     });
-    proc.unref();
   } catch (err) {
     console.error("approveFollowup trigger sender error", err);
   }
@@ -842,14 +882,15 @@ export async function triggerInboxScan() {
     // Minimal logging so we can see what is being spawned from the Followups tab
     console.log("triggerInboxScan: spawning inbox scraper", { execToUse, args, cwd: repoRoot });
 
-    const proc = spawn(execToUse, args, {
+    spawnTrackedWorker({
+      execPath: execToUse,
+      args,
       cwd: repoRoot,
-      // Pipe stdout/stderr through to the dev process so logs are visible
       stdio: ["ignore", "inherit", "inherit"],
-      detached: true,
       env: { ...process.env },
+      kind: "scraper_inbox",
+      label: "Inbox scan",
     });
-    proc.unref();
   } catch (err) {
     console.error("triggerInboxScan error", err);
   }
@@ -946,13 +987,15 @@ export async function triggerFollowupSender() {
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
     const args = [senderPath, "--followup"]; // process approved followups
-    const proc = spawn(execToUse, args, {
+    spawnTrackedWorker({
+      execPath: execToUse,
+      args,
       cwd: repoRoot,
       stdio: "ignore",
-      detached: true,
       env: { ...process.env },
+      kind: "sender_followup",
+      label: "Follow-up sender",
     });
-    proc.unref();
   } catch (err) {
     console.error("triggerFollowupSender error", err);
   }
@@ -975,13 +1018,15 @@ export async function sendLeadNow(leadId: string, outreachMode: OutreachMode = "
 
     logger.workerSpawn("sender", args, { correlationId, leadId, outreachMode });
 
-    const proc = spawn(execToUse, args, {
+    const proc = spawnTrackedWorker({
+      execPath: execToUse,
+      args,
       cwd: repoRoot,
       stdio: ["ignore", "inherit", "inherit"],
-      detached: true,
       env: { ...process.env, CORRELATION_ID: correlationId },
+      kind: "sender_outreach",
+      label: "Messaging sender",
     });
-    proc.unref();
     logger.info("Sender worker triggered for single lead", { correlationId, leadId, pid: proc.pid, outreachMode });
   } catch (err: any) {
     logger.error("sendLeadNow error", { correlationId, leadId }, err);
@@ -1010,13 +1055,15 @@ export async function sendAllApproved(outreachMode: OutreachMode = "connect_mess
 
     logger.workerSpawn("sender", args, { correlationId, mode: outreachMode });
 
-    const proc = spawn(execToUse, args, {
+    const proc = spawnTrackedWorker({
+      execPath: execToUse,
+      args,
       cwd: repoRoot,
       stdio: ["ignore", "inherit", "inherit"],
-      detached: true,
       env: { ...process.env, CORRELATION_ID: correlationId },
+      kind: "sender_outreach",
+      label: "Messaging sender",
     });
-    proc.unref();
     senderTriggered = true;
     logger.info("Sender worker triggered for all approved", { correlationId, pid: proc.pid, outreachMode });
   } catch (err: any) {
@@ -1063,13 +1110,15 @@ export async function sendFirstMessagesForBatch(batchId: number) {
 
     logger.workerSpawn("sender", args, { correlationId, batchId, eligibleCount, mode: "connect_only" });
 
-    const proc = spawn(execToUse, args, {
+    const proc = spawnTrackedWorker({
+      execPath: execToUse,
+      args,
       cwd: repoRoot,
       stdio: ["ignore", "inherit", "inherit"],
-      detached: true,
       env: { ...process.env, CORRELATION_ID: correlationId },
+      kind: "sender_outreach",
+      label: "Messaging sender",
     });
-    proc.unref();
     senderTriggered = true;
     logger.info("Sender worker triggered for batch first-messages", { correlationId, batchId, eligibleCount, pid: proc.pid });
   } catch (err: any) {
@@ -1157,13 +1206,15 @@ export async function approveDraft(input: DraftInput) {
 
         logger.workerSpawn("sender", args, { correlationId, leadId: input.leadId });
 
-        const proc = spawn(execToUse, args, {
+        const proc = spawnTrackedWorker({
+          execPath: execToUse,
+          args,
           cwd: repoRoot,
           stdio: ["ignore", "inherit", "inherit"],
-          detached: true,
           env: { ...process.env, CORRELATION_ID: correlationId },
+          kind: "sender_outreach",
+          label: "Messaging sender",
         });
-        proc.unref();
 
         logger.info("Sender worker triggered", { correlationId, leadId: input.leadId, pid: proc.pid });
       } catch (err: any) {
@@ -1284,13 +1335,15 @@ export async function approveAndSendAllDrafts(outreachMode: OutreachMode = "conn
 
         logger.workerSpawn("sender", args, { correlationId, approvedCount, outreachMode });
 
-        const proc = spawn(execToUse, args, {
+        const proc = spawnTrackedWorker({
+          execPath: execToUse,
+          args,
           cwd: repoRoot,
           stdio: ["ignore", "inherit", "inherit"],
-          detached: true,
           env: { ...process.env, CORRELATION_ID: correlationId },
+          kind: "sender_outreach",
+          label: "Messaging sender",
         });
-        proc.unref();
         senderTriggered = true;
         logger.info("Sender worker triggered for bulk approval", { correlationId, pid: proc.pid });
       } catch (spawnErr: any) {
@@ -1498,19 +1551,43 @@ export async function saveLinkedinCredentials(
   const email = (formData.get("email") as string)?.trim();
   const password = (formData.get("password") as string)?.trim();
 
-  if (!email || !password) {
-    return { success: false, error: "Email and password are required." };
+  if (!email) {
+    return { success: false, error: "Email is required." };
   }
 
   const client = supabaseAdmin();
-  let encryptedPayload;
-  try {
-    encryptedPayload = encryptLinkedinPassword(password);
-  } catch (cryptoError) {
-    logger.error("LinkedIn credentials encryption failed", {}, cryptoError as Error);
-    return {
-      success: false,
-      error: "Credential encryption key is missing or unreadable. Set LINKEDIN_CREDENTIALS_KEY or make LINKEDIN_CREDENTIALS_KEY_FILE writable.",
+  let encryptedPayload: Record<string, unknown> | null = null;
+
+  if (password) {
+    try {
+      encryptedPayload = encryptLinkedinPassword(password);
+    } catch (cryptoError) {
+      logger.error("LinkedIn credentials encryption failed", {}, cryptoError as Error);
+      return {
+        success: false,
+        error: "Credential encryption key is missing or unreadable. Set LINKEDIN_CREDENTIALS_KEY or make LINKEDIN_CREDENTIALS_KEY_FILE writable.",
+      };
+    }
+  } else {
+    const { data: existing, error: existingError } = await client
+      .from("settings")
+      .select("value")
+      .eq("key", "linkedin_credentials")
+      .maybeSingle();
+
+    if (existingError) {
+      console.error("fetch existing linkedin credentials error", existingError);
+      return { success: false, error: "Could not load the stored password." };
+    }
+
+    const existingValue = (existing as any)?.value || {};
+    if (!existingValue.password && !existingValue.password_encrypted) {
+      return { success: false, error: "Password is required for the first save." };
+    }
+
+    encryptedPayload = {
+      password: existingValue.password,
+      password_encrypted: existingValue.password_encrypted,
     };
   }
 

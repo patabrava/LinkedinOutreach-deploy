@@ -72,6 +72,8 @@ END_LLM_FRIENDLY_PLAN_TEST_DEBUG
 - Scraper launch routes must enforce a single active worker per `enrichment.pid`; if a pid is already alive, return 409 and refuse a second `/api/enrich` or `/api/enrich/connect-only` spawn so duplicate Playwright sessions do not race the same queue.
 - Live scraper spawns must mirror child stdout/stderr and exit codes into container logs in addition to `.logs/scraper-spawn.log`; otherwise Hostinger MCP only shows the successful `POST` while the real Python crash stays hidden off-channel.
 - Connect-only worker failures must persist `FAILED` instead of leaving the lead in `PROCESSING`; otherwise exhausted invite paths can make live status polling look frozen even though the run already advanced to an unrecoverable state.
+- Connect-only workers must treat LinkedIn's weekly invite-limit popup as a hard stop: capture the message, mark the lead `FAILED` with a limit-reached reason, and abort the run so the UI can surface the cap.
 - Production LinkedIn browser workers must force headless Playwright on Linux when `DISPLAY`/`WAYLAND_DISPLAY` is absent; Docker/Hostinger containers have no GUI, so `headless=False` can spawn but never progress the queue.
 - LinkedIn login launches on Hostinger must reuse the worker auth flow and never rely on detached `playwright codegen` popups, because the VPS has no user-visible GUI window to interact with.
 - `connect_only` scraper runs must skip `enrich_one()` entirely and go straight to `send_connection_request()`; never reintroduce scrape-first behavior on the invite-only path.
+- Scraper launches must treat omitted `--limit` as "use the remaining daily quota" and never silently fall back to 10; only explicit positive limits may cap a run.

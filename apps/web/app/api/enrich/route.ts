@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 
 import { requireOperatorAccess } from "../../../lib/apiGuard";
 import { logger } from "../../../lib/logger";
+import { trackWorkerChild } from "../../../lib/workerControl";
 import { assertScraperLockFree, persistScraperPid } from "./scraperLock";
 
 const mirrorWorkerOutput = (
@@ -93,6 +94,12 @@ export async function POST(request: Request) {
     child.unref();
 
     persistScraperPid(child, pidFile);
+    trackWorkerChild({
+      child,
+      kind: "scraper_outreach",
+      label: "Invitation outreach",
+      args,
+    });
 
     logger.info("Scraper process started successfully", { correlationId, pid: child.pid });
     logger.apiResponse("POST", "/api/enrich", 200, { correlationId });

@@ -36,7 +36,7 @@ class StructuredLogger:
         self.log_to_console = os.getenv("LOG_TO_CONSOLE", "true").lower() != "false"
         self.log_to_file = os.getenv("LOG_TO_FILE", "true").lower() != "false"
     
-    def _format_entry(self, level: str, message: str, context: Dict[str, Any], data: Any = None, error: Optional[Exception] = None) -> Dict[str, Any]:
+    def _format_entry(self, level: str, message: str, context: Dict[str, Any], data: Any = None, error: Any = None) -> Dict[str, Any]:
         """Format a log entry as a structured dictionary"""
         entry = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -56,15 +56,17 @@ class StructuredLogger:
         
         # Add error details if provided
         if error:
-            entry["error"] = {
+            error_entry = {
                 "type": type(error).__name__,
                 "message": str(error),
-                "traceback": self._get_traceback(error),
             }
+            if isinstance(error, BaseException):
+                error_entry["traceback"] = self._get_traceback(error)
+            entry["error"] = error_entry
         
         return entry
     
-    def _get_traceback(self, error: Exception) -> Optional[str]:
+    def _get_traceback(self, error: BaseException) -> Optional[str]:
         """Extract traceback from exception"""
         import traceback
         return "".join(traceback.format_exception(type(error), error, error.__traceback__))

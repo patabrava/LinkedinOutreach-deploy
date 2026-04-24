@@ -1,6 +1,7 @@
 import { LeadList } from "../../components/LeadList";
 import { StartEnrichmentButton } from "../../components/StartEnrichmentButton";
 import { TriggerButton } from "../../components/TriggerButton";
+import { WorkerControlPanel } from "../../components/WorkerControlPanel";
 import { requireServerSession } from "../../lib/auth";
 import { fetchLeadList, triggerFollowupSender } from "../actions";
 
@@ -90,6 +91,15 @@ export default async function LeadsPage({
 
           <div className="muted" style={{ marginTop: 12 }}>Tip: use the Batch selector below to focus on one upload at a time.</div>
         </div>
+      </div>
+
+      <div style={{ marginTop: 20 }}>
+        <WorkerControlPanel
+          title="STOP INVITATION OUTREACH"
+          description="Stops the active LinkedIn invitation worker for connect + message or connect-only runs."
+          kinds={["scraper_outreach"]}
+          stopLabel="STOP INVITES"
+        />
       </div>
 
       <LeadList
