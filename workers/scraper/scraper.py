@@ -2165,7 +2165,7 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
                 logger.info(f"✓ Created followup for REPLY from {lead_full_name}", {"leadId": lead_id})
                 print(f"  ✓ REPLY detected from: {lead_full_name}")
 
-            # Update lead with scan timestamp after processing (reply or nudge)
+            # Update lead with scan timestamp after processing
             execute_with_retry(
                 client.table("leads").update({
                     "last_inbox_scan_at": scan_ts,
