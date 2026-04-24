@@ -775,11 +775,14 @@ export async function generateAllFollowupDrafts(): Promise<{
   try {
     const client = supabaseAdmin();
 
-    // Fetch all PENDING_REVIEW followups without a draft
+    // Fetch all PENDING_REVIEW followups without a draft.
+    // Only REPLY followups need LLM-generated drafts; NUDGE rows carry template
+    // text populated by the sender worker and must never be touched here.
     const { data: followups, error: fetchError } = await client
       .from("followups")
       .select("id, draft_text")
-      .eq("status", "PENDING_REVIEW");
+      .eq("status", "PENDING_REVIEW")
+      .eq("followup_type", "REPLY");
 
     if (fetchError) {
       logger.error("Failed to fetch followups for bulk draft generation", { correlationId }, fetchError);
