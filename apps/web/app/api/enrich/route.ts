@@ -67,11 +67,12 @@ export async function POST(request: Request) {
       );
     }
 
-    const { limit } = (await request.json().catch(() => ({}))) as { limit?: number };
+    const { limit, sequenceId } = (await request.json().catch(() => ({}))) as { limit?: number; sequenceId?: number };
     const limitArg = typeof limit === "number" && limit > 0 ? ["--limit", String(limit)] : [];
+    const sequenceArg = typeof sequenceId === "number" && sequenceId > 0 ? ["--sequence-id", String(sequenceId)] : [];
 
-    const args = ["scraper.py", "--run", ...limitArg];
-    logger.workerSpawn("scraper", args, { correlationId, limit });
+    const args = ["scraper.py", "--run", ...sequenceArg, ...limitArg];
+    logger.workerSpawn("scraper", args, { correlationId, limit, sequenceId });
 
     const logPath = path.join(repoRoot, ".logs", "scraper-spawn.log");
     const child = spawn(pythonCmd, args, {

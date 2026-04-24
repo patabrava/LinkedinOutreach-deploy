@@ -435,6 +435,7 @@ def _render_template_message(template: str, lead: Dict[str, Any]) -> str:
 def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, Any]:
     """Resolve sequence messages for a lead, preferring DB templates over defaults."""
     result: Dict[str, Any] = {
+        "connect_note": "",
         "first_message": SEQUENCE_DEFAULT_MESSAGES["first_message"],
         "second_message": SEQUENCE_DEFAULT_MESSAGES["second_message"],
         "third_message": SEQUENCE_DEFAULT_MESSAGES["third_message"],
@@ -446,7 +447,7 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
     rows: list[Dict[str, Any]] = []
     try:
         query = client.table("outreach_sequences").select(
-            "id, first_message, second_message, third_message, followup_interval_days, is_active, created_at"
+            "id, connect_note, first_message, second_message, third_message, followup_interval_days, is_active, created_at"
         )
         if sequence_id is not None:
             query = query.eq("id", sequence_id)
@@ -461,6 +462,7 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
         row = rows[0]
         result.update(
             {
+                "connect_note": row.get("connect_note") or result["connect_note"],
                 "first_message": row.get("first_message") or result["first_message"],
                 "second_message": row.get("second_message") or result["second_message"],
                 "third_message": row.get("third_message") or result["third_message"],
@@ -492,6 +494,9 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
                 if isinstance(template, dict):
                     result.update(
                         {
+                            "connect_note": template.get("connect_note")
+                            or template.get("invite_note")
+                            or result["connect_note"],
                             "first_message": template.get("first_message")
                             or template.get("message_1")
                             or result["first_message"],
@@ -511,6 +516,7 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
             except Exception:
                 continue
 
+    result["connect_note"] = _render_template_message(str(result["connect_note"]), lead)
     result["first_message"] = _render_template_message(str(result["first_message"]), lead)
     result["second_message"] = _render_template_message(str(result["second_message"]), lead)
     result["third_message"] = _render_template_message(str(result["third_message"]), lead)
@@ -1028,6 +1034,8 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
         logger.error("Lead has no draft to send", {"leadId": lead_id})
         raise RuntimeError("Lead has no draft to send.")
 
+    sequence_messages = load_sequence_messages(client, lead)
+    connect_note = str(sequence_messages.get("connect_note") or "").strip()
     message = build_message(draft)
     logger.message_send_start(lead_id, message_preview=message)
 
@@ -1095,7 +1103,15 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
         raise
 
     try:
-        await send_message(page, message, surface, draft)
+        outbound_message = message
+        if surface == "connect_note":
+            outbound_message = connect_note or message
+            if not connect_note:
+                logger.warn(
+                    "Missing connect_note on sequence; falling back to legacy draft message",
+                    {"leadId": lead_id, "sequenceId": lead.get("sequence_id")},
+                )
+        await send_message(page, outbound_message, surface, draft)
     except Exception as e:
         logger.error(f"Failed to send message through surface", {"leadId": lead_id}, error=e)
         raise

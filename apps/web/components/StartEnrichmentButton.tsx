@@ -35,6 +35,7 @@ type ButtonVariant = "dashboard" | "details";
 type StartEnrichmentButtonProps = {
   mode?: EnrichmentMode;
   variant?: ButtonVariant;
+  sequenceId?: number | null;
 };
 
 const MODE_CONFIG: Record<EnrichmentMode, {
@@ -63,7 +64,7 @@ const MODE_CONFIG: Record<EnrichmentMode, {
   },
 };
 
-export function StartEnrichmentButton({ mode = "message", variant = "details" }: StartEnrichmentButtonProps) {
+export function StartEnrichmentButton({ mode = "message", variant = "details", sequenceId }: StartEnrichmentButtonProps) {
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
@@ -186,6 +187,10 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
   }, [status]);
 
   const start = async () => {
+    if (sequenceId == null) {
+      setError("Select a sequence before starting this run.");
+      return;
+    }
     setRunning(true);
     setStopping(false);
     setMessage("");
@@ -194,6 +199,9 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
       const res = await fetch(modeConfig.startEndpoint, {
         method: "POST",
         headers: getOperatorApiHeaders(),
+        body: JSON.stringify({
+          sequenceId,
+        }),
       });
       const data = await res.json();
       if (!res.ok || data?.ok === false) {
@@ -280,7 +288,7 @@ export function StartEnrichmentButton({ mode = "message", variant = "details" }:
       <div style={{ display: "flex", gap: 0 }}>
         <button
           onClick={start}
-          disabled={running}
+          disabled={running || sequenceId == null}
           className={modeConfig.buttonClass}
           style={{ flex: 1 }}
         >

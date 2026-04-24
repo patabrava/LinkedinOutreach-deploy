@@ -32,6 +32,7 @@ end$$;
 create table if not exists outreach_sequences (
   id bigserial primary key,
   name text not null unique,
+  connect_note text not null default '',
   first_message text not null default '',
   second_message text not null default '',
   third_message text not null default '',
