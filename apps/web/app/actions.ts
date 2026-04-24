@@ -401,6 +401,7 @@ export async function fetchLeadList(
 export type OutreachSequenceRow = {
   id: number;
   name: string;
+  connect_note: string;
   first_message: string;
   second_message: string;
   third_message: string;
@@ -426,7 +427,7 @@ export async function fetchOutreachSequences(): Promise<OutreachSequenceRow[]> {
   const client = supabaseAdmin();
   const { data, error } = await client
     .from("outreach_sequences")
-    .select("id, name, first_message, second_message, third_message, followup_interval_days, is_active, created_at, updated_at")
+    .select("id, name, connect_note, first_message, second_message, third_message, followup_interval_days, is_active, created_at, updated_at")
     .order("created_at", { ascending: true });
   if (error) {
     throw error;
@@ -452,6 +453,7 @@ export async function fetchLeadBatches(): Promise<LeadBatchRow[]> {
 export async function saveOutreachSequence(input: {
   id?: number;
   name: string;
+  connect_note: string;
   first_message: string;
   second_message: string;
   third_message: string;
@@ -459,6 +461,7 @@ export async function saveOutreachSequence(input: {
 }) {
   const payload = {
     name: input.name.trim(),
+    connect_note: input.connect_note.trim(),
     first_message: input.first_message.trim(),
     second_message: input.second_message.trim(),
     third_message: input.third_message.trim(),
@@ -466,6 +469,7 @@ export async function saveOutreachSequence(input: {
   };
 
   const placeholderValidation = validateSequencePlaceholdersByField({
+    connect_note: payload.connect_note,
     first_message: payload.first_message,
     second_message: payload.second_message,
     third_message: payload.third_message,
@@ -502,7 +506,7 @@ export async function saveOutreachSequence(input: {
   const { data, error } = await client
     .from("outreach_sequences")
     .upsert(input.id ? { id: input.id, ...payload } : payload)
-    .select("id, name, first_message, second_message, third_message, followup_interval_days, is_active, created_at, updated_at")
+    .select("id, name, connect_note, first_message, second_message, third_message, followup_interval_days, is_active, created_at, updated_at")
     .single();
   if (error) throw error;
   revalidatePath("/");

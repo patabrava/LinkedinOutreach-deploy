@@ -14,13 +14,14 @@ type Props = {
 
 type Draft = {
   name: string;
+  connect_note: string;
   first_message: string;
   second_message: string;
   third_message: string;
   followup_interval_days: number;
 };
 
-type MessageFieldKey = "first_message" | "second_message" | "third_message";
+type MessageFieldKey = "connect_note" | "first_message" | "second_message" | "third_message";
 type ValidationErrorsByField = Record<MessageFieldKey, string[]>;
 
 type PlaceholderValidationResult =
@@ -40,20 +41,22 @@ type PlaceholderResolver = {
 
 type LooseRecord = Record<string, unknown>;
 const isMessageFieldKey = (value: unknown): value is MessageFieldKey =>
-  value === "first_message" || value === "second_message" || value === "third_message";
+  value === "connect_note" || value === "first_message" || value === "second_message" || value === "third_message";
 
 const emptyDraft = (): Draft => ({
   name: "",
+  connect_note: "",
   first_message: "",
   second_message: "",
   third_message: "",
   followup_interval_days: 3,
 });
 
-const MESSAGE_FIELDS: MessageFieldKey[] = ["first_message", "second_message", "third_message"];
+const MESSAGE_FIELDS: MessageFieldKey[] = ["connect_note", "first_message", "second_message", "third_message"];
 const DEFAULT_CANONICAL_TOKENS = ["{{first_name}}", "{{last_name}}", "{{full_name}}", "{{company_name}}"];
 
 const EMPTY_FIELD_ERRORS: ValidationErrorsByField = {
+  connect_note: [],
   first_message: [],
   second_message: [],
   third_message: [],
@@ -215,6 +218,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
     return first
       ? {
           name: first.name,
+          connect_note: first.connect_note,
           first_message: first.first_message,
           second_message: first.second_message,
           third_message: first.third_message,
@@ -229,6 +233,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
   const [topLevelError, setTopLevelError] = useState<string | null>(null);
   const [tokenPickerOpen, setTokenPickerOpen] = useState(false);
   const messageRefs = useRef<Record<MessageFieldKey, HTMLTextAreaElement | null>>({
+    connect_note: null,
     first_message: null,
     second_message: null,
     third_message: null,
@@ -328,6 +333,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
     }
     setDraft({
       name: sequence.name,
+      connect_note: sequence.connect_note,
       first_message: sequence.first_message,
       second_message: sequence.second_message,
       third_message: sequence.third_message,
@@ -354,6 +360,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
         const saved = await saveOutreachSequence({
           id: selectedSequenceId || undefined,
           name: draft.name || `Sequence ${localSequences.length + 1}`,
+          connect_note: draft.connect_note,
           first_message: draft.first_message,
           second_message: draft.second_message,
           third_message: draft.third_message,
@@ -394,7 +401,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
       <div className="pill">Post-Acceptance Sequences</div>
       <h3 className="section-title-tight">SEQUENCES + BATCH ASSIGNMENT</h3>
       <div className="muted" style={{ marginBottom: 16 }}>
-        Sequences are used only after a connection is accepted. Invite notes are separate. Each imported CSV creates a batch; assign each batch to one sequence.
+        Sequences are used only after a connection is accepted. Invite notes live here too, and the assigned sequence controls the invite message for Connect + Message batches.
       </div>
 
       <div className="seq-grid">
@@ -495,6 +502,27 @@ export function SequenceEditor({ sequences, batches }: Props) {
             onChange={(event) => setDraft((prev) => ({ ...prev, name: event.target.value }))}
             placeholder="Sequence name"
           />
+
+          <label>Invite Note</label>
+          <textarea
+            className="textarea"
+            value={draft.connect_note}
+            onChange={(event) => updateDraftMessageField("connect_note", event.target.value)}
+            onFocus={() => setFocusedMessageField("connect_note")}
+            ref={(node) => {
+              messageRefs.current.connect_note = node;
+            }}
+            placeholder="Text sent with the connection request"
+            aria-invalid={fieldErrors.connect_note.length > 0}
+          />
+          <div className="muted" style={{ marginTop: 6 }}>
+            Used only for Connect + Message batches. The sender will cap this at 300 characters after rendering placeholders.
+          </div>
+          {fieldErrors.connect_note.length ? (
+            <div role="alert" style={{ color: "#dc2626", marginTop: 6 }}>
+              Unknown placeholders: {fieldErrors.connect_note.join(", ")}
+            </div>
+          ) : null}
 
           <label>Message 1</label>
           <textarea
@@ -619,6 +647,16 @@ export function SequenceEditor({ sequences, batches }: Props) {
                           </option>
                         ))}
                       </select>
+                            {assignedSequence ? (
+                              <div style={{ marginTop: 8 }}>
+                                <div className="pill">Connect note preview</div>
+                                <div className="muted" style={{ marginTop: 6 }}>
+                                  {assignedSequence.connect_note?.trim()
+                                    ? assignedSequence.connect_note.trim()
+                                    : "No invite note configured yet."}
+                                </div>
+                              </div>
+                            ) : null}
                             <div className="muted" style={{ marginTop: 6 }}>
                               {hasFirstMessage
                                 ? "Launch readiness: READY (Message 1 detected)."

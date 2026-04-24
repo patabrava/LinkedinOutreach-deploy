@@ -5,7 +5,7 @@ export const CANONICAL_SEQUENCE_PLACEHOLDERS = [
   "{{company_name}}",
 ] as const;
 
-export type SequenceMessageField = "first_message" | "second_message" | "third_message";
+export type SequenceMessageField = "connect_note" | "first_message" | "second_message" | "third_message";
 
 export type SequenceFieldValidationError = {
   field: SequenceMessageField;

@@ -1,9 +1,9 @@
 import { LeadList } from "../../components/LeadList";
-import { StartEnrichmentButton } from "../../components/StartEnrichmentButton";
+import { LeadRunControls } from "../../components/LeadRunControls";
 import { TriggerButton } from "../../components/TriggerButton";
 import { WorkerControlPanel } from "../../components/WorkerControlPanel";
 import { requireServerSession } from "../../lib/auth";
-import { fetchLeadList, triggerFollowupSender } from "../actions";
+import { fetchLeadList, fetchOutreachSequences, triggerFollowupSender } from "../actions";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -14,6 +14,7 @@ export default async function LeadsPage({
   searchParams?: { page?: string; status?: string; company?: string; name?: string; linkedin?: string };
 }) {
   await requireServerSession("/leads");
+  const sequences = await fetchOutreachSequences();
   const currentPage = Math.max(1, Number(searchParams?.page) || 1);
   const filters = {
     status: (searchParams?.status || "").trim(),
@@ -42,54 +43,21 @@ export default async function LeadsPage({
             </a>
           </div>
         </div>
-        <div className="card" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16, borderLeft: "none", borderTop: "none", borderBottom: "none" }}>
-          <div>
-            <div className="pill">Next Actions</div>
-            <h3 className="page-title">RUN WHAT&apos;S NEXT</h3>
-            <div className="muted">These actions run across all eligible leads (across batches) for the selected intent.</div>
+        <LeadRunControls sequences={sequences} />
+
+        <div className="card" style={{ padding: 20, borderLeft: "none", borderTop: "none", borderBottom: "none" }}>
+          <div className="pill">Follow-Ups</div>
+          <h3 className="page-title">SEND DUE FOLLOW-UPS</h3>
+          <div className="muted">Approved follow-ups still run independently of the sequence selector.</div>
+          <div style={{ marginTop: 12 }}>
+            <TriggerButton
+              action={triggerFollowupSender}
+              label="SEND DUE FOLLOW-UPS"
+              pendingLabel="SENDING…"
+              successMessage="Follow-up sender started."
+              variant="secondary"
+            />
           </div>
-
-          <div className="action-stack">
-            <div className="action-stack__row action-stack__row--primary">
-              <div className="action-stack__header">
-                <strong>CONNECT + MESSAGE</strong>
-                <div className="muted">Step 1: Send the connection request for this batch, then message after acceptance.</div>
-              </div>
-              <StartEnrichmentButton mode="message" variant="dashboard" />
-            </div>
-
-            <div className="action-stack__row">
-              <div className="action-stack__header">
-                <strong>CONNECT ONLY</strong>
-                <div className="muted">Send connection requests without a note for connect-only batches.</div>
-              </div>
-              <StartEnrichmentButton mode="connect_only" variant="dashboard" />
-            </div>
-
-            <div className="action-stack__row">
-              <div className="action-stack__header">
-                <strong>MESSAGING + SEQUENCES</strong>
-                <div className="muted">Review drafts, approvals, and post-acceptance sequences.</div>
-              </div>
-              <a className="btn secondary" href="/">OPEN MESSAGING</a>
-            </div>
-
-            <div className="action-stack__row">
-              <div className="action-stack__header">
-                <strong>FOLLOW-UPS</strong>
-                <div className="muted">Send all approved follow-up messages to due leads.</div>
-              </div>
-              <TriggerButton
-                action={triggerFollowupSender}
-                label="SEND DUE FOLLOW-UPS"
-                pendingLabel="SENDING…"
-                successMessage="Follow-up sender started."
-                variant="secondary"
-              />
-            </div>
-          </div>
-
-          <div className="muted" style={{ marginTop: 12 }}>Tip: use the Batch selector below to focus on one upload at a time.</div>
         </div>
       </div>
 

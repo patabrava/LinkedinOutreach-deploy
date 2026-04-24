@@ -203,10 +203,17 @@ def update_profile_meta(client: Client, lead_id: str, profile_data: Optional[Dic
     )
 
 
-def fetch_new_leads(client: Client, limit: int = 10, outreach_mode: Optional[str] = None) -> List[Lead]:
+def fetch_new_leads(
+    client: Client,
+    limit: int = 10,
+    outreach_mode: Optional[str] = None,
+    sequence_id: Optional[int] = None,
+) -> List[Lead]:
     query_meta: Dict[str, Any] = {"status": "NEW", "limit": limit}
     if outreach_mode:
         query_meta["outreach_mode"] = outreach_mode
+    if sequence_id is not None:
+        query_meta["sequence_id"] = sequence_id
 
     logger.db_query("select", "leads", query_meta)
 
@@ -222,8 +229,10 @@ def fetch_new_leads(client: Client, limit: int = 10, outreach_mode: Optional[str
             .eq("status", "ENRICHED")
             .is_("connection_sent_at", "null")
             .limit(limit)
-            .execute()
         )
+        if sequence_id is not None:
+            enriched_resp = enriched_resp.eq("sequence_id", sequence_id)
+        enriched_resp = enriched_resp.execute()
 
         enriched_rows = enriched_resp.data or []
         remaining = max(0, limit - len(enriched_rows))
@@ -237,8 +246,10 @@ def fetch_new_leads(client: Client, limit: int = 10, outreach_mode: Optional[str
                 .eq("status", "NEW")
                 .is_("connection_sent_at", "null")
                 .limit(remaining)
-                .execute()
             )
+            if sequence_id is not None:
+                new_resp = new_resp.eq("sequence_id", sequence_id)
+            new_resp = new_resp.execute()
             new_rows = new_resp.data or []
 
         leads = [Lead(**row) for row in [*enriched_rows, *new_rows]]
@@ -252,6 +263,8 @@ def fetch_new_leads(client: Client, limit: int = 10, outreach_mode: Optional[str
 
         if outreach_mode:
             query = query.eq("outreach_mode", outreach_mode)
+        if sequence_id is not None:
+            query = query.eq("sequence_id", sequence_id)
 
         resp = query.execute()
         leads = [Lead(**row) for row in resp.data or []]
@@ -1269,8 +1282,8 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
         await random_pause()
 
 
-async def main(limit: int = 0, mode: str = "enrich") -> None:
-    logger.operation_start("enrichment", input_data={"limit": limit, "mode": mode})
+async def main(limit: int = 0, mode: str = "enrich", sequence_id: Optional[int] = None) -> None:
+    logger.operation_start("enrichment", input_data={"limit": limit, "mode": mode, "sequence_id": sequence_id})
     
     try:
         client = get_supabase_client()
@@ -1290,7 +1303,12 @@ async def main(limit: int = 0, mode: str = "enrich") -> None:
 
         outreach_filter = "connect_only" if mode == "connect_only" else None
         os.environ["SCRAPER_MODE"] = mode
-        leads = fetch_new_leads(client, limit=effective_limit, outreach_mode=outreach_filter)
+        leads = fetch_new_leads(
+            client,
+            limit=effective_limit,
+            outreach_mode=outreach_filter,
+            sequence_id=sequence_id,
+        )
         if not leads:
             logger.info("No NEW leads to process")
             return
@@ -1309,7 +1327,7 @@ async def main(limit: int = 0, mode: str = "enrich") -> None:
             await shutdown(playwright, browser)
             logger.info("Browser closed")
     except Exception as exc:
-        logger.operation_error("enrichment", error=exc, input_data={"limit": limit, "mode": mode})
+        logger.operation_error("enrichment", error=exc, input_data={"limit": limit, "mode": mode, "sequence_id": sequence_id})
         raise
 
 
@@ -1420,6 +1438,12 @@ def parse_args() -> argparse.Namespace:
         choices=["enrich", "connect_only"],
         default="enrich",
         help="Execution mode: enrich (default) or connect_only for enrichment + invite without note.",
+    )
+    parser.add_argument(
+        "--sequence-id",
+        type=int,
+        default=None,
+        help="Only process leads assigned to this sequence id.",
     )
     parser.add_argument(
         "--login-only",
@@ -2319,4 +2343,5 @@ if __name__ == "__main__":
     else:
         limit = args.limit if isinstance(args.limit, int) and args.limit >= 0 else 0
         mode = getattr(args, "mode", "enrich")
-        asyncio.run(main(limit=limit, mode=mode))
+        sequence_id = args.sequence_id if isinstance(args.sequence_id, int) and args.sequence_id > 0 else None
+        asyncio.run(main(limit=limit, mode=mode, sequence_id=sequence_id))
