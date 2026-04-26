@@ -220,6 +220,27 @@ MESSAGE_ONLY_PIPELINE_STATUSES = [
     "MESSAGE_ONLY_READY",
     "MESSAGE_ONLY_APPROVED",
 ]
+MESSAGE_ONLY_PROCESSING_STATUSES = tuple(MESSAGE_ONLY_PIPELINE_STATUSES)
+SURFACE_MESSAGE = "message"
+SURFACE_CONNECT_NOTE = "connect_note"
+SURFACE_CONNECT = "connect"
+SURFACE_SALES_NAVIGATOR = "sales_navigator_message"
+
+
+def normalize_linkedin_profile_url(url: str) -> str:
+    normalized = (url or "").strip().replace("http://", "https://").split("?")[0].rstrip("/")
+    if normalized.startswith("linkedin.com/"):
+        normalized = f"https://www.{normalized}"
+    if normalized.startswith("www.linkedin.com/"):
+        normalized = f"https://{normalized}"
+    return normalized
+
+
+def build_sales_navigator_subject(lead: Dict[str, Any]) -> str:
+    first_name = (lead.get("first_name") or "").strip()
+    if first_name:
+        return f"Kurzer Austausch, {first_name}"
+    return "Kurzer Austausch"
 
 
 def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int] = None) -> list[Dict[str, Any]]:
@@ -921,6 +942,40 @@ def mark_processing(client: Client, lead_id: str) -> None:
     logger.debug(f"Lead marked as PROCESSING", {"leadId": lead_id})
 
 
+def mark_message_only_processing(client: Client, lead: Dict[str, Any]) -> bool:
+    lead_id = str(lead.get("id") or "")
+    if not lead_id:
+        return False
+
+    logger.db_query(
+        "update",
+        "leads",
+        {"leadId": lead_id},
+        {"status": "PROCESSING", "from": list(MESSAGE_ONLY_PROCESSING_STATUSES)},
+    )
+    try:
+        resp = (
+            client.table("leads")
+            .update({"status": "PROCESSING", "updated_at": datetime.utcnow().isoformat()})
+            .eq("id", lead_id)
+            .in_("status", list(MESSAGE_ONLY_PROCESSING_STATUSES))
+            .execute()
+        )
+    except Exception as exc:
+        logger.warn("Failed to lock message-only lead", {"leadId": lead_id}, error=exc)
+        return False
+
+    rows = getattr(resp, "data", None) or []
+    locked = len(rows) > 0
+    logger.db_result("update", "leads", {"leadId": lead_id}, len(rows))
+    if locked:
+        lead["status"] = "PROCESSING"
+        logger.debug("Lead marked as PROCESSING for message-only send", {"leadId": lead_id})
+    else:
+        logger.info("Message-only lead was already claimed or no longer eligible", {"leadId": lead_id})
+    return locked
+
+
 def mark_sent(client: Client, lead_id: str) -> None:
     now_iso = datetime.utcnow().isoformat()
     logger.db_query("update", "leads", {"leadId": lead_id}, {"status": "SENT", "sequence_step": 1})
@@ -1041,7 +1096,7 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
 
     page = await context.new_page()
     # Normalize to https to reduce redirects
-    url = str(lead["linkedin_url"]).replace("http://", "https://")
+    url = normalize_linkedin_profile_url(str(lead["linkedin_url"]))
     logger.debug(f"Navigating to profile", {"leadId": lead_id}, {"url": url})
 
     async def wait_if_checkpoint() -> None:
@@ -1624,7 +1679,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
         return "retry"
     
     page = await context.new_page()
-    url = str(lead["linkedin_url"]).replace("http://", "https://")
+    url = normalize_linkedin_profile_url(str(lead["linkedin_url"]))
     logger.debug(f"Navigating to profile for message-only", {"leadId": lead_id}, {"url": url})
     
     try:
@@ -2076,6 +2131,8 @@ async def main() -> None:
 
                 for lead in leads_to_process:
                     try:
+                        if not mark_message_only_processing(client, lead):
+                            continue
                         result = await process_message_only_one(context, client, lead)
                         if result == "sent":
                             sent_count += 1
