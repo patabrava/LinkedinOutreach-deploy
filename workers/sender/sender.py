@@ -220,6 +220,27 @@ MESSAGE_ONLY_PIPELINE_STATUSES = [
     "MESSAGE_ONLY_READY",
     "MESSAGE_ONLY_APPROVED",
 ]
+MESSAGE_ONLY_PROCESSING_STATUSES = tuple(MESSAGE_ONLY_PIPELINE_STATUSES)
+SURFACE_MESSAGE = "message"
+SURFACE_CONNECT_NOTE = "connect_note"
+SURFACE_CONNECT = "connect"
+SURFACE_SALES_NAVIGATOR = "sales_navigator_message"
+
+
+def normalize_linkedin_profile_url(url: str) -> str:
+    normalized = (url or "").strip().replace("http://", "https://").split("?")[0].rstrip("/")
+    if normalized.startswith("linkedin.com/"):
+        normalized = f"https://www.{normalized}"
+    if normalized.startswith("www.linkedin.com/"):
+        normalized = f"https://{normalized}"
+    return normalized
+
+
+def build_sales_navigator_subject(lead: Dict[str, Any]) -> str:
+    first_name = (lead.get("first_name") or "").strip()
+    if first_name:
+        return f"Kurzer Austausch, {first_name}"
+    return "Kurzer Austausch"
 
 
 def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int] = None) -> list[Dict[str, Any]]:
@@ -524,6 +545,32 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
         result["followup_interval_days"] = SEQUENCE_INTERVAL_DEFAULT_DAYS
     return result
 
+
+async def click_and_resolve_active_page(page: Page, locator, timeout_ms: int = 8_000) -> Page:
+    context = page.context
+    before_pages = set(context.pages)
+    popup_task = asyncio.create_task(page.wait_for_event("popup", timeout=timeout_ms))
+    try:
+        await locator.click(timeout=timeout_ms)
+        try:
+            popup = await popup_task
+            await popup.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+            logger.info("Popup page opened for message surface", data={"url": popup.url})
+            return popup
+        except Exception:
+            await page.wait_for_timeout(500)
+            after_pages = [candidate for candidate in context.pages if candidate not in before_pages]
+            if after_pages:
+                candidate = after_pages[-1]
+                await candidate.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+                logger.info("New page opened for message surface", data={"url": candidate.url})
+                return candidate
+            return page
+    finally:
+        if not popup_task.done():
+            popup_task.cancel()
+
+
 async def open_message_surface(page: Page) -> str:
     """Open a messaging surface on a LinkedIn profile page.
     
@@ -705,6 +752,139 @@ async def open_message_surface(page: Page) -> str:
 
     logger.error("All messaging surface paths exhausted")
     raise RuntimeError("No messaging surface found. Check if profile is 3rd-degree or has restrictions.")
+
+
+async def open_sales_navigator_message_surface(page: Page) -> Optional[Page]:
+    sales_nav_selectors = [
+        ("sales nav message button", lambda: page.get_by_role("button", name=re.compile(r"(Nachricht|Message|InMail)", re.I))),
+        ("sales nav message link", lambda: page.get_by_role("link", name=re.compile(r"(Nachricht|Message|InMail)", re.I))),
+        ("sales nav compose button", lambda: page.locator("button:has-text('Nachricht'), button:has-text('Message'), button:has-text('InMail')")),
+        ("sales nav compose link", lambda: page.locator("a:has-text('Nachricht'), a:has-text('Message'), a:has-text('InMail')")),
+    ]
+
+    for selector_name, builder in sales_nav_selectors:
+        try:
+            candidate = builder()
+            count = await candidate.count()
+            logger.element_search(selector_name, count, context={"surface": SURFACE_SALES_NAVIGATOR})
+            if count <= 0:
+                continue
+            target_page = await click_and_resolve_active_page(page, candidate.first)
+            await target_page.wait_for_timeout(1_000)
+            subject_count = await target_page.locator(
+                "input[name='subject'], input[placeholder*='Subject'], input[aria-label*='Subject'], "
+                "input[placeholder*='Betreff'], input[aria-label*='Betreff']"
+            ).count()
+            body_count = await target_page.locator(
+                "textarea[name='message'], textarea[placeholder*='Message'], textarea[aria-label*='Message'], "
+                "div[role='textbox'][contenteditable='true']"
+            ).count()
+            if subject_count > 0 and body_count > 0:
+                logger.path_attempt("Sales Navigator message surface", 1, success=True)
+                return target_page
+            logger.path_attempt("Sales Navigator message surface missing fields", 1, success=False)
+        except Exception as exc:
+            logger.path_attempt("Sales Navigator message surface", 1, success=False)
+            logger.warn("Sales Navigator surface attempt failed", error=exc)
+    return None
+
+
+async def fill_text_field(page: Page, selector_name: str, locator, value: str) -> None:
+    await locator.wait_for(state="visible", timeout=10_000)
+    await locator.click()
+    try:
+        await page.keyboard.press("Meta+A")
+        await page.keyboard.press("Backspace")
+    except Exception:
+        await page.keyboard.press("Control+A")
+        await page.keyboard.press("Backspace")
+    await human_type(page, value)
+    await page.wait_for_timeout(500)
+    actual_text = await locator.evaluate("el => el.value || el.textContent || el.innerText || ''") or ""
+    if len(actual_text.strip()) < max(1, len(value.strip()) - 2):
+        raise RuntimeError(f"{selector_name} verification failed after typing.")
+    logger.element_type(selector_name, len(value), text_preview=value[:40])
+
+
+async def send_sales_navigator_message(page: Page, subject: str, body: str) -> None:
+    safe_subject = _hard_cap_text((subject or "").strip(), 80)
+    safe_body = (body or "").strip()
+    if not safe_subject:
+        raise RuntimeError("Sales Navigator subject is empty.")
+    if not safe_body:
+        raise RuntimeError("Sales Navigator body is empty.")
+
+    subject_candidates = [
+        ("subject input:name", "input[name='subject']"),
+        ("subject input:placeholder", "input[placeholder*='Subject'], input[placeholder*='Betreff']"),
+        ("subject input:aria", "input[aria-label*='Subject'], input[aria-label*='Betreff']"),
+    ]
+    body_candidates = [
+        ("body textarea:name", "textarea[name='message']"),
+        ("body textarea:placeholder", "textarea[placeholder*='Message'], textarea[placeholder*='Nachricht']"),
+        ("body textarea:aria", "textarea[aria-label*='Message'], textarea[aria-label*='Nachricht']"),
+        ("body contenteditable", "div[role='textbox'][contenteditable='true']"),
+    ]
+
+    subject_locator = None
+    subject_selector = ""
+    for name, selector in subject_candidates:
+        candidate = page.locator(selector).first
+        if await candidate.count() > 0:
+            subject_locator = candidate
+            subject_selector = name
+            break
+    if subject_locator is None:
+        raise RuntimeError("Could not find Sales Navigator subject field.")
+
+    body_locator = None
+    body_selector = ""
+    for name, selector in body_candidates:
+        candidate = page.locator(selector).first
+        if await candidate.count() > 0:
+            body_locator = candidate
+            body_selector = name
+            break
+    if body_locator is None:
+        raise RuntimeError("Could not find Sales Navigator body field.")
+
+    await fill_text_field(page, subject_selector, subject_locator, safe_subject)
+    await fill_text_field(page, body_selector, body_locator, safe_body)
+
+    send_btn = page.locator(
+        "button:has-text('Send'):visible, "
+        "button:has-text('Senden'):visible, "
+        "button[aria-label*='Send']:visible, "
+        "button[aria-label*='Senden']:visible"
+    ).first
+    await send_btn.wait_for(state="visible", timeout=10_000)
+    if not await send_btn.is_enabled():
+        raise RuntimeError("Sales Navigator send button is disabled.")
+    await page.wait_for_timeout(800)
+    await send_btn.click()
+    logger.element_click("Sales Navigator send button", success=True)
+    await random_pause()
+
+
+async def has_sales_navigator_composer(page: Page) -> bool:
+    subject_count = await page.locator(
+        "input[name='subject'], input[placeholder*='Subject'], input[aria-label*='Subject'], "
+        "input[placeholder*='Betreff'], input[aria-label*='Betreff']"
+    ).count()
+    body_count = await page.locator(
+        "textarea[name='message'], textarea[placeholder*='Message'], textarea[aria-label*='Message'], "
+        "div[role='textbox'][contenteditable='true']"
+    ).count()
+    return subject_count > 0 and body_count > 0
+
+
+async def wait_for_sales_navigator_composer(page: Page, timeout_ms: int = 10_000) -> bool:
+    deadline = asyncio.get_event_loop().time() + (timeout_ms / 1000)
+    while asyncio.get_event_loop().time() < deadline:
+        if await has_sales_navigator_composer(page):
+            return True
+        await page.wait_for_timeout(250)
+    return False
 
 
 async def send_message(page: Page, message: str, surface: str, draft: Optional[Dict[str, Any]] = None) -> None:
@@ -921,6 +1101,40 @@ def mark_processing(client: Client, lead_id: str) -> None:
     logger.debug(f"Lead marked as PROCESSING", {"leadId": lead_id})
 
 
+def mark_message_only_processing(client: Client, lead: Dict[str, Any]) -> bool:
+    lead_id = str(lead.get("id") or "")
+    if not lead_id:
+        return False
+
+    logger.db_query(
+        "update",
+        "leads",
+        {"leadId": lead_id},
+        {"status": "PROCESSING", "from": list(MESSAGE_ONLY_PROCESSING_STATUSES)},
+    )
+    try:
+        resp = (
+            client.table("leads")
+            .update({"status": "PROCESSING", "updated_at": datetime.utcnow().isoformat()})
+            .eq("id", lead_id)
+            .in_("status", list(MESSAGE_ONLY_PROCESSING_STATUSES))
+            .execute()
+        )
+    except Exception as exc:
+        logger.warn("Failed to lock message-only lead", {"leadId": lead_id}, error=exc)
+        return False
+
+    rows = getattr(resp, "data", None) or []
+    locked = len(rows) > 0
+    logger.db_result("update", "leads", {"leadId": lead_id}, len(rows))
+    if locked:
+        lead["status"] = "PROCESSING"
+        logger.debug("Lead marked as PROCESSING for message-only send", {"leadId": lead_id})
+    else:
+        logger.info("Message-only lead was already claimed or no longer eligible", {"leadId": lead_id})
+    return locked
+
+
 def mark_sent(client: Client, lead_id: str) -> None:
     now_iso = datetime.utcnow().isoformat()
     logger.db_query("update", "leads", {"leadId": lead_id}, {"status": "SENT", "sequence_step": 1})
@@ -1041,7 +1255,7 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
 
     page = await context.new_page()
     # Normalize to https to reduce redirects
-    url = str(lead["linkedin_url"]).replace("http://", "https://")
+    url = normalize_linkedin_profile_url(str(lead["linkedin_url"]))
     logger.debug(f"Navigating to profile", {"leadId": lead_id}, {"url": url})
 
     async def wait_if_checkpoint() -> None:
@@ -1624,7 +1838,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
         return "retry"
     
     page = await context.new_page()
-    url = str(lead["linkedin_url"]).replace("http://", "https://")
+    url = normalize_linkedin_profile_url(str(lead["linkedin_url"]))
     logger.debug(f"Navigating to profile for message-only", {"leadId": lead_id}, {"url": url})
     
     try:
@@ -1668,15 +1882,21 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
         if message_link_count > 0:
             logger.debug("Found Message link - user is connected", {"leadId": lead_id})
             try:
-                await message_link.first.click(timeout=8_000)
-                await page.wait_for_selector(
-                    "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
-                    timeout=10_000,
-                )
+                message_page = await click_and_resolve_active_page(page, message_link.first)
                 await random_pause()
-                
-                # Send the message
-                await send_message(page, message, "message")
+                if await wait_for_sales_navigator_composer(message_page):
+                    logger.info("Nachricht opened Sales Navigator composer", {"leadId": lead_id})
+                    await send_sales_navigator_message(
+                        message_page,
+                        build_sales_navigator_subject(lead),
+                        message,
+                    )
+                else:
+                    await message_page.wait_for_selector(
+                        "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
+                        timeout=10_000,
+                    )
+                    await send_message(message_page, message, SURFACE_MESSAGE)
                 
                 # Mark as SENT, capture acceptance, and initialize sequence progress metadata.
                 accepted_at = datetime.utcnow().isoformat()
@@ -1750,10 +1970,77 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                     return "failed"
                 return "retry"
         else:
-            # No message button found - might still be pending or profile restricted
-            logger.info("No Message button found, connection may still be pending", {"leadId": lead_id})
-            await page.close()
-            return "pending"
+            logger.info("No normal Message button found; trying Sales Navigator fallback", {"leadId": lead_id})
+            sales_page = await open_sales_navigator_message_surface(page)
+            if sales_page is None:
+                logger.info("No Sales Navigator message surface found, connection may still be pending", {"leadId": lead_id})
+                await page.close()
+                return "pending"
+
+            try:
+                await send_sales_navigator_message(sales_page, build_sales_navigator_subject(lead), message)
+                accepted_at = datetime.utcnow().isoformat()
+                sequence_started_at = lead.get("sequence_started_at") or accepted_at
+                lead_update = {
+                    "status": "SENT",
+                    "sent_at": accepted_at,
+                    "connection_accepted_at": lead.get("connection_accepted_at") or accepted_at,
+                    "sequence_step": 1,
+                    "sequence_started_at": sequence_started_at,
+                    "sequence_last_sent_at": accepted_at,
+                    "error_message": None,
+                }
+                try:
+                    client.table("leads").update(lead_update).eq("id", lead_id).execute()
+                except Exception:
+                    fallback_update = {
+                        "status": "SENT",
+                        "sent_at": accepted_at,
+                        "connection_accepted_at": lead.get("connection_accepted_at") or accepted_at,
+                        "error_message": None,
+                    }
+                    client.table("leads").update(fallback_update).eq("id", lead_id).execute()
+
+                accepted_base = _parse_iso_datetime(accepted_at) or _utc_now()
+                try:
+                    schedule_nudge_followup(client, lead, 1, sequence_messages, accepted_base, message)
+                    interval_days = _safe_int(sequence_messages.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS)
+                    if interval_days < 1:
+                        interval_days = SEQUENCE_INTERVAL_DEFAULT_DAYS
+                    second_message = (sequence_messages.get("second_message") or "").strip()
+                    schedule_nudge_followup(
+                        client,
+                        lead,
+                        2,
+                        sequence_messages,
+                        accepted_base + timedelta(days=interval_days),
+                        second_message or message,
+                    )
+                except Exception as schedule_error:
+                    logger.warn(
+                        "Failed to schedule followups after Sales Navigator first message; keeping lead as SENT",
+                        {"leadId": lead_id},
+                        error=schedule_error,
+                    )
+                logger.message_send_complete(lead_id)
+                logger.info("Sales Navigator message sent to lead", {"leadId": lead_id})
+                await sales_page.close()
+                if page != sales_page:
+                    await page.close()
+                return "sent"
+            except Exception as exc:
+                logger.error("Failed to send Sales Navigator message", {"leadId": lead_id}, error=exc)
+                try:
+                    screenshot_path = f"/tmp/sales_nav_error_{lead_id[:8]}.png"
+                    await sales_page.screenshot(path=screenshot_path, full_page=True)
+                    logger.info(f"Sales Navigator screenshot saved to {screenshot_path}")
+                except Exception:
+                    pass
+                attempts = mark_lead_retry_later(client, lead, str(exc))
+                if attempts >= LEAD_MESSAGE_ONLY_MAX_RETRIES:
+                    mark_failed(client, lead_id, f"Retry limit reached: {str(exc)}")
+                    return "failed"
+                return "retry"
             
     except Exception as e:
         logger.error("Error processing message-only lead", {"leadId": lead_id}, error=e)
@@ -2076,6 +2363,8 @@ async def main() -> None:
 
                 for lead in leads_to_process:
                     try:
+                        if not mark_message_only_processing(client, lead):
+                            continue
                         result = await process_message_only_one(context, client, lead)
                         if result == "sent":
                             sent_count += 1
