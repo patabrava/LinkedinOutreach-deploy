@@ -31,9 +31,10 @@ def get_leads_for_generation(
 
     query = (
         client.table("leads")
-        .select("*")
+        .select("*, lead_batches!inner(batch_intent)")
         .eq("status", status_filter)
         .eq("outreach_mode", outreach_filter)
+        .eq("lead_batches.batch_intent", "custom_outreach")
         .limit(limit)
     )
 
