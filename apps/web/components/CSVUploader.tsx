@@ -4,12 +4,12 @@ import { useRef, useState, DragEvent } from "react";
 import Papa, { type ParseStepResult } from "papaparse";
 
 import { importLeads } from "../app/actions";
-import type { OutreachMode } from "../lib/outreachModes";
+import type { BatchIntent } from "../lib/outreachModes";
 
 type Props = {
   afterImport?: () => void;
-  defaultMode?: OutreachMode;
-  onModeChange?: (mode: OutreachMode) => void;
+  defaultMode?: BatchIntent;
+  onModeChange?: (mode: BatchIntent) => void;
 };
 
 const HEADER_ALIASES = [
@@ -81,14 +81,14 @@ export function CSVUploader({
   const inputRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<string>("SELECT BATCH INTENT TO START");
   const [loading, setLoading] = useState(false);
-  const [mode, setMode] = useState<OutreachMode | null>(defaultMode ?? null);
+  const [mode, setMode] = useState<BatchIntent | null>(defaultMode ?? null);
   const [progress, setProgress] = useState<{ current: number; total: number; phase: "idle" | "parsing" | "uploading" | "done" | "error" }>({
     current: 0,
     total: 0,
     phase: "idle",
   });
 
-  const setModeAndNotify = (next: OutreachMode) => {
+  const setModeAndNotify = (next: BatchIntent) => {
     setMode(next);
     onModeChange?.(next);
   };
@@ -202,9 +202,21 @@ export function CSVUploader({
             >
               Connect Only
             </button>
+            <button
+              type="button"
+              className={`btn ${mode === "custom_outreach" ? "accent" : "secondary"}`}
+              aria-pressed={mode === "custom_outreach"}
+              onClick={() => setModeAndNotify("custom_outreach")}
+            >
+              Custom Outreach
+            </button>
           </div>
         </div>
-        <div>{mode ? `Selected: ${mode === "connect_only" ? "Connect Only" : "Connect + Message"}` : "Selected: -"}</div>
+        <div>
+          {mode
+            ? `Selected: ${mode === "connect_only" ? "Connect Only" : mode === "custom_outreach" ? "Custom Outreach" : "Connect + Message"}`
+            : "Selected: -"}
+        </div>
         <div aria-live="polite">{status}</div>
       </div>
       <button

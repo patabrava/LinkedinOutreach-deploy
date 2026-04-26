@@ -46,6 +46,7 @@ create table if not exists lead_batches (
   id bigserial primary key,
   name text not null,
   source text not null default 'csv_upload',
+  batch_intent text not null default 'connect_message',
   sequence_id bigint not null references outreach_sequences(id) on delete restrict,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -109,6 +110,7 @@ create index if not exists idx_drafts_lead_id on drafts (lead_id);
 create index if not exists idx_leads_batch_id on leads (batch_id);
 create index if not exists idx_leads_sequence_id on leads (sequence_id);
 create index if not exists idx_lead_batches_sequence_id on lead_batches (sequence_id);
+create index if not exists idx_lead_batches_batch_intent on lead_batches (batch_intent);
 
 -- Row Level Security
 alter table outreach_sequences enable row level security;

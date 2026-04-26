@@ -256,6 +256,11 @@ def main() -> None:
         choices=["connect_message", "connect_only", "message"],
         help="Which outreach pipeline to process: connect_message (connection + DM) or connect_only (message-only mode)",
     )
+    parser.add_argument(
+        "--batch-id",
+        type=int,
+        help="Process only leads from this batch id.",
+    )
     args = parser.parse_args()
     prompt_type = args.prompt_type
     mode = "connect_only" if args.mode == "connect_only" else "message"
@@ -279,9 +284,9 @@ def main() -> None:
         client = supabase_client()
         openai = OpenAI(api_key=api_key)
 
-        leads = get_leads_for_generation(client, mode=mode)
+        leads = get_leads_for_generation(client, mode=mode, batch_id=args.batch_id)
         if not leads:
-            logger.info("No leads found for requested mode", data={"mode": args.mode})
+            logger.info("No leads found for requested mode", data={"mode": args.mode, "batchId": args.batch_id})
             return
         
         logger.info(

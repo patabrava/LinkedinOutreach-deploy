@@ -254,7 +254,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
   const batchRows = useMemo(
     () =>
       batches
-        .filter((batch) => batch.source === "csv_upload")
+        .filter((batch) => batch.source === "csv_upload" && batch.batch_intent !== "custom_outreach")
         .map((batch) => ({ ...batch })),
     [batches]
   );
@@ -612,7 +612,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
       <div className="seq-panel" style={{ marginTop: 16 }}>
         <strong>CSV Batches</strong>
         <div className="muted" style={{ marginTop: 4, marginBottom: 8 }}>
-          Assign each imported CSV batch to a sequence.
+          Assign each automated CSV batch to a sequence. Custom outreach batches stay in their own workspace.
         </div>
         {!batchRows.length ? (
           <div className="muted">No CSV batches yet. Upload a CSV to create one.</div>
@@ -622,6 +622,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
               <thead>
                 <tr>
                   <th scope="col">BATCH</th>
+                  <th scope="col">INTENT</th>
                   <th scope="col">SEQUENCE</th>
                 </tr>
               </thead>
@@ -629,6 +630,9 @@ export function SequenceEditor({ sequences, batches }: Props) {
                 {batchRows.map((batch) => (
                   <tr key={batch.id}>
                     <td>{batch.name}</td>
+                    <td>
+                      <span className="pill">{batch.batch_intent === "connect_only" ? "Connect Only" : "Connect + Message"}</span>
+                    </td>
                     <td>
                       {(() => {
                         const assignedSequence = batch.sequence_id ? sequenceById.get(batch.sequence_id) : undefined;
