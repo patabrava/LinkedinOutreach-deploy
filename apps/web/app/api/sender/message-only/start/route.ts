@@ -15,11 +15,13 @@ const resolveIntervalSec = (): number => {
   return 900;
 };
 
-const senderAuthPresent = (repoRoot: string): boolean => {
+// Sender reuses the scraper's persisted auth.json — keep this list in sync with
+// _resolve_scraper_auth_path() in workers/sender/sender.py. Checking the sender
+// dir would falsely greenlight a deployment where only the sender file exists.
+const scraperAuthPresent = (repoRoot: string): boolean => {
   const candidates = [
-    process.env.LINKEDIN_SENDER_DIR ? path.join(process.env.LINKEDIN_SENDER_DIR, "auth.json") : null,
     process.env.LINKEDIN_SCRAPER_DIR ? path.join(process.env.LINKEDIN_SCRAPER_DIR, "auth.json") : null,
-    path.join(repoRoot, "workers", "sender", "auth.json"),
+    "/data/scraper/auth.json",
     path.join(repoRoot, "workers", "scraper", "auth.json"),
   ].filter((p): p is string => Boolean(p));
   return candidates.some((p) => {
@@ -47,8 +49,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: false, error: "Sender directory not found" }, { status: 500 });
     }
 
-    if (!senderAuthPresent(repoRoot)) {
-      logger.warn("Cannot start message-only daemon: no auth.json found", { correlationId });
+    if (!scraperAuthPresent(repoRoot)) {
+      logger.warn("Cannot start message-only daemon: no scraper auth.json found", { correlationId });
       return NextResponse.json(
         {
           ok: false,
