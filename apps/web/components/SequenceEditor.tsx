@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import type { LeadBatchRow, OutreachSequenceRow } from "../app/actions";
 import { assignBatchToSequence, saveOutreachSequence } from "../app/actions";
 import * as sequencePlaceholderUtils from "../lib/sequencePlaceholders";
+import { CONNECT_NOTE_MAX, validateConnectNote } from "../lib/sequenceConnectNote";
 
 type Props = {
   sequences: OutreachSequenceRow[];
@@ -355,6 +356,12 @@ export function SequenceEditor({ sequences, batches }: Props) {
       focusFirstInvalidField();
       return;
     }
+    const connectNoteCheck = validateConnectNote(draft.connect_note ?? "");
+    if (!connectNoteCheck.ok) {
+      setTopLevelError(connectNoteCheck.error);
+      focusField("connect_note");
+      return;
+    }
     startTransition(async () => {
       try {
         const saved = await saveOutreachSequence({
@@ -516,7 +523,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
             aria-invalid={fieldErrors.connect_note.length > 0}
           />
           <div className="muted" style={{ marginTop: 6 }}>
-            Used only for Connect + Message batches. The sender will cap this at 300 characters after rendering placeholders.
+            Used only for Connect + Message batches. The sender will cap this at {CONNECT_NOTE_MAX} characters after rendering placeholders. ({draft.connect_note.length}/{CONNECT_NOTE_MAX})
           </div>
           {fieldErrors.connect_note.length ? (
             <div role="alert" style={{ color: "#dc2626", marginTop: 6 }}>
