@@ -11,6 +11,7 @@ const KIND_LABELS: Record<WorkerKind, string> = {
   sender_outreach: "Messaging sender",
   sender_followup: "Follow-up sender",
   sender_message_only: "Message-only daemon",
+  scraper_enrich_custom: "Custom outreach enrichment",
 };
 
 export async function GET(request: Request) {

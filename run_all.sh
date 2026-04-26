@@ -147,19 +147,21 @@ web_command() {
 
 usage() {
   cat <<'EOF'
-Usage: ./run_all.sh [--web] [--agent] [--sender] [--message-only] [--followup] [--all]
+Usage: ./run_all.sh [--web] [--agent] [--sender] [--message-only] [--followup] [--enrichment-loop] [--draft-loop] [--all]
 
 Environment:
   WEB_RUNTIME=dev|prod   Choose Next.js dev server or production start command (default: dev)
 
 Defaults to launching only the web UI to reduce LinkedIn surface area. Add flags to
 opt-in other workers:
-  --web       Start the Next.js UI
-  --agent     Start the MCP agent (generates drafts from ENRICHED leads)
-  --sender    Start the sender (connect + send APPROVED drafts)
-  --message-only  Start message-only sender poller (checks CONNECT_ONLY_SENT every 15m)
-  --followup  Start follow-up sender poller (checks APPROVED followups every 15m)
-  --all       Start all of the above
+  --web               Start the Next.js UI
+  --agent             Start the MCP agent (generates drafts from ENRICHED leads)
+  --sender            Start the sender (connect + send APPROVED drafts)
+  --message-only      Start message-only sender poller (checks CONNECT_ONLY_SENT every 15m)
+  --followup          Start follow-up sender poller (checks APPROVED followups every 15m)
+  --enrichment-loop   Start scraper enrichment loop daemon (scraper.py --enrichment-loop)
+  --draft-loop        Start agent draft-watch daemon (run_agent.py --watch)
+  --all               Start all of the above
 EOF
 }
 
@@ -168,6 +170,8 @@ START_AGENT=0
 START_SENDER=0
 START_MESSAGE_ONLY=0
 START_FOLLOWUP=0
+START_ENRICHMENT_LOOP=0
+START_DRAFT_LOOP=0
 
 if [ $# -eq 0 ]; then
   # Safer default: only start the web UI unless explicitly requested.
@@ -180,7 +184,9 @@ else
       --sender) START_SENDER=1 ;;
       --message-only) START_MESSAGE_ONLY=1 ;;
       --followup) START_FOLLOWUP=1 ;;
-      --all) START_WEB=1; START_AGENT=1; START_SENDER=1; START_MESSAGE_ONLY=1; START_FOLLOWUP=1 ;;
+      --enrichment-loop) START_ENRICHMENT_LOOP=1 ;;
+      --draft-loop) START_DRAFT_LOOP=1 ;;
+      --all) START_WEB=1; START_AGENT=1; START_SENDER=1; START_MESSAGE_ONLY=1; START_FOLLOWUP=1; START_ENRICHMENT_LOOP=1; START_DRAFT_LOOP=1 ;;
       -h|--help) usage; exit 0 ;;
       *)
         echo "Unknown option: $1"
@@ -256,6 +262,20 @@ else
   echo "[sender_followup] ⏭ Skipping (enable with --followup or --all)."
 fi
 
+# Enrichment loop (scraper daemon: pulls PENDING leads and enriches them)
+if [ "$START_ENRICHMENT_LOOP" -eq 1 ]; then
+  run_service "scraper_enrichment_loop" "cd '$ROOT_DIR/workers/scraper' && source venv/bin/activate && while true; do python -u scraper.py --enrichment-loop; sleep 30; done"
+else
+  echo "[scraper_enrichment_loop] ⏭ Skipping (enable with --enrichment-loop or --all)."
+fi
+
+# Draft loop (agent daemon: watches for ENRICHED leads and writes drafts)
+if [ "$START_DRAFT_LOOP" -eq 1 ]; then
+  run_service "agent_draft_loop" "cd '$ROOT_DIR/mcp-server' && source venv/bin/activate && while true; do python -u run_agent.py --watch; sleep 15; done"
+else
+  echo "[agent_draft_loop] ⏭ Skipping (enable with --draft-loop or --all)."
+fi
+
 # Web UI (Mission Control dashboard)
 if [ "$START_WEB" -eq 1 ]; then
   prepare_web_runtime
@@ -266,11 +286,13 @@ fi
 
 cat <<'EOF'
 📟 Services launched:
-  - Scraper  (logs: .logs/scraper.log)
-  - Agent    (logs: .logs/agent.log)
-  - Sender   (logs: .logs/sender.log)
+  - Scraper            (logs: .logs/scraper.log)
+  - Agent              (logs: .logs/agent.log)
+  - Sender             (logs: .logs/sender.log)
   - Sender Followup Poller (logs: .logs/sender_followup.log)
-  - Web UI   (logs: .logs/web.log)
+  - Enrichment Loop    (logs: .logs/scraper_enrichment_loop.log)
+  - Draft Loop         (logs: .logs/agent_draft_loop.log)
+  - Web UI             (logs: .logs/web.log)
 
 Press Ctrl+C to stop everything.
 EOF

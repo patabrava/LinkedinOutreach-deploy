@@ -5,37 +5,9 @@ import { NextResponse } from "next/server";
 
 import { requireOperatorAccess } from "../../../lib/apiGuard";
 import { logger } from "../../../lib/logger";
+import { mirrorWorkerOutput } from "../../../lib/spawnMirror";
 import { trackWorkerChild } from "../../../lib/workerControl";
 import { assertScraperLockFree, persistScraperPid } from "./scraperLock";
-
-const mirrorWorkerOutput = (
-  stream: NodeJS.ReadableStream | null,
-  logLevel: "info" | "warn",
-  correlationId: string,
-  label: string,
-) => {
-  if (!stream) return;
-
-  let buffer = "";
-  stream.setEncoding("utf8");
-  stream.on("data", (chunk: string) => {
-    buffer += chunk;
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      logger[logLevel](`Scraper ${label}`, { correlationId }, { line: trimmed });
-    }
-  });
-
-  stream.on("end", () => {
-    const trimmed = buffer.trim();
-    if (!trimmed) return;
-    logger[logLevel](`Scraper ${label}`, { correlationId }, { line: trimmed });
-  });
-};
 
 export async function POST(request: Request) {
   const correlationId = logger.apiRequest("POST", "/api/enrich");

@@ -8,7 +8,8 @@ export type WorkerKind =
   | "draft_agent"
   | "sender_outreach"
   | "sender_followup"
-  | "sender_message_only";
+  | "sender_message_only"
+  | "scraper_enrich_custom";
 
 export type WorkerRecord = {
   id: string;

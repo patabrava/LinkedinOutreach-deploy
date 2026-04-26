@@ -277,6 +277,39 @@ def fetch_new_leads(
     return leads
 
 
+def fetch_pending_leads_for_intent(
+    client: Client,
+    limit: int,
+    batch_intent: str,
+    batch_id: Optional[int] = None,
+) -> List[Lead]:
+    """Fetch NEW leads for a specific batch_intent (e.g. 'custom_outreach')."""
+    logger.db_query(
+        "select",
+        "leads",
+        {"status": "NEW", "batch_intent": batch_intent, "limit": limit},
+    )
+    query = (
+        client.table("leads")
+        .select("id, linkedin_url, first_name, last_name, company_name, batch_id, lead_batches!inner(batch_intent)")
+        .eq("status", "NEW")
+        .eq("lead_batches.batch_intent", batch_intent)
+        .limit(limit)
+    )
+    if batch_id is not None:
+        query = query.eq("batch_id", batch_id)
+    response = query.execute()
+    rows = response.data or []
+    logger.db_result("select", "leads", {"status": "NEW", "batch_intent": batch_intent, "limit": limit}, len(rows))
+    return [Lead(
+        id=row["id"],
+        linkedin_url=row["linkedin_url"],
+        first_name=row.get("first_name"),
+        last_name=row.get("last_name"),
+        company_name=row.get("company_name"),
+    ) for row in rows]
+
+
 def fetch_today_enrichment_count(client: Client) -> int:
     """Return count of leads processed today (enriched or connect-only)."""
     start_of_day = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -1282,9 +1315,9 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
         await random_pause()
 
 
-async def main(limit: int = 0, mode: str = "enrich", sequence_id: Optional[int] = None) -> None:
-    logger.operation_start("enrichment", input_data={"limit": limit, "mode": mode, "sequence_id": sequence_id})
-    
+async def main(limit: int = 0, mode: str = "enrich", sequence_id: Optional[int] = None, batch_intent: Optional[str] = None) -> None:
+    logger.operation_start("enrichment", input_data={"limit": limit, "mode": mode, "sequence_id": sequence_id, "batch_intent": batch_intent})
+
     try:
         client = get_supabase_client()
         creds = fetch_linkedin_credentials(client)
@@ -1301,14 +1334,17 @@ async def main(limit: int = 0, mode: str = "enrich", sequence_id: Optional[int] 
             logger.info("No quota left for today")
             return
 
-        outreach_filter = "connect_only" if mode == "connect_only" else None
         os.environ["SCRAPER_MODE"] = mode
-        leads = fetch_new_leads(
-            client,
-            limit=effective_limit,
-            outreach_mode=outreach_filter,
-            sequence_id=sequence_id,
-        )
+        if batch_intent:
+            leads = fetch_pending_leads_for_intent(client, effective_limit, batch_intent)
+        else:
+            outreach_filter = "connect_only" if mode == "connect_only" else None
+            leads = fetch_new_leads(
+                client,
+                limit=effective_limit,
+                outreach_mode=outreach_filter,
+                sequence_id=sequence_id,
+            )
         if not leads:
             logger.info("No NEW leads to process")
             return
@@ -1327,7 +1363,7 @@ async def main(limit: int = 0, mode: str = "enrich", sequence_id: Optional[int] 
             await shutdown(playwright, browser)
             logger.info("Browser closed")
     except Exception as exc:
-        logger.operation_error("enrichment", error=exc, input_data={"limit": limit, "mode": mode, "sequence_id": sequence_id})
+        logger.operation_error("enrichment", error=exc, input_data={"limit": limit, "mode": mode, "sequence_id": sequence_id, "batch_intent": batch_intent})
         raise
 
 
@@ -1460,7 +1496,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Clear the remote browser profile plus local auth artifacts and exit.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--enrichment-loop",
+        action="store_true",
+        help="Continuously enrich NEW custom-outreach leads. Sleeps between passes when queue is empty.",
+    )
+    parser.add_argument(
+        "--batch-intent",
+        type=str,
+        default=None,
+        help="Restrict lead selection to a specific batch_intent (e.g. 'custom_outreach'). None = no filter (legacy behavior).",
+    )
+    args = parser.parse_args()
+    if args.batch_intent and args.batch_intent != "custom_outreach":
+        parser.error(f"--batch-intent '{args.batch_intent}' is not supported; only 'custom_outreach' is valid.")
+    return args
 
 ###################################################################################################
 # Inbox scanning helpers
@@ -2245,6 +2295,73 @@ async def inbox_mode(limit: int = 0) -> None:
         await shutdown(playwright, browser)
 
 
+async def enrichment_loop_mode() -> None:
+    """Continuously enrich NEW custom_outreach leads; sleep when the queue is empty."""
+    # Claim the same pidfile the JS endpoint checks so the single-spawn invariant holds.
+    pid_path = Path(__file__).parent / "enrichment.pid"
+    own_pid = str(os.getpid())
+
+    if pid_path.exists():
+        raw = pid_path.read_text().strip()
+        existing_pid = int(raw) if raw.isdigit() else None
+        if existing_pid:
+            try:
+                os.kill(existing_pid, 0)
+                # Process is alive — another scraper is running.
+                logger.error(
+                    "enrichment-loop: another scraper is already running",
+                    None,
+                    {"pid": existing_pid, "pidFile": str(pid_path)},
+                )
+                sys.exit(1)
+            except OSError:
+                # Stale pidfile — process is dead, clean up and continue.
+                pid_path.unlink(missing_ok=True)
+
+    pid_path.write_text(own_pid)
+
+    logger.operation_start("scraper-enrichment-loop", input_data={"intent": "custom_outreach"})
+    sleep_when_empty = int(os.getenv("ENRICHMENT_LOOP_IDLE_SECONDS", "60"))
+    pass_size = int(os.getenv("ENRICHMENT_LOOP_PASS_SIZE", "10"))
+    client = get_supabase_client()
+    creds = fetch_linkedin_credentials(client)
+    try:
+        while True:
+            leads = fetch_pending_leads_for_intent(client, pass_size, "custom_outreach")
+            if not leads:
+                logger.info("enrichment-loop: queue empty, sleeping", None, {"seconds": sleep_when_empty})
+                await asyncio.sleep(sleep_when_empty)
+                continue
+
+            playwright, browser, context = await open_browser(headless=False)
+            try:
+                await ensure_linkedin_auth(context, creds)
+                for lead in leads:
+                    logger.db_query("update", "leads", {"leadId": lead.id}, {"status": "PROCESSING"})
+                    client.table("leads").update({"status": "PROCESSING"}).eq("id", lead.id).execute()
+                    page = await context.new_page()
+                    try:
+                        await enrich_one(page, client, lead)
+                    except Exception as exc:
+                        logger.error("enrichment-loop: lead failed", {"leadId": lead.id}, error=exc)
+                    finally:
+                        try:
+                            await page.close()
+                        except Exception:
+                            pass
+                    await random_pause()
+            finally:
+                await shutdown(playwright, browser)
+    except KeyboardInterrupt:
+        logger.info("enrichment-loop: stopping on SIGINT")
+    finally:
+        try:
+            if pid_path.exists() and pid_path.read_text().strip() == own_pid:
+                pid_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
     args = parse_args()
     if getattr(args, "sync_remote_session", False):
@@ -2257,6 +2374,10 @@ if __name__ == "__main__":
 
     if getattr(args, "login_only", False):
         asyncio.run(login_only_mode())
+        sys.exit(0)
+
+    if getattr(args, "enrichment_loop", False):
+        asyncio.run(enrichment_loop_mode())
         sys.exit(0)
 
     if not args.run:
@@ -2272,4 +2393,5 @@ if __name__ == "__main__":
         limit = args.limit if isinstance(args.limit, int) and args.limit >= 0 else 0
         mode = getattr(args, "mode", "enrich")
         sequence_id = args.sequence_id if isinstance(args.sequence_id, int) and args.sequence_id > 0 else None
-        asyncio.run(main(limit=limit, mode=mode, sequence_id=sequence_id))
+        batch_intent = getattr(args, "batch_intent", None)
+        asyncio.run(main(limit=limit, mode=mode, sequence_id=sequence_id, batch_intent=batch_intent))
