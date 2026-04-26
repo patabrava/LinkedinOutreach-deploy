@@ -866,6 +866,27 @@ async def send_sales_navigator_message(page: Page, subject: str, body: str) -> N
     await random_pause()
 
 
+async def has_sales_navigator_composer(page: Page) -> bool:
+    subject_count = await page.locator(
+        "input[name='subject'], input[placeholder*='Subject'], input[aria-label*='Subject'], "
+        "input[placeholder*='Betreff'], input[aria-label*='Betreff']"
+    ).count()
+    body_count = await page.locator(
+        "textarea[name='message'], textarea[placeholder*='Message'], textarea[aria-label*='Message'], "
+        "div[role='textbox'][contenteditable='true']"
+    ).count()
+    return subject_count > 0 and body_count > 0
+
+
+async def wait_for_sales_navigator_composer(page: Page, timeout_ms: int = 10_000) -> bool:
+    deadline = asyncio.get_event_loop().time() + (timeout_ms / 1000)
+    while asyncio.get_event_loop().time() < deadline:
+        if await has_sales_navigator_composer(page):
+            return True
+        await page.wait_for_timeout(250)
+    return False
+
+
 async def send_message(page: Page, message: str, surface: str, draft: Optional[Dict[str, Any]] = None) -> None:
     """Send a message through the opened messaging surface.
     
@@ -1862,12 +1883,20 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
             logger.debug("Found Message link - user is connected", {"leadId": lead_id})
             try:
                 message_page = await click_and_resolve_active_page(page, message_link.first)
-                await message_page.wait_for_selector(
-                    "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
-                    timeout=10_000,
-                )
                 await random_pause()
-                await send_message(message_page, message, SURFACE_MESSAGE)
+                if await wait_for_sales_navigator_composer(message_page):
+                    logger.info("Nachricht opened Sales Navigator composer", {"leadId": lead_id})
+                    await send_sales_navigator_message(
+                        message_page,
+                        build_sales_navigator_subject(lead),
+                        message,
+                    )
+                else:
+                    await message_page.wait_for_selector(
+                        "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
+                        timeout=10_000,
+                    )
+                    await send_message(message_page, message, SURFACE_MESSAGE)
                 
                 # Mark as SENT, capture acceptance, and initialize sequence progress metadata.
                 accepted_at = datetime.utcnow().isoformat()
