@@ -10,6 +10,7 @@ const KIND_LABELS: Record<WorkerKind, string> = {
   draft_agent: "Draft generation",
   sender_outreach: "Messaging sender",
   sender_followup: "Follow-up sender",
+  sender_message_only: "Message-only daemon",
 };
 
 export async function GET(request: Request) {

@@ -7,7 +7,8 @@ export type WorkerKind =
   | "scraper_inbox"
   | "draft_agent"
   | "sender_outreach"
-  | "sender_followup";
+  | "sender_followup"
+  | "sender_message_only";
 
 export type WorkerRecord = {
   id: string;
@@ -16,6 +17,7 @@ export type WorkerRecord = {
   label: string;
   startedAt: string;
   args: string[];
+  processGroup?: boolean;
 };
 
 type RegistryShape = {
@@ -28,6 +30,7 @@ type RegisterWorkerInput = {
   pid: number;
   label: string;
   args?: string[];
+  processGroup?: boolean;
 };
 
 type TrackWorkerChildInput = Omit<RegisterWorkerInput, "pid"> & {
@@ -129,6 +132,7 @@ export function registerWorkerPid(input: RegisterWorkerInput): WorkerRecord | nu
     label: input.label,
     startedAt: new Date().toISOString(),
     args: input.args || [],
+    ...(input.processGroup ? { processGroup: true } : {}),
   };
 
   const nextWorkers = activeWorkers.filter((entry) => entry.pid !== input.pid);
@@ -150,7 +154,7 @@ export function unregisterWorkerPid(pid: number, registryPath?: string) {
   }
 }
 
-export function trackWorkerChild({ child, registryPath, kind, label, args }: TrackWorkerChildInput) {
+export function trackWorkerChild({ child, registryPath, kind, label, args, processGroup }: TrackWorkerChildInput) {
   if (!child.pid) {
     return null;
   }
@@ -161,6 +165,7 @@ export function trackWorkerChild({ child, registryPath, kind, label, args }: Tra
     pid: child.pid,
     label,
     args,
+    processGroup,
   });
 
   child.on("exit", () => {
@@ -177,7 +182,7 @@ export function stopWorkers({ registryPath, kinds }: ListWorkersInput = {}): Sto
 
   matchingWorkers.forEach((worker) => {
     try {
-      process.kill(worker.pid, "SIGTERM");
+      process.kill(worker.processGroup ? -worker.pid : worker.pid, "SIGTERM");
       stopped.push(worker);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException | undefined)?.code;

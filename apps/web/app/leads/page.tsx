@@ -1,5 +1,6 @@
 import { LeadList } from "../../components/LeadList";
 import { LeadRunControls } from "../../components/LeadRunControls";
+import { SenderMessageOnlyControl } from "../../components/SenderMessageOnlyControl";
 import { TriggerButton } from "../../components/TriggerButton";
 import { WorkerControlPanel } from "../../components/WorkerControlPanel";
 import { requireServerSession } from "../../lib/auth";
@@ -59,6 +60,8 @@ export default async function LeadsPage({
             />
           </div>
         </div>
+
+        <SenderMessageOnlyControl />
       </div>
 
       <div style={{ marginTop: 20 }}>
