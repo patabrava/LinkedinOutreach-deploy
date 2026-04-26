@@ -247,10 +247,8 @@ def normalize_linkedin_profile_url(url: str) -> str:
 
 
 def build_sales_navigator_subject(lead: Dict[str, Any]) -> str:
-    first_name = (lead.get("first_name") or "").strip()
-    if first_name:
-        return f"Kurzer Austausch, {first_name}"
-    return "Kurzer Austausch"
+    # Keep the Sales Navigator subject fixed so it does not append the lead name.
+    return "quotes outstation"
 
 
 def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int] = None) -> list[Dict[str, Any]]:

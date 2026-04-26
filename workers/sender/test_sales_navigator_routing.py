@@ -79,7 +79,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual(result, "https://www.linkedin.com/in/marcel-ohlendorf-42335a197")
 
-    def test_build_sales_navigator_subject_uses_name_when_available(self):
+    def test_build_sales_navigator_subject_stays_fixed_when_name_available(self):
         subject = build_sales_navigator_subject(
             {
                 "first_name": "Marcel",
@@ -88,12 +88,12 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(subject, "Kurzer Austausch, Marcel")
+        self.assertEqual(subject, "quotes outstation")
 
-    def test_build_sales_navigator_subject_falls_back_without_name(self):
+    def test_build_sales_navigator_subject_stays_fixed_without_name(self):
         subject = build_sales_navigator_subject({"company_name": "Degura"})
 
-        self.assertEqual(subject, "Kurzer Austausch")
+        self.assertEqual(subject, "quotes outstation")
 
     def test_mark_message_only_processing_locks_only_eligible_status(self):
         lead = {"id": "lead-1", "status": "CONNECTED"}
