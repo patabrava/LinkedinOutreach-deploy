@@ -184,8 +184,8 @@ def sanitize_no_dashes(text: str) -> str:
     if not text:
         return ""
     # Replace prohibited characters (dashes, apostrophes) with spaces and collapse whitespace
-    text = re.sub(r"[\-\u2010-\u2015\u2212]+", " ", text)
-    text = re.sub(r"['`\u2018\u2019]+", " ", text)
+    text = re.sub(r"[\-‐-―−]+", " ", text)
+    text = re.sub(r"[‘`‘’]+", " ", text)
     text = text.replace("\n", " ").replace("\r", " ")
     text = re.sub(r" {2,}", " ", text)
     return text.strip()
@@ -238,6 +238,143 @@ def build_text_block(*sections: str) -> str:
         return ""
     text_block = " ".join(parts)
     return re.sub(r" {2,}", " ", text_block).strip()
+
+
+def _sanitize_opener(op: str, lead: Dict[str, Any]) -> str:
+    safe = (op or "").strip()
+    for ph in ["[Name]", "[name]", "{Name}", "{name}", "<Name>", "<name>"]:
+        if ph in safe:
+            safe = safe.replace(ph, (lead.get("first_name") or "").strip())
+    first = (lead.get("first_name") or "").strip()
+    if first:
+        lowered = safe.lower()
+        if first.lower() not in lowered[:40]:
+            safe = f"Hey {first}, " + safe
+    else:
+        safe = safe.replace("[", "").replace("]", "").replace("{", "").replace("}", "").replace("<", "").replace(">", "")
+        if not safe.lower().startswith("hey"):
+            safe = f"Hey, {safe}" if safe else "Hey,"
+    return safe.strip()
+
+
+def _process_lead_for_generation(
+    lead: Dict[str, Any],
+    *,
+    client: Any,
+    openai_client: OpenAI,
+    example_pool: Any,
+    prompt_text: str,
+    next_status: str,
+) -> None:
+    """Generate a draft for a single ENRICHED lead and flip its status to next_status."""
+    lead_id = lead["id"]
+    logger.info("Generating draft for lead", {"leadId": lead_id})
+    profile = lead.get("profile_data") or {}
+    company_type = guess_company_type(profile)
+
+    logger.debug("Classifying lead", {"leadId": lead_id}, {"companyType": company_type})
+    ai_tags = classify_lead(client, lead_id, profile.get("industry", "Unknown"), company_type)
+
+    case_study = choose_case_study(ai_tags)
+    logger.debug("Selected case study", {"leadId": lead_id}, {"caseStudy": case_study})
+    select_case_study(client, lead_id, case_study)
+
+    last_category_index = get_rotation_state(client)
+    category_name, example_text, new_category_index = example_pool.get_next_example(last_category_index)
+
+    logger.info("Selected example from category", {"leadId": lead_id}, {
+        "category": category_name,
+        "categoryIndex": new_category_index,
+        "example": example_text[:50] + "...",
+    })
+    update_rotation_state(client, new_category_index)
+
+    prompt = build_prompt(lead, case_study, company_type, example_text, category_name, prompt_text)
+    logger.ai_request(OPENAI_MODEL, {"leadId": lead_id}, prompt[:200])
+
+    completion = openai_client.chat.completions.create(
+        model=OPENAI_MODEL,
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Du bist eine deutschsprachige LinkedIn-Textexpertin mit Schwerpunkt Immobilien. "
+                    "Schreibe prägnante, warme und branchenspezifische Outreach-Nachrichten auf Deutsch."
+                ),
+            },
+            {
+                "role": "system",
+                "content": (
+                    "Harte Regel: Verwende keine Bindestriche oder Gedankenstriche ('-', '–', '—') "
+                    "und keine Apostrophe (') in irgendeinem Ausgabefeld (opener, body, cta, full_message). "
+                    "Formuliere deine Ausgabe als geschlossenen Textblock ohne Zeilenumbrüche."
+                ),
+            },
+            {"role": "system", "content": prompt_text},
+            {"role": "user", "content": prompt},
+        ],
+    )
+
+    tokens = completion.usage.total_tokens if completion.usage else None
+    logger.ai_response(OPENAI_MODEL, {"leadId": lead_id}, tokens)
+
+    content = completion.choices[0].message.content or "{}"
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        logger.error("Bad JSON from AI model", {"leadId": lead_id}, data={"content": content[:200]})
+        return
+
+    opener = data.get("opener", "")
+    body = data.get("body", "")
+    cta = data.get("cta", "")
+    body_type = data.get("body_type", "")
+    cta_type = data.get("cta_type", "")
+
+    opener = _sanitize_opener(opener, lead)
+    if not data.get("full_message"):
+        build_text_block(opener, body, cta)
+
+    opener = sanitize_no_dashes(opener)
+    body = sanitize_no_dashes(body)
+    cta = sanitize_no_dashes(cta)
+    opener = strip_generic_filler(opener)
+    body = strip_generic_filler(body)
+    cta = strip_generic_filler(cta)
+    opener = ensure_sentence_punctuation(opener)
+    body = ensure_sentence_punctuation(body)
+    cta = ensure_sentence_punctuation(cta)
+
+    pre_check = build_text_block(opener, body, cta)
+    if len(pre_check) > 300:
+        logger.warn("AI generated message exceeds 300 chars", {"leadId": lead_id}, {"length": len(pre_check)})
+
+    opener, body, cta, _ = enforce_char_limit(opener, body, cta, lead_id=lead_id)
+
+    opener = sanitize_no_dashes(opener)
+    body = sanitize_no_dashes(body)
+    cta = sanitize_no_dashes(cta)
+    opener = strip_generic_filler(opener)
+    body = strip_generic_filler(body)
+    cta = strip_generic_filler(cta)
+    opener = ensure_sentence_punctuation(opener)
+    body = ensure_sentence_punctuation(body)
+    cta = ensure_sentence_punctuation(cta)
+    full_message = build_text_block(opener, body, cta)
+
+    save_draft(
+        client,
+        lead_id,
+        opener,
+        body,
+        cta,
+        full_message,
+        body_type,
+        cta_type,
+        next_status=next_status,
+    )
+    logger.info("Draft saved for lead", {"leadId": lead_id})
 
 
 def main() -> None:
@@ -323,150 +460,34 @@ def main() -> None:
                     data={"count": len(leads)},
                 )
                 for lead in leads:
-                    lead_id = lead["id"]
                     try:
-                        logger.info("Generating draft for lead", {"leadId": lead_id})
-                        profile = lead.get("profile_data") or {}
-                        company_type = guess_company_type(profile)
-
-                        logger.debug("Classifying lead", {"leadId": lead_id}, {"companyType": company_type})
-                        ai_tags = classify_lead(client, lead_id, profile.get("industry", "Unknown"), company_type)
-
-                        case_study = choose_case_study(ai_tags)
-                        logger.debug("Selected case study", {"leadId": lead_id}, {"caseStudy": case_study})
-                        select_case_study(client, lead_id, case_study)
-
-                        last_category_index = get_rotation_state(client)
-                        category_name, example_text, new_category_index = example_pool.get_next_example(last_category_index)
-
-                        logger.info("Selected example from category", {"leadId": lead_id}, {
-                            "category": category_name,
-                            "categoryIndex": new_category_index,
-                            "example": example_text[:50] + "...",
-                        })
-                        update_rotation_state(client, new_category_index)
-
-                        prompt = build_prompt(lead, case_study, company_type, example_text, category_name, prompt_text)
-                        logger.ai_request(OPENAI_MODEL, {"leadId": lead_id}, prompt[:200])
-
-                        completion = openai_client.chat.completions.create(
-                            model=OPENAI_MODEL,
-                            response_format={"type": "json_object"},
-                            messages=[
-                                {
-                                    "role": "system",
-                                    "content": (
-                                        "Du bist eine deutschsprachige LinkedIn-Textexpertin mit Schwerpunkt Immobilien. "
-                                        "Schreibe prägnante, warme und branchenspezifische Outreach-Nachrichten auf Deutsch."
-                                    ),
-                                },
-                                {
-                                    "role": "system",
-                                    "content": (
-                                        "Harte Regel: Verwende keine Bindestriche oder Gedankenstriche ('-', '–', '—') "
-                                        "und keine Apostrophe (') in irgendeinem Ausgabefeld (opener, body, cta, full_message). "
-                                        "Formuliere deine Ausgabe als geschlossenen Textblock ohne Zeilenumbrüche."
-                                    ),
-                                },
-                                {"role": "system", "content": prompt_text},
-                                {"role": "user", "content": prompt},
-                            ],
-                        )
-
-                        tokens = completion.usage.total_tokens if completion.usage else None
-                        logger.ai_response(OPENAI_MODEL, {"leadId": lead_id}, tokens)
-
-                        content = completion.choices[0].message.content or "{}"
-                        try:
-                            data = json.loads(content)
-                        except json.JSONDecodeError:
-                            logger.error("Bad JSON from AI model", {"leadId": lead_id}, data={"content": content[:200]})
-                            continue
-
-                        opener = data.get("opener", "")
-                        body = data.get("body", "")
-                        cta = data.get("cta", "")
-                        body_type = data.get("body_type", "")
-                        cta_type = data.get("cta_type", "")
-
-                        def _sanitize_opener(op: str, l: Dict[str, Any]) -> str:
-                            safe = (op or "").strip()
-                            for ph in ["[Name]", "[name]", "{Name}", "{name}", "<Name>", "<name>"]:
-                                if ph in safe:
-                                    safe = safe.replace(ph, (l.get("first_name") or "").strip())
-                            first = (l.get("first_name") or "").strip()
-                            if first:
-                                lowered = safe.lower()
-                                if first.lower() not in lowered[:40]:
-                                    safe = f"Hey {first}, " + safe
-                            else:
-                                safe = safe.replace("[", "").replace("]", "").replace("{", "").replace("}", "").replace("<", "").replace(">", "")
-                                if not safe.lower().startswith("hey"):
-                                    safe = f"Hey, {safe}" if safe else "Hey,"
-                            return safe.strip()
-
-                        opener = _sanitize_opener(opener, lead)
-                        if not data.get("full_message"):
-                            build_text_block(opener, body, cta)
-
-                        opener = sanitize_no_dashes(opener)
-                        body = sanitize_no_dashes(body)
-                        cta = sanitize_no_dashes(cta)
-                        opener = strip_generic_filler(opener)
-                        body = strip_generic_filler(body)
-                        cta = strip_generic_filler(cta)
-                        opener = ensure_sentence_punctuation(opener)
-                        body = ensure_sentence_punctuation(body)
-                        cta = ensure_sentence_punctuation(cta)
-
-                        pre_check = build_text_block(opener, body, cta)
-                        if len(pre_check) > 300:
-                            logger.warn("AI generated message exceeds 300 chars", {"leadId": lead_id}, {"length": len(pre_check)})
-
-                        opener, body, cta, _ = enforce_char_limit(opener, body, cta, lead_id=lead_id)
-
-                        opener = sanitize_no_dashes(opener)
-                        body = sanitize_no_dashes(body)
-                        cta = sanitize_no_dashes(cta)
-                        opener = strip_generic_filler(opener)
-                        body = strip_generic_filler(body)
-                        cta = strip_generic_filler(cta)
-                        opener = ensure_sentence_punctuation(opener)
-                        body = ensure_sentence_punctuation(body)
-                        cta = ensure_sentence_punctuation(cta)
-                        full_message = build_text_block(opener, body, cta)
-
-                        save_draft(
-                            client,
-                            lead_id,
-                            opener,
-                            body,
-                            cta,
-                            full_message,
-                            body_type,
-                            cta_type,
+                        _process_lead_for_generation(
+                            lead,
+                            client=client,
+                            openai_client=openai_client,
+                            example_pool=example_pool,
+                            prompt_text=prompt_text,
                             next_status="DRAFT_READY",
                         )
-                        logger.info("Draft saved for lead", {"leadId": lead_id})
                     except Exception as exc:
-                        logger.error("agent-watch: lead failed", {"leadId": lead_id}, error=exc)
+                        logger.error("agent-watch: lead failed", {"leadId": lead["id"]}, error=exc)
         except KeyboardInterrupt:
             logger.info("agent-watch: stopping on SIGINT")
             return
 
     prompt_type = args.prompt_type
     mode = "connect_only" if args.mode == "connect_only" else "message"
-    
+
     # Load the appropriate prompt
     prompt_text = load_prompt(prompt_type)
     prompt_name = PROMPT_NAMES.get(prompt_type, "Standard Outreach")
-    
+
     logger.operation_start("draft-generation", {"promptType": prompt_type, "mode": args.mode})
     logger.info(
         f"Using prompt type: {prompt_name}",
         data={"promptType": prompt_type, "promptName": prompt_name, "mode": args.mode},
     )
-    
+
     try:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -480,7 +501,7 @@ def main() -> None:
         if not leads:
             logger.info("No leads found for requested mode", data={"mode": args.mode, "batchId": args.batch_id})
             return
-        
+
         logger.info(
             f"Processing {len(leads)} leads",
             data={"count": len(leads), "promptType": prompt_type, "mode": args.mode},
@@ -488,155 +509,18 @@ def main() -> None:
 
         # Initialize example pool
         example_pool = get_example_pool()
-        
+
+        next_status = "MESSAGE_ONLY_READY" if mode == "connect_only" else "DRAFT_READY"
         for lead in leads:
-            lead_id = lead["id"]
-            logger.info(f"Generating draft for lead", {"leadId": lead_id})
-            profile = lead.get("profile_data") or {}
-            company_type = guess_company_type(profile)
-            
-            logger.debug("Classifying lead", {"leadId": lead_id}, {"companyType": company_type})
-            ai_tags = classify_lead(client, lead_id, profile.get("industry", "Unknown"), company_type)
-            
-            case_study = choose_case_study(ai_tags)
-            logger.debug("Selected case study", {"leadId": lead_id}, {"caseStudy": case_study})
-            select_case_study(client, lead_id, case_study)
-
-            # Get the next example using rotation
-            last_category_index = get_rotation_state(client)
-            category_name, example_text, new_category_index = example_pool.get_next_example(last_category_index)
-            
-            logger.info(f"Selected example from category", {"leadId": lead_id}, {
-                "category": category_name,
-                "categoryIndex": new_category_index,
-                "example": example_text[:50] + "..."
-            })
-            
-            # Update rotation state for next lead
-            update_rotation_state(client, new_category_index)
-
-            prompt = build_prompt(lead, case_study, company_type, example_text, category_name, prompt_text)
-            
-            logger.ai_request(OPENAI_MODEL, {"leadId": lead_id}, prompt[:200])
-            
-            completion = openai.chat.completions.create(
-                model=OPENAI_MODEL,
-                response_format={"type": "json_object"},
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Du bist eine deutschsprachige LinkedIn-Textexpertin mit Schwerpunkt Immobilien. "
-                            "Schreibe prägnante, warme und branchenspezifische Outreach-Nachrichten auf Deutsch."
-                        ),
-                    },
-                    {
-                        "role": "system",
-                        "content": (
-                            "Harte Regel: Verwende keine Bindestriche oder Gedankenstriche ('-', '–', '—') "
-                            "und keine Apostrophe (') in irgendeinem Ausgabefeld (opener, body, cta, full_message). "
-                            "Formuliere deine Ausgabe als geschlossenen Textblock ohne Zeilenumbrüche."
-                        ),
-                    },
-                    {"role": "system", "content": prompt_text},
-                    {"role": "user", "content": prompt},
-                ],
-            )
-            
-            tokens = completion.usage.total_tokens if completion.usage else None
-            logger.ai_response(OPENAI_MODEL, {"leadId": lead_id}, tokens)
-            
-            content = completion.choices[0].message.content or "{}"
-            try:
-                data = json.loads(content)
-            except json.JSONDecodeError:
-                logger.error(f"Bad JSON from AI model", {"leadId": lead_id}, data={"content": content[:200]})
-                continue
-
-            opener = data.get("opener", "")
-            body = data.get("body", "")
-            cta = data.get("cta", "")
-            full_message = build_text_block(opener, body, cta)
-            body_type = data.get("body_type", "")
-            cta_type = data.get("cta_type", "")
-
-            logger.debug("Draft generated", {"leadId": lead_id}, {
-                "messageLength": len(full_message),
-                "bodyType": body_type,
-                "ctaType": cta_type,
-            })
-            
-            # Safety net: ensure the opener greets with the lead's first name when available
-            def sanitize_opener(op: str, l: Dict[str, Any]) -> str:
-                safe = (op or "").strip()
-                # Replace common placeholder patterns
-                for ph in ["[Name]", "[name]", "{Name}", "{name}", "<Name>", "<name>"]:
-                    if ph in safe:
-                        safe = safe.replace(ph, (l.get("first_name") or "").strip())
-                first = (l.get("first_name") or "").strip()
-                if first:
-                    # If opener doesn't already mention the first name in the first few words, prefix it
-                    lowered = safe.lower()
-                    if first.lower() not in lowered[:40]:
-                        # Normalize to German "Hey" greeting
-                        safe = f"Hey {first}, " + safe
-                else:
-                    # No first name available: ensure we don't leave any placeholders
-                    safe = safe.replace("[", "").replace("]", "").replace("{", "").replace("}", "").replace("<", "").replace(">", "")
-                    if not safe.lower().startswith("hey"):
-                        safe = f"Hey, {safe}" if safe else "Hey,"
-                return safe.strip()
-
-            opener = sanitize_opener(opener, lead)
-            # If we rebuilt opener, recompute full_message to reflect sanitized opener
-            if not data.get("full_message"):
-                full_message = build_text_block(opener, body, cta)
-
-            # Enforce no-dash rule on fields and rebuild full_message for consistency
-            opener = sanitize_no_dashes(opener)
-            body = sanitize_no_dashes(body)
-            cta = sanitize_no_dashes(cta)
-            opener = strip_generic_filler(opener)
-            body = strip_generic_filler(body)
-            cta = strip_generic_filler(cta)
-            opener = ensure_sentence_punctuation(opener)
-            body = ensure_sentence_punctuation(body)
-            cta = ensure_sentence_punctuation(cta)
-            full_message = build_text_block(opener, body, cta)
-
-            # Check length before enforcement
-            pre_check = build_text_block(opener, body, cta)
-            if len(pre_check) > 300:
-                logger.warn(f"AI generated message exceeds 300 chars", {"leadId": lead_id}, {"length": len(pre_check)})
-            
-            opener, body, cta, _ = enforce_char_limit(opener, body, cta, lead_id=lead_id)
-
-            # Final safety: ensure no dashes or filler remain after truncation
-            opener = sanitize_no_dashes(opener)
-            body = sanitize_no_dashes(body)
-            cta = sanitize_no_dashes(cta)
-            opener = strip_generic_filler(opener)
-            body = strip_generic_filler(body)
-            cta = strip_generic_filler(cta)
-            opener = ensure_sentence_punctuation(opener)
-            body = ensure_sentence_punctuation(body)
-            cta = ensure_sentence_punctuation(cta)
-            full_message = build_text_block(opener, body, cta)
-
-            next_status = "MESSAGE_ONLY_READY" if mode == "connect_only" else "DRAFT_READY"
-            save_draft(
-                client,
-                lead_id,
-                opener,
-                body,
-                cta,
-                full_message,
-                body_type,
-                cta_type,
+            _process_lead_for_generation(
+                lead,
+                client=client,
+                openai_client=openai,
+                example_pool=example_pool,
+                prompt_text=prompt_text,
                 next_status=next_status,
             )
-            logger.info(f"Draft saved for lead", {"leadId": lead_id})
-        
+
         logger.operation_complete("draft-generation", result={"processed": len(leads), "mode": args.mode})
     except Exception as exc:
         logger.operation_error("draft-generation", error=exc)
