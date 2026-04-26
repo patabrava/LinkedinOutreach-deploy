@@ -59,28 +59,13 @@ export async function GET(request: Request) {
     const workers = listActiveWorkers({ kinds: ["sender_message_only"] });
     const worker = workers[0] || null;
 
-    if (!worker) {
-      logger.apiResponse("GET", "/api/sender/message-only/health", 200, { correlationId }, { running: false });
-      return NextResponse.json({
-        ok: true,
-        running: false,
-        stuck: false,
-        pid: null,
-        startedAt: null,
-        lastActivityAt: null,
-        lastIterationAt: null,
-        lastIterationOutcome: "unknown" as const,
-        lastError: null,
-        intervalSec,
-        stuckThresholdSec,
-      });
-    }
-
+    // Always parse the log tail — operators triaging a stop/crash need the last
+    // Operation Complete/Error even when no worker is currently registered.
     const tail = readTail(logPath);
     const lastActivityAt = tail ? tail.mtime.toISOString() : null;
     const parsed = parseSenderMessageOnlyTail(tail?.content || "");
 
-    const stuck = tail
+    const stuck = worker && tail
       ? Date.now() - tail.mtime.getTime() > stuckThresholdSec * 1000
       : false;
 
@@ -89,15 +74,15 @@ export async function GET(request: Request) {
       "/api/sender/message-only/health",
       200,
       { correlationId },
-      { running: true, stuck, outcome: parsed.lastIterationOutcome },
+      { running: Boolean(worker), stuck, outcome: parsed.lastIterationOutcome },
     );
 
     return NextResponse.json({
       ok: true,
-      running: true,
+      running: Boolean(worker),
       stuck,
-      pid: worker.pid,
-      startedAt: worker.startedAt,
+      pid: worker?.pid ?? null,
+      startedAt: worker?.startedAt ?? null,
       lastActivityAt,
       lastIterationAt: parsed.lastIterationAt,
       lastIterationOutcome: parsed.lastIterationOutcome,
