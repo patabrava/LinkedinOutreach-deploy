@@ -13,6 +13,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urljoin
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -375,6 +376,42 @@ async def safe_click(page: Page, selector: str) -> None:
     await wiggle_mouse(page)
     await page.click(selector, timeout=15_000)
     await random_pause()
+
+
+async def open_invite_dialog_from_anchor(page: Page, anchor, base_url: str) -> bool:
+    """Open the LinkedIn invite dialog from the visible invite anchor.
+
+    Try a force click first so the user-visible control is still activated even when
+    LinkedIn overlays partially intercept pointer events. Fall back to direct invite
+    URL navigation only if the click path does not open the dialog.
+    """
+    try:
+        href = await anchor.get_attribute("href")
+    except Exception:
+        href = None
+
+    try:
+        await anchor.scroll_into_view_if_needed(timeout=4_000)
+        await anchor.click(timeout=8_000, force=True)
+        await wait_for_connection_dialog(page)
+        await random_pause()
+        return True
+    except Exception as exc:
+        logger.warn("connect-only: invite anchor force click failed", error=exc)
+
+    if href:
+        invite_url = urljoin(base_url, href)
+        logger.debug("connect-only: navigating to invite URL", data={"inviteUrl": invite_url})
+        try:
+            await page.goto(invite_url, wait_until="domcontentloaded", timeout=20_000)
+            await page.wait_for_timeout(2_500)
+            await wait_for_connection_dialog(page)
+            await random_pause()
+            return True
+        except Exception as exc:
+            logger.warn("connect-only: invite URL navigation failed", error=exc, data={"inviteUrl": invite_url})
+
+    return False
 
 
 async def wait_for_connection_dialog(page: Page) -> None:
@@ -765,13 +802,12 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
     
     if invite_link_count > 0:
         try:
-            await invite_link.first.click(timeout=8_000)
-            logger.element_click("Invite link", success=True)
-            await wait_for_connection_dialog(page)
-            await random_pause()
-            logger.dialog_detected("connection_invite", context={"path": 1})
-            logger.path_attempt("Invite link", 1, success=True)
-            return await _click_send_without_note(page, normalized, lead.id)
+            opened = await open_invite_dialog_from_anchor(page, invite_link.first, "https://www.linkedin.com")
+            if opened:
+                logger.element_click("Invite link", success=True)
+                logger.dialog_detected("connection_invite", context={"path": 1})
+                logger.path_attempt("Invite link", 1, success=True)
+                return await _click_send_without_note(page, normalized, lead.id)
         except Exception as e:
             logger.element_click("Invite link", success=False)
             logger.path_attempt("Invite link", 1, success=False)
@@ -790,13 +826,12 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
         if direct_connect_anchor_count > 0:
             try:
                 logger.debug("connect-only: matched connect anchor", data={"selector": css})
-                await direct_connect_anchor.first.click(timeout=8_000)
-                logger.element_click(f"Connect anchor: {css}", success=True)
-                await wait_for_connection_dialog(page)
-                await random_pause()
-                logger.dialog_detected("connection_direct_anchor", context={"path": 2, "selector": css})
-                logger.path_attempt(f"Direct Connect anchor ({css})", 2, success=True)
-                return await _click_send_without_note(page, normalized, lead.id)
+                opened = await open_invite_dialog_from_anchor(page, direct_connect_anchor.first, "https://www.linkedin.com")
+                if opened:
+                    logger.element_click(f"Connect anchor: {css}", success=True)
+                    logger.dialog_detected("connection_direct_anchor", context={"path": 2, "selector": css})
+                    logger.path_attempt(f"Direct Connect anchor ({css})", 2, success=True)
+                    return await _click_send_without_note(page, normalized, lead.id)
             except Exception as e:
                 logger.element_click(f"Connect anchor: {css}", success=False)
                 logger.path_attempt(f"Direct Connect anchor ({css})", 2, success=False)
@@ -810,7 +845,8 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
     
     if direct_connect_count > 0:
         try:
-            await direct_connect_btn.first.click(timeout=8_000)
+            await direct_connect_btn.first.scroll_into_view_if_needed(timeout=4_000)
+            await direct_connect_btn.first.click(timeout=8_000, force=True)
             logger.element_click("Vernetzen button", success=True)
             await wait_for_connection_dialog(page)
             await random_pause()
@@ -847,7 +883,7 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
             logger.element_search("Invite/Connect menuitem", invite_count, role="menuitem", context={"path": 3})
             
             if invite_count > 0:
-                await invite_menuitem.first.click(timeout=8_000)
+                await invite_menuitem.first.click(timeout=8_000, force=True)
                 logger.element_click("Invite menuitem", success=True)
                 
                 # Wait for connection dialog
@@ -1316,7 +1352,8 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
 
 
 async def main(limit: int = 0, mode: str = "enrich", sequence_id: Optional[int] = None, batch_intent: Optional[str] = None) -> None:
-    logger.operation_start("enrichment", input_data={"limit": limit, "mode": mode, "sequence_id": sequence_id, "batch_intent": batch_intent})
+    operation_name = "connect-only" if mode == "connect_only" else "enrichment"
+    logger.operation_start(operation_name, input_data={"limit": limit, "mode": mode, "sequence_id": sequence_id, "batch_intent": batch_intent})
 
     try:
         client = get_supabase_client()
@@ -1358,12 +1395,12 @@ async def main(limit: int = 0, mode: str = "enrich", sequence_id: Optional[int] 
                 data={"count": len(leads), "mode": mode},
             )
             await process_batch(context, client, leads, mode=mode)
-            logger.operation_complete("enrichment", result={"processed": len(leads)})
+            logger.operation_complete(operation_name, result={"processed": len(leads)})
         finally:
             await shutdown(playwright, browser)
             logger.info("Browser closed")
     except Exception as exc:
-        logger.operation_error("enrichment", error=exc, input_data={"limit": limit, "mode": mode, "sequence_id": sequence_id, "batch_intent": batch_intent})
+        logger.operation_error(operation_name, error=exc, input_data={"limit": limit, "mode": mode, "sequence_id": sequence_id, "batch_intent": batch_intent})
         raise
 
 
