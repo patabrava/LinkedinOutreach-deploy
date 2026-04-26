@@ -2297,6 +2297,29 @@ async def inbox_mode(limit: int = 0) -> None:
 
 async def enrichment_loop_mode() -> None:
     """Continuously enrich NEW custom_outreach leads; sleep when the queue is empty."""
+    # Claim the same pidfile the JS endpoint checks so the single-spawn invariant holds.
+    pid_path = Path(__file__).parent / "enrichment.pid"
+    own_pid = str(os.getpid())
+
+    if pid_path.exists():
+        raw = pid_path.read_text().strip()
+        existing_pid = int(raw) if raw.isdigit() else None
+        if existing_pid:
+            try:
+                os.kill(existing_pid, 0)
+                # Process is alive — another scraper is running.
+                logger.error(
+                    "enrichment-loop: another scraper is already running",
+                    None,
+                    {"pid": existing_pid, "pidFile": str(pid_path)},
+                )
+                sys.exit(1)
+            except OSError:
+                # Stale pidfile — process is dead, clean up and continue.
+                pid_path.unlink(missing_ok=True)
+
+    pid_path.write_text(own_pid)
+
     logger.operation_start("scraper-enrichment-loop", input_data={"intent": "custom_outreach"})
     sleep_when_empty = int(os.getenv("ENRICHMENT_LOOP_IDLE_SECONDS", "60"))
     pass_size = int(os.getenv("ENRICHMENT_LOOP_PASS_SIZE", "10"))
@@ -2314,6 +2337,8 @@ async def enrichment_loop_mode() -> None:
             try:
                 await ensure_linkedin_auth(context, creds)
                 for lead in leads:
+                    logger.db_query("update", "leads", {"leadId": lead.id}, {"status": "PROCESSING"})
+                    client.table("leads").update({"status": "PROCESSING"}).eq("id", lead.id).execute()
                     page = await context.new_page()
                     try:
                         await enrich_one(page, client, lead)
@@ -2329,6 +2354,12 @@ async def enrichment_loop_mode() -> None:
                 await shutdown(playwright, browser)
     except KeyboardInterrupt:
         logger.info("enrichment-loop: stopping on SIGINT")
+    finally:
+        try:
+            if pid_path.exists() and pid_path.read_text().strip() == own_pid:
+                pid_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
