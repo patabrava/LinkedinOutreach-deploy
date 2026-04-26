@@ -57,6 +57,7 @@ type LoginStartResponse = {
 
 type RemoteSessionResponse = {
   ok?: boolean;
+  mode?: "check" | "manual";
   message?: string;
   error?: string;
   status?: LinkedinAuthStatus;
@@ -76,13 +77,14 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
   const [sessionMessage, setSessionMessage] = useState("");
   const [sessionError, setSessionError] = useState("");
   const [sessionAction, setSessionAction] = useState<"sync" | "reset" | null>(null);
+  const [manualAction, setManualAction] = useState(false);
 
   const sessionCopy = SESSION_COPY[currentStatus.session_state];
   const lastVerified = formatTimestamp(currentStatus.last_verified_at);
   const lastAttempt = formatTimestamp(currentStatus.last_login_attempt_at);
   const recoveredCachedSession =
     currentStatus.session_state === "session_active" && !currentStatus.credentials_saved;
-  const isBusy = isLaunching || sessionAction !== null;
+  const isBusy = isLaunching || sessionAction !== null || manualAction;
 
   const handleStartResult = (result: LoginStartResponse) => {
     if (result.status) {
@@ -127,6 +129,44 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
       setSessionError(error instanceof Error ? error.message : `Remote session ${action} failed.`);
     } finally {
       setSessionAction(null);
+    }
+  };
+
+  const openManualBrowser = async () => {
+    setManualAction(true);
+    setSessionMessage("");
+    setSessionError("");
+
+    try {
+      const response = await fetch("/api/login", {
+        method: "POST",
+        headers: {
+          ...getOperatorApiHeaders(),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ mode: "manual" }),
+      });
+
+      const result = (await response.json()) as LoginStartResponse & { mode?: "check" | "manual" };
+      if (result.status) {
+        setCurrentStatus(result.status);
+      }
+      if (typeof result.browserUrl === "string") {
+        setBrowserUrl(result.browserUrl);
+      }
+
+      if (!response.ok || result.ok === false) {
+        throw new Error(result.error || result.message || "Failed to open manual browser.");
+      }
+
+      setSessionMessage(
+        result.message ||
+          "Manual Playwright browser opened. Keep it open and use Capture Session when you want to sync state back.",
+      );
+    } catch (error: unknown) {
+      setSessionError(error instanceof Error ? error.message : "Failed to open manual browser.");
+    } finally {
+      setManualAction(false);
     }
   };
 
@@ -196,6 +236,14 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
       />
 
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 16 }}>
+        <button
+          type="button"
+          className="btn secondary"
+          disabled={isBusy}
+          onClick={openManualBrowser}
+        >
+          {manualAction ? "OPENING…" : "OPEN MANUAL BROWSER"}
+        </button>
         <button
           type="button"
           className="btn secondary"

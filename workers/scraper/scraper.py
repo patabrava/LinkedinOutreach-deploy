@@ -1415,6 +1415,32 @@ async def login_only_mode() -> None:
         raise
 
 
+async def manual_browser_mode() -> None:
+    """Open a visible browser and keep it alive for manual operator use."""
+    logger.operation_start("linkedin-auth", input_data={"mode": "manual_browser"})
+
+    playwright, browser, context = await open_browser(headless=False)
+    try:
+        logger.info("Manual LinkedIn browser opened")
+        page = await context.new_page()
+        try:
+            await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=20_000)
+            await page.wait_for_timeout(2_000)
+            logger.operation_complete(
+                "linkedin-auth",
+                result={"session_state": "manual_browser_opened", "browser_open": True},
+            )
+            await asyncio.Event().wait()
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
+    finally:
+        await shutdown(playwright, browser)
+        logger.info("Manual LinkedIn browser closed")
+
+
 async def sync_remote_session_mode() -> None:
     """Export the current authenticated remote browser session into auth.json."""
     logger.operation_start("linkedin-auth", input_data={"mode": "sync_remote_session"})
@@ -1485,6 +1511,11 @@ def parse_args() -> argparse.Namespace:
         "--login-only",
         action="store_true",
         help="Run only the LinkedIn authentication bootstrap and exit.",
+    )
+    parser.add_argument(
+        "--manual-browser",
+        action="store_true",
+        help="Open a visible Playwright browser and keep it alive for manual use.",
     )
     parser.add_argument(
         "--sync-remote-session",
@@ -2374,6 +2405,10 @@ if __name__ == "__main__":
 
     if getattr(args, "login_only", False):
         asyncio.run(login_only_mode())
+        sys.exit(0)
+
+    if getattr(args, "manual_browser", False):
+        asyncio.run(manual_browser_mode())
         sys.exit(0)
 
     if getattr(args, "enrichment_loop", False):
