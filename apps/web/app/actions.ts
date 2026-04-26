@@ -1539,7 +1539,7 @@ export async function importLeads(
       first_name: row.first_name?.trim() || null,
       last_name: row.last_name?.trim() || null,
       company_name: row.company_name?.trim() || null,
-      status: normalizedIntent === "custom_outreach" ? "ENRICHED" : "NEW",
+      status: "NEW",
       outreach_mode: dbOutreachMode,
     }))
     .filter((row) => row.linkedin_url);
