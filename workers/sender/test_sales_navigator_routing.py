@@ -14,6 +14,7 @@ from sender import (
     _is_message_only_candidate,
     mark_message_only_processing,
     normalize_linkedin_profile_url,
+    strip_sales_navigator_signature,
 )
 
 
@@ -167,6 +168,23 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         subject = build_sales_navigator_subject({"first_name": "Marcel", "company_name": "Degura"})
 
         self.assertEqual(subject, "Kurze Frage zu deiner bAV")
+
+    def test_strip_sales_navigator_signature_removes_manual_closing_only(self):
+        body = (
+            "Hi Marina,\n\n"
+            "freut mich, dass wir uns hier vernetzen.\n\n"
+            "Viele Grüße,\nKatharina"
+        )
+
+        self.assertEqual(
+            strip_sales_navigator_signature(body),
+            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.",
+        )
+
+    def test_strip_sales_navigator_signature_keeps_non_signature_body(self):
+        body = "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen."
+
+        self.assertEqual(strip_sales_navigator_signature(body), body)
 
     def test_mark_message_only_processing_locks_only_eligible_status(self):
         lead = {"id": "lead-1", "status": "CONNECTED"}

@@ -281,6 +281,21 @@ def build_sales_navigator_subject(lead: Dict[str, Any], message: str = "") -> st
     return "Kurze Frage zu deiner bAV"
 
 
+def strip_sales_navigator_signature(message: str) -> str:
+    """Remove the manual sign-off from Sales Navigator bodies.
+
+    Normal direct messages keep the full template. Sales Navigator/InMail already
+    shows the sender identity separately, so duplicating the manual closing adds
+    a second footer-like signature.
+    """
+    lines = (message or "").splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if len(lines) >= 2 and lines[-2].strip().lower() == "viele grüße,":
+        return "\n".join(lines[:-2]).strip()
+    return (message or "").strip()
+
+
 async def _has_visible_connect_or_pending_state(profile_container) -> bool:
     """Detect whether the profile still exposes invite/pending actions."""
     selectors = [
@@ -2289,7 +2304,11 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                 return "pending"
 
             try:
-                await send_sales_navigator_message(sales_page, build_sales_navigator_subject(lead, message), message)
+                await send_sales_navigator_message(
+                    sales_page,
+                    build_sales_navigator_subject(lead, message),
+                    strip_sales_navigator_signature(message),
+                )
                 accepted_at = datetime.utcnow().isoformat()
                 sequence_started_at = lead.get("sequence_started_at") or accepted_at
                 lead_update = {
