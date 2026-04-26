@@ -26,6 +26,7 @@ from scraper import (  # noqa: E402
     Lead as ScraperLead,
     WeeklyInviteLimitReached,
     capture_connect_failure_screenshot,
+    confirm_connection_request_sent,
     detect_weekly_invite_limit,
     send_connection_request,
 )
@@ -237,6 +238,18 @@ SURFACE_CONNECT = "connect"
 SURFACE_SALES_NAVIGATOR = "sales_navigator_message"
 
 
+def _is_message_only_candidate(lead: Dict[str, Any]) -> bool:
+    """Return True when a lead should be checked for post-acceptance messaging."""
+    if not isinstance(lead, dict):
+        return False
+    if lead.get("sent_at"):
+        return False
+    if lead.get("connection_sent_at") or lead.get("connection_accepted_at"):
+        return True
+    status = str(lead.get("status") or "").upper()
+    return status in MESSAGE_ONLY_PIPELINE_STATUSES
+
+
 def normalize_linkedin_profile_url(url: str) -> str:
     normalized = (url or "").strip().replace("http://", "https://").split("?")[0].rstrip("/")
     if normalized.startswith("linkedin.com/"):
@@ -246,13 +259,51 @@ def normalize_linkedin_profile_url(url: str) -> str:
     return normalized
 
 
-def build_sales_navigator_subject(lead: Dict[str, Any]) -> str:
-    # Keep the Sales Navigator subject fixed so it does not append the lead name.
-    return "quotes outstation"
+def _derive_sales_navigator_subject_from_message(message: str) -> str:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in (message or "").splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return ""
+
+    greeting_re = re.compile(r"^(hi|hallo|hello|guten tag)\b", re.I)
+    if greeting_re.match(lines[0]) and len(lines) > 1:
+        lines = lines[1:]
+        if not lines:
+            return ""
+
+    subject = lines[0].rstrip(".,;:!?")
+    return _hard_cap_text(subject, 80)
+
+
+def build_sales_navigator_subject(lead: Dict[str, Any], message: str = "") -> str:
+    # Sales Navigator/InMail performs best with a short, direct subject line.
+    # Keep this stable so the compose window always uses the intended wording.
+    return "Kurze Frage zu deiner bAV"
+
+
+async def _has_visible_connect_or_pending_state(profile_container) -> bool:
+    """Detect whether the profile still exposes invite/pending actions."""
+    selectors = [
+        ("button", r"(Ausstehend|Pending|Vernetzen|Connect|Einladen|Kontaktanfrage|Invite|Anfrage)"),
+        ("link", r"(Ausstehend|Pending|Vernetzen|Connect|Einladen|Kontaktanfrage|Invite|Anfrage)"),
+    ]
+    for role, pattern in selectors:
+        try:
+            locator = profile_container.get_by_role(role, name=re.compile(pattern, re.I))
+            if await locator.count() > 0:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int] = None) -> list[Dict[str, Any]]:
-    """Fetch leads eligible for message-only sending (pending or approved)."""
+    """Fetch leads eligible for message-only sending.
+
+    This intentionally keys off connection-sent timestamps, not just status,
+    so leads whose invite was sent remain eligible even if a status promotion
+    never happened.
+    """
     select_fields_extended = (
         "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
         "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
@@ -276,8 +327,8 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
         query = (
             client.table("leads")
             .select(select_fields_extended)
-            .in_("status", MESSAGE_ONLY_PIPELINE_STATUSES)
             .eq("outreach_mode", "connect_only")
+            .is_("sent_at", "null")
             .order("updated_at", desc=True)
         )
         if batch_id is not None:
@@ -287,8 +338,8 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
         query = (
             client.table("leads")
             .select(select_fields_legacy)
-            .in_("status", MESSAGE_ONLY_PIPELINE_STATUSES)
             .eq("outreach_mode", "connect_only")
+            .is_("sent_at", "null")
             .order("updated_at", desc=True)
         )
         if batch_id is not None:
@@ -296,12 +347,13 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
         resp = query.limit(limit).execute()
     rows = resp.data or []
     logger.db_result("select", "leads", query_meta, len(rows))
-    if rows:
+    filtered_rows = [row for row in rows if _is_message_only_candidate(row)]
+    if filtered_rows:
         logger.info(
             "Fetched %d message-only leads",
-            data={"count": len(rows), "statuses": MESSAGE_ONLY_PIPELINE_STATUSES, "batch_id": batch_id},
+            data={"count": len(filtered_rows), "statuses": MESSAGE_ONLY_PIPELINE_STATUSES, "batch_id": batch_id},
         )
-    return rows
+    return filtered_rows
 
 
 def fetch_invite_queue(client: Client, limit: int, batch_id: Optional[int] = None) -> list[Dict[str, Any]]:
@@ -322,19 +374,66 @@ def fetch_invite_queue(client: Client, limit: int, batch_id: Optional[int] = Non
         client.table("leads")
         .select(
             "id, linkedin_url, first_name, last_name, company_name, "
-            "sequence_id, outreach_mode, batch_id, lead_batches!inner(batch_intent)"
+            "sequence_id, outreach_mode, batch_id, profile_data, lead_batches!inner(batch_intent)"
         )
         .eq("status", "NEW")
         .is_("connection_sent_at", "null")
         .in_("lead_batches.batch_intent", ["connect_message", "connect_only"])
-        .limit(limit)
+        .limit(max(limit * 5, limit))
     )
     if batch_id is not None:
         query = query.eq("batch_id", batch_id)
     response = query.execute()
     rows = response.data or []
-    logger.db_result("select", "leads", query_meta, len(rows))
-    return rows
+    filtered_rows: list[Dict[str, Any]] = []
+    skipped_paused = 0
+    for row in rows:
+        meta = ((row.get("profile_data") or {}).get("meta") or {})
+        if meta.get("connect_only_limit_reached") is True:
+            skipped_paused += 1
+            continue
+        filtered_rows.append(row)
+        if len(filtered_rows) >= limit:
+            break
+    logger.db_result("select", "leads", query_meta, len(filtered_rows))
+    if skipped_paused:
+        logger.info(
+            "Skipped paused connect-only leads already marked as limit reached",
+            data={"skipped": skipped_paused, "batch_id": batch_id},
+        )
+    return filtered_rows
+
+
+def connect_only_invite_limit_active(client: Client) -> Optional[str]:
+    """Return a reason string when connect-only invites should be paused."""
+    start_of_week_window = (datetime.utcnow() - timedelta(days=7)).isoformat()
+
+    recent_failed = (
+        client.table("leads")
+        .select("id, error_message, updated_at")
+        .eq("outreach_mode", "connect_only")
+        .eq("status", "FAILED")
+        .gte("updated_at", start_of_week_window)
+        .order("updated_at", desc=True)
+        .limit(10)
+        .execute()
+    ).data or []
+    if any("weekly invite limit" in str(row.get("error_message") or "").lower() for row in recent_failed):
+        return "LinkedIn weekly invite limit reached. Stop until next week."
+
+    paused = (
+        client.table("leads")
+        .select("id")
+        .eq("outreach_mode", "connect_only")
+        .eq("status", "NEW")
+        .contains("profile_data", { "meta": { "connect_only_limit_reached": True } })
+        .limit(1)
+        .execute()
+    ).data or []
+    if paused:
+        return "LinkedIn weekly invite limit reached. Some leads are paused for retry next week."
+
+    return None
 
 
 def fetch_next_lead(client: Client) -> Optional[Dict[str, Any]]:
@@ -1147,6 +1246,7 @@ def mark_message_only_processing(client: Client, lead: Dict[str, Any]) -> bool:
     if not lead_id:
         return False
 
+    has_invite_timestamp = bool(lead.get("connection_sent_at") or lead.get("connection_accepted_at"))
     logger.db_query(
         "update",
         "leads",
@@ -1154,13 +1254,19 @@ def mark_message_only_processing(client: Client, lead: Dict[str, Any]) -> bool:
         {"status": "PROCESSING", "from": list(MESSAGE_ONLY_PROCESSING_STATUSES)},
     )
     try:
-        resp = (
+        query = (
             client.table("leads")
             .update({"status": "PROCESSING", "updated_at": datetime.utcnow().isoformat()})
             .eq("id", lead_id)
-            .in_("status", list(MESSAGE_ONLY_PROCESSING_STATUSES))
-            .execute()
         )
+        if has_invite_timestamp:
+            # Invite-sent leads are selected by timestamp, so status can be stale here.
+            # Claim them by ID + sent_at guard instead of requiring status promotion first.
+            query = query.is_("sent_at", "null")
+        else:
+            query = query.in_("status", list(MESSAGE_ONLY_PROCESSING_STATUSES))
+
+        resp = query.execute()
     except Exception as exc:
         logger.warn("Failed to lock message-only lead", {"leadId": lead_id}, error=exc)
         return False
@@ -1250,34 +1356,6 @@ def mark_lead_retry_later(client: Client, lead: Dict[str, Any], error_message: s
     logger.db_result("update", "leads", {"leadId": lead_id}, 1)
     logger.warn("Lead marked for retry while connected", {"leadId": lead_id, "attempt": attempts, "error": truncated_error})
     return attempts
-
-
-async def send_connection_request(page: Page) -> bool:
-    """Try to connect if not already connected. Returns True if a request was attempted."""
-    connect = page.locator("button:has-text('Connect'), a:has-text('Connect')")
-    if await connect.count() == 0:
-        return False
-    try:
-        await connect.first.click(timeout=5_000)
-        await random_pause()
-    except Exception:
-        return False
-
-    # If modal opens, click "Send without a note" or "Send".
-    for selector in [
-        "button:has-text('Send without a note')",
-        "button:has-text('Send now')",
-        "button:has-text('Send')",
-    ]:
-        btn = page.locator(selector)
-        if await btn.count() > 0:
-            try:
-                await btn.first.click(timeout=5_000)
-                await random_pause()
-                return True
-            except Exception:
-                continue
-    return True
 
 
 async def process_one(context: BrowserContext, client: Client, lead: Dict[str, Any]) -> None:
@@ -1939,6 +2017,13 @@ async def _send_invite_with_note(page: Page, lead: Dict[str, Any], note_text: st
     if limit_reason:
         await capture_connect_failure_screenshot(page, "weekly_invite_limit_reached", lead_id)
         return "limit_reached"
+    if not await confirm_connection_request_sent(page):
+        screenshot_path = await capture_connect_failure_screenshot(page, "invite_send_unconfirmed", lead_id)
+        logger.warn(
+            "Invite-with-note send was not confirmed after click",
+            {"leadId": lead_id, "screenshot": screenshot_path},
+        )
+        return "failed"
     return "sent"
 
 
@@ -2077,11 +2162,35 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
             except Exception:
                 profile_container = page
         
-        # Look for Message link/button (for connected users)
-        message_link = profile_container.get_by_role("link", name=re.compile(r"(Message|Nachricht)", re.I))
-        message_link_count = await message_link.count()
-        
+        # Look for explicit connected-user messaging affordances first.
+        explicit_message_targets = [
+            profile_container.get_by_role("button", name=re.compile(r"(Nachricht an|Message to)", re.I)),
+            profile_container.get_by_role("link", name=re.compile(r"(Nachricht an|Message to)", re.I)),
+        ]
+        explicit_message_link = None
+        for candidate in explicit_message_targets:
+            if await candidate.count() > 0:
+                explicit_message_link = candidate
+                break
+
+        if explicit_message_link is None:
+            # Generic "Nachricht" surfaces can be Sales Navigator/InMail entry points and
+            # are not strong enough by themselves to prove acceptance.
+            message_link = profile_container.get_by_role("link", name=re.compile(r"(Message|Nachricht)", re.I))
+            message_link_count = await message_link.count()
+        else:
+            message_link = explicit_message_link
+            message_link_count = 1
+
         if message_link_count > 0:
+            if explicit_message_link is None and await _has_visible_connect_or_pending_state(profile_container):
+                logger.info(
+                    "Generic message surface is ambiguous; connect/pending state is still visible",
+                    {"leadId": lead_id},
+                )
+                await page.close()
+                return "pending"
+
             logger.debug("Found Message link - user is connected", {"leadId": lead_id})
             try:
                 message_page = await click_and_resolve_active_page(page, message_link.first)
@@ -2090,7 +2199,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                     logger.info("Nachricht opened Sales Navigator composer", {"leadId": lead_id})
                     await send_sales_navigator_message(
                         message_page,
-                        build_sales_navigator_subject(lead),
+                        build_sales_navigator_subject(lead, message),
                         message,
                     )
                 else:
@@ -2180,7 +2289,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                 return "pending"
 
             try:
-                await send_sales_navigator_message(sales_page, build_sales_navigator_subject(lead), message)
+                await send_sales_navigator_message(sales_page, build_sales_navigator_subject(lead, message), message)
                 accepted_at = datetime.utcnow().isoformat()
                 sequence_started_at = lead.get("sequence_started_at") or accepted_at
                 lead_update = {
@@ -2543,10 +2652,16 @@ async def main() -> None:
                 if not lead:
                     logger.warn("Requested lead id not found for message-only send", {"leadId": args.lead_id})
                     return
-                if lead.get("status") not in MESSAGE_ONLY_PIPELINE_STATUSES:
+                if not _is_message_only_candidate(lead):
                     logger.warn(
-                        "Requested lead is not in message-only statuses",
-                        {"leadId": args.lead_id, "status": lead.get("status")},
+                        "Requested lead is not eligible for message-only send",
+                        {
+                            "leadId": args.lead_id,
+                            "status": lead.get("status"),
+                            "connection_sent_at": lead.get("connection_sent_at"),
+                            "connection_accepted_at": lead.get("connection_accepted_at"),
+                            "sent_at": lead.get("sent_at"),
+                        },
                     )
                     return
                 leads_to_process = [lead]
@@ -2611,6 +2726,21 @@ async def main() -> None:
             return
 
         if args.send_invites:
+            limit_pause_reason = connect_only_invite_limit_active(client)
+            if limit_pause_reason:
+                logger.warn("Connect-only invite sending paused", data={"reason": limit_pause_reason})
+                logger.operation_complete(
+                    "sender-send-invites",
+                    result={
+                        "sent": 0,
+                        "failed": 0,
+                        "skipped": 0,
+                        "limit_reached": True,
+                        "total": 0,
+                    },
+                )
+                return
+
             leads_to_process = fetch_invite_queue(client, remaining, args.batch_id)
             if not leads_to_process:
                 logger.info("No NEW sequence-driven leads to invite", {"batchId": args.batch_id})
