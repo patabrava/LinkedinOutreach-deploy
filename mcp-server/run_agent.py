@@ -185,7 +185,7 @@ def sanitize_no_dashes(text: str) -> str:
         return ""
     # Replace prohibited characters (dashes, apostrophes) with spaces and collapse whitespace
     text = re.sub(r"[\-‐-―−]+", " ", text)
-    text = re.sub(r"[‘`‘’]+", " ", text)
+    text = re.sub(r"['‘`’]+", " ", text)
     text = text.replace("\n", " ").replace("\r", " ")
     text = re.sub(r" {2,}", " ", text)
     return text.strip()
