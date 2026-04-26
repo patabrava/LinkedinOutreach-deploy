@@ -29,14 +29,23 @@ def get_leads_for_generation(
     status_filter = "ENRICHED" if normalized_mode == "message" else "CONNECT_ONLY_SENT"
     outreach_filter = "message" if normalized_mode == "message" else "connect_only"
 
-    query = (
-        client.table("leads")
-        .select("*, lead_batches!inner(batch_intent)")
-        .eq("status", status_filter)
-        .eq("outreach_mode", outreach_filter)
-        .eq("lead_batches.batch_intent", "custom_outreach")
-        .limit(limit)
-    )
+    if normalized_mode == "message":
+        query = (
+            client.table("leads")
+            .select("*, lead_batches!inner(batch_intent)")
+            .eq("status", status_filter)
+            .eq("outreach_mode", outreach_filter)
+            .eq("lead_batches.batch_intent", "custom_outreach")
+            .limit(limit)
+        )
+    else:
+        query = (
+            client.table("leads")
+            .select("*")
+            .eq("status", status_filter)
+            .eq("outreach_mode", outreach_filter)
+            .limit(limit)
+        )
 
     if batch_id is not None and batch_id > 0:
         query = query.eq("batch_id", batch_id)
