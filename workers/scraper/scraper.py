@@ -2306,7 +2306,7 @@ async def enrichment_loop_mode() -> None:
         while True:
             leads = fetch_pending_leads_for_intent(client, pass_size, "custom_outreach")
             if not leads:
-                logger.info("enrichment-loop: queue empty, sleeping", data={"seconds": sleep_when_empty})
+                logger.info("enrichment-loop: queue empty, sleeping", None, {"seconds": sleep_when_empty})
                 await asyncio.sleep(sleep_when_empty)
                 continue
 
@@ -2314,16 +2314,11 @@ async def enrichment_loop_mode() -> None:
             try:
                 await ensure_linkedin_auth(context, creds)
                 for lead in leads:
-                    client.table("leads").update({"status": "PROCESSING"}).eq("id", lead.id).execute()
                     page = await context.new_page()
                     try:
                         await enrich_one(page, client, lead)
                     except Exception as exc:
                         logger.error("enrichment-loop: lead failed", {"leadId": lead.id}, error=exc)
-                        try:
-                            mark_enrich_failed(client, lead.id, reason=str(exc))
-                        except Exception:
-                            pass
                     finally:
                         try:
                             await page.close()
