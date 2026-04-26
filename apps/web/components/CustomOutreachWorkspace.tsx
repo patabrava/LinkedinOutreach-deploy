@@ -12,6 +12,7 @@ import {
   triggerDraftGeneration,
   type CustomOutreachBatchSummary,
 } from "../app/actions";
+import { CustomOutreachBatchProgress } from "./CustomOutreachBatchProgress";
 
 type DraftRow = {
   leadId: string;
@@ -370,20 +371,45 @@ export function CustomOutreachWorkspace({ batches }: Props) {
               {batches.map((batch) => {
                 const active = batch.id === selectedBatchId;
                 return (
-                  <button
-                    key={batch.id}
-                    type="button"
-                    className={`btn ${active ? "warn" : "secondary"}`}
-                    onClick={() => setSelectedBatchId(batch.id)}
-                    style={{ textAlign: "left" }}
-                  >
-                    <div style={{ display: "grid", gap: 6 }}>
-                      <strong>{batch.name}</strong>
-                      <span className="muted" style={{ fontSize: 11 }}>
-                        {batch.lead_count} leads · {batch.draft_count} drafts · {batch.approved_count} approved
-                      </span>
-                    </div>
-                  </button>
+                  <div key={batch.id} style={{ display: "grid", gap: 6 }}>
+                    <button
+                      type="button"
+                      className={`btn ${active ? "warn" : "secondary"}`}
+                      onClick={() => setSelectedBatchId(batch.id)}
+                      style={{ textAlign: "left" }}
+                    >
+                      <div style={{ display: "grid", gap: 6 }}>
+                        <strong>{batch.name}</strong>
+                        <span className="muted" style={{ fontSize: 11 }}>
+                          {batch.lead_count} leads · {batch.draft_count} drafts · {batch.approved_count} approved
+                        </span>
+                      </div>
+                    </button>
+                    <CustomOutreachBatchProgress batch={batch} />
+                    <button
+                      className="btn"
+                      type="button"
+                      onClick={async (event) => {
+                        event.stopPropagation();
+                        const res = await fetch("/api/custom-outreach/enrich-batch", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ batchId: batch.id }),
+                        });
+                        if (res.status === 409) {
+                          window.alert("Scraper already running. Wait for it to finish.");
+                          return;
+                        }
+                        if (!res.ok) {
+                          window.alert("Failed to start enrichment.");
+                          return;
+                        }
+                        router.refresh();
+                      }}
+                    >
+                      ENRICH NOW
+                    </button>
+                  </div>
                 );
               })}
             </div>
