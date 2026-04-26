@@ -79,10 +79,11 @@ export function SenderMessageOnlyControl() {
 
   useEffect(() => {
     const interval = setInterval(() => {
+      if (acting) return;
       refresh({ silent: true }).catch(() => undefined);
     }, POLL_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [refresh]);
+  }, [refresh, acting]);
 
   const start = async () => {
     setActing("start");
