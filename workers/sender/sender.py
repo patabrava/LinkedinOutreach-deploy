@@ -789,6 +789,83 @@ async def open_sales_navigator_message_surface(page: Page) -> Optional[Page]:
     return None
 
 
+async def fill_text_field(page: Page, selector_name: str, locator, value: str) -> None:
+    await locator.wait_for(state="visible", timeout=10_000)
+    await locator.click()
+    try:
+        await page.keyboard.press("Meta+A")
+        await page.keyboard.press("Backspace")
+    except Exception:
+        await page.keyboard.press("Control+A")
+        await page.keyboard.press("Backspace")
+    await human_type(page, value)
+    await page.wait_for_timeout(500)
+    actual_text = await locator.evaluate("el => el.value || el.textContent || el.innerText || ''") or ""
+    if len(actual_text.strip()) < max(1, len(value.strip()) - 2):
+        raise RuntimeError(f"{selector_name} verification failed after typing.")
+    logger.element_type(selector_name, len(value), text_preview=value[:40])
+
+
+async def send_sales_navigator_message(page: Page, subject: str, body: str) -> None:
+    safe_subject = _hard_cap_text((subject or "").strip(), 80)
+    safe_body = (body or "").strip()
+    if not safe_subject:
+        raise RuntimeError("Sales Navigator subject is empty.")
+    if not safe_body:
+        raise RuntimeError("Sales Navigator body is empty.")
+
+    subject_candidates = [
+        ("subject input:name", "input[name='subject']"),
+        ("subject input:placeholder", "input[placeholder*='Subject'], input[placeholder*='Betreff']"),
+        ("subject input:aria", "input[aria-label*='Subject'], input[aria-label*='Betreff']"),
+    ]
+    body_candidates = [
+        ("body textarea:name", "textarea[name='message']"),
+        ("body textarea:placeholder", "textarea[placeholder*='Message'], textarea[placeholder*='Nachricht']"),
+        ("body textarea:aria", "textarea[aria-label*='Message'], textarea[aria-label*='Nachricht']"),
+        ("body contenteditable", "div[role='textbox'][contenteditable='true']"),
+    ]
+
+    subject_locator = None
+    subject_selector = ""
+    for name, selector in subject_candidates:
+        candidate = page.locator(selector).first
+        if await candidate.count() > 0:
+            subject_locator = candidate
+            subject_selector = name
+            break
+    if subject_locator is None:
+        raise RuntimeError("Could not find Sales Navigator subject field.")
+
+    body_locator = None
+    body_selector = ""
+    for name, selector in body_candidates:
+        candidate = page.locator(selector).first
+        if await candidate.count() > 0:
+            body_locator = candidate
+            body_selector = name
+            break
+    if body_locator is None:
+        raise RuntimeError("Could not find Sales Navigator body field.")
+
+    await fill_text_field(page, subject_selector, subject_locator, safe_subject)
+    await fill_text_field(page, body_selector, body_locator, safe_body)
+
+    send_btn = page.locator(
+        "button:has-text('Send'):visible, "
+        "button:has-text('Senden'):visible, "
+        "button[aria-label*='Send']:visible, "
+        "button[aria-label*='Senden']:visible"
+    ).first
+    await send_btn.wait_for(state="visible", timeout=10_000)
+    if not await send_btn.is_enabled():
+        raise RuntimeError("Sales Navigator send button is disabled.")
+    await page.wait_for_timeout(800)
+    await send_btn.click()
+    logger.element_click("Sales Navigator send button", success=True)
+    await random_pause()
+
+
 async def send_message(page: Page, message: str, surface: str, draft: Optional[Dict[str, Any]] = None) -> None:
     """Send a message through the opened messaging surface.
     
