@@ -81,6 +81,8 @@ export async function POST(request: Request) {
 
     fs.mkdirSync(logsDir, { recursive: true });
     const logPath = path.join(logsDir, DAEMON_LOG_FILENAME);
+    // Raw fd (not a piped stream): pipes opened by the Next dev process die on hot reload;
+    // an inherited raw fd survives in the detached child. Do not switch to createWriteStream.
     const logFd = fs.openSync(logPath, "a");
 
     const child = spawn("bash", ["-c", loopCmd], {
