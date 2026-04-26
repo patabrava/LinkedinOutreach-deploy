@@ -296,6 +296,39 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
     return rows
 
 
+def fetch_invite_queue(client: Client, limit: int, batch_id: Optional[int] = None) -> list[Dict[str, Any]]:
+    """Fetch NEW sequence-driven leads eligible for connect-invite send.
+
+    Joins through lead_batches to filter by batch_intent so we never grab
+    custom_outreach leads (those go through the draft-review path).
+    """
+    query_meta: Dict[str, Any] = {
+        "status": "NEW",
+        "batch_intent": ["connect_message", "connect_only"],
+        "limit": limit,
+    }
+    if batch_id is not None:
+        query_meta["batch_id"] = batch_id
+    logger.db_query("select", "leads", query_meta)
+    query = (
+        client.table("leads")
+        .select(
+            "id, linkedin_url, first_name, last_name, company_name, "
+            "sequence_id, outreach_mode, batch_id, lead_batches!inner(batch_intent)"
+        )
+        .eq("status", "NEW")
+        .is_("connection_sent_at", "null")
+        .in_("lead_batches.batch_intent", ["connect_message", "connect_only"])
+        .limit(limit)
+    )
+    if batch_id is not None:
+        query = query.eq("batch_id", batch_id)
+    response = query.execute()
+    rows = response.data or []
+    logger.db_result("select", "leads", query_meta, len(rows))
+    return rows
+
+
 def fetch_next_lead(client: Client) -> Optional[Dict[str, Any]]:
     """Legacy function - fetch a single approved lead."""
     leads = fetch_approved_leads(client, 1)
@@ -2247,9 +2280,19 @@ async def main() -> None:
     parser.add_argument("--batch-id", type=int, help="Process only leads from this batch id.")
     parser.add_argument("--followup", action="store_true", help="Process APPROVED followups instead of initial outreach.")
     parser.add_argument("--message-only", action="store_true", help="Process CONNECT_ONLY_SENT leads to send messages to accepted connections.")
+    parser.add_argument(
+        "--send-invites",
+        action="store_true",
+        help="Process NEW sequence-driven leads (connect_message/connect_only) and send LinkedIn connection invites.",
+    )
     args = parser.parse_args()
 
-    mode = "followup" if args.followup else ("message_only" if args.message_only else "connect_message")
+    mode = (
+        "followup" if args.followup
+        else ("message_only" if args.message_only
+        else ("send_invites" if args.send_invites
+        else "connect_message"))
+    )
     logger.operation_start(f"sender-{mode}", input_data={"lead_id": args.lead_id, "mode": mode})
 
     try:
@@ -2396,6 +2439,23 @@ async def main() -> None:
             finally:
                 await shutdown(playwright, browser)
                 logger.info("Browser closed")
+            return
+
+        if args.send_invites:
+            leads_to_process = fetch_invite_queue(client, remaining, args.batch_id)
+            if not leads_to_process:
+                logger.info("No NEW sequence-driven leads to invite", {"batchId": args.batch_id})
+                return
+
+            logger.info(
+                f"send-invites: would process {len(leads_to_process)} leads",
+                data={"leadIds": [l.get("id") for l in leads_to_process]},
+            )
+            # Browser send wired in Task 6. For now, return after logging.
+            logger.operation_complete(
+                "sender-send-invites",
+                result={"queued": len(leads_to_process), "sent": 0, "failed": 0, "skipped": len(leads_to_process)},
+            )
             return
 
         if args.lead_id:
