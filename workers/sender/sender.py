@@ -20,6 +20,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from credential_crypto import decrypt_password
 from shared_logger import get_logger
 
+# Reuse scraper helpers for invite-send (no-note path + weekly-limit detection)
+sys.path.insert(0, str(Path(__file__).parent.parent / "scraper"))
+from scraper import (  # noqa: E402
+    Lead as ScraperLead,
+    WeeklyInviteLimitReached,
+    capture_connect_failure_screenshot,
+    detect_weekly_invite_limit,
+    send_connection_request,
+)
+
 load_dotenv()
 
 # Initialize logger
@@ -1843,6 +1853,167 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
             pass
 
 
+# ------------------------- SEND-INVITES FLOW -------------------------
+def mark_invite_processing(client: Client, lead_id: str) -> bool:
+    """Atomically claim a NEW lead for invite send. Returns False if no-op."""
+    try:
+        resp = (
+            client.table("leads")
+            .update({"status": "PROCESSING", "updated_at": datetime.utcnow().isoformat()})
+            .eq("id", lead_id)
+            .eq("status", "NEW")
+            .execute()
+        )
+    except Exception as exc:
+        logger.warn("Failed to lock invite lead", {"leadId": lead_id}, error=exc)
+        return False
+    rows = getattr(resp, "data", None) or []
+    return len(rows) > 0
+
+
+def _fetch_sequence_connect_note(client: Client, sequence_id: Any) -> str:
+    if not sequence_id:
+        return ""
+    try:
+        resp = (
+            client.table("outreach_sequences")
+            .select("connect_note")
+            .eq("id", sequence_id)
+            .single()
+            .execute()
+        )
+    except Exception as exc:
+        logger.warn("Failed to load sequence connect_note", {"sequenceId": sequence_id}, error=exc)
+        return ""
+    data = getattr(resp, "data", None) or {}
+    return str(data.get("connect_note") or "")
+
+
+async def _send_invite_with_note(page: Page, lead: Dict[str, Any], note_text: str) -> str:
+    """Open the invite-with-note dialog and send. Returns 'sent' | 'failed' | 'limit_reached'."""
+    lead_id = str(lead.get("id") or "")
+    profile_url = normalize_linkedin_profile_url(str(lead.get("linkedin_url") or ""))
+
+    try:
+        await page.goto(profile_url, wait_until="domcontentloaded", timeout=60_000)
+        await page.wait_for_selector("main", timeout=15_000)
+        await random_pause(1.0, 2.0)
+    except Exception as exc:
+        screenshot_path = await capture_connect_failure_screenshot(page, "invite_profile_load_failed", lead_id)
+        logger.error(
+            "Failed to load profile for invite-with-note",
+            {"leadId": lead_id, "url": profile_url, "screenshot": screenshot_path},
+            error=exc,
+        )
+        return "failed"
+
+    try:
+        surface = await open_message_surface(page)
+    except Exception as exc:
+        screenshot_path = await capture_connect_failure_screenshot(page, "all_paths_exhausted", lead_id)
+        logger.error(
+            "Invite surface exhausted for invite-with-note",
+            {"leadId": lead_id, "screenshot": screenshot_path},
+            error=exc,
+        )
+        return "failed"
+
+    if surface != "connect_note":
+        screenshot_path = await capture_connect_failure_screenshot(page, f"invite_unexpected_surface_{surface}", lead_id)
+        logger.warn(
+            "Invite-with-note expected connect_note surface",
+            {"leadId": lead_id, "surface": surface, "screenshot": screenshot_path},
+        )
+        return "failed"
+
+    try:
+        await send_message(page, note_text, "connect_note", None)
+    except Exception as exc:
+        screenshot_path = await capture_connect_failure_screenshot(page, "invite_send_click_failed", lead_id)
+        logger.error(
+            "Failed to send invite-with-note",
+            {"leadId": lead_id, "screenshot": screenshot_path},
+            error=exc,
+        )
+        return "failed"
+
+    limit_reason = await detect_weekly_invite_limit(page)
+    if limit_reason:
+        await capture_connect_failure_screenshot(page, "weekly_invite_limit_reached", lead_id)
+        return "limit_reached"
+    return "sent"
+
+
+async def process_invite_one(
+    context: BrowserContext,
+    client: Client,
+    lead: Dict[str, Any],
+) -> str:
+    """Render connect_note from sequence and send the LinkedIn invite.
+
+    Returns one of: 'sent', 'failed', 'limit_reached'.
+    """
+    from sequence_render import render
+
+    lead_id = str(lead.get("id") or "")
+    sequence_id = lead.get("sequence_id")
+    outreach_mode = lead.get("outreach_mode")  # "message" | "connect_only"
+
+    note_text: str = ""
+    if outreach_mode == "message":
+        template = _fetch_sequence_connect_note(client, sequence_id)
+        note_text = render(template, lead).strip()
+
+    page = await context.new_page()
+    try:
+        if outreach_mode == "message" and note_text:
+            outcome = await _send_invite_with_note(page, lead, note_text)
+        else:
+            scraper_lead = ScraperLead(
+                id=lead_id,
+                linkedin_url=str(lead.get("linkedin_url") or ""),
+                first_name=lead.get("first_name"),
+                last_name=lead.get("last_name"),
+                company_name=lead.get("company_name"),
+            )
+            try:
+                ok = await send_connection_request(page, scraper_lead)
+            except WeeklyInviteLimitReached:
+                outcome = "limit_reached"
+            else:
+                outcome = "sent" if ok else "failed"
+    finally:
+        try:
+            await page.close()
+        except Exception:
+            pass
+
+    if outcome == "sent":
+        client.table("leads").update({
+            "status": "CONNECT_ONLY_SENT",
+            "connection_sent_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }).eq("id", lead_id).execute()
+        logger.message_send_complete(lead_id, {"mode": "send-invites", "outreach_mode": outreach_mode})
+        return "sent"
+
+    if outcome == "limit_reached":
+        client.table("leads").update({
+            "status": "FAILED",
+            "error_message": "LinkedIn weekly invite limit reached",
+            "updated_at": datetime.utcnow().isoformat(),
+        }).eq("id", lead_id).execute()
+        logger.warn("Weekly invite limit reached - aborting run", {"leadId": lead_id})
+        return "limit_reached"
+
+    client.table("leads").update({
+        "status": "FAILED",
+        "error_message": "invite_send_failed",
+        "updated_at": datetime.utcnow().isoformat(),
+    }).eq("id", lead_id).execute()
+    return "failed"
+
+
 # ------------------------- MESSAGE-ONLY FLOW -------------------------
 async def process_message_only_one(context: BrowserContext, client: Client, lead: Dict[str, Any]) -> str:
     """Process a CONNECT_ONLY_SENT lead: check if connected, send message if so.
@@ -2448,14 +2619,59 @@ async def main() -> None:
                 return
 
             logger.info(
-                f"send-invites: would process {len(leads_to_process)} leads",
+                f"send-invites: processing {len(leads_to_process)} leads",
                 data={"leadIds": [l.get("id") for l in leads_to_process]},
             )
-            # Browser send wired in Task 6. For now, return after logging.
-            logger.operation_complete(
-                "sender-send-invites",
-                result={"queued": len(leads_to_process), "sent": 0, "failed": 0, "skipped": len(leads_to_process)},
-            )
+            playwright, browser, context = await open_browser(headless=False)
+            try:
+                logger.info("Browser opened, authenticating...")
+                await ensure_linkedin_auth(context, client)
+
+                sent_count = 0
+                failed_count = 0
+                skipped_count = 0
+                limit_reached = False
+
+                for lead in leads_to_process:
+                    lead_id = str(lead.get("id") or "")
+                    if not mark_invite_processing(client, lead_id):
+                        skipped_count += 1
+                        continue
+                    try:
+                        result = await process_invite_one(context, client, lead)
+                        if result == "sent":
+                            sent_count += 1
+                        elif result == "limit_reached":
+                            limit_reached = True
+                            break
+                        else:
+                            failed_count += 1
+                    except Exception as exc:
+                        logger.error("Failed to process invite lead", {"leadId": lead_id}, error=exc)
+                        failed_count += 1
+                        try:
+                            client.table("leads").update({
+                                "status": "FAILED",
+                                "error_message": f"unexpected: {exc}"[:240],
+                                "updated_at": datetime.utcnow().isoformat(),
+                            }).eq("id", lead_id).execute()
+                        except Exception:
+                            pass
+                    await random_pause(2, 4)
+
+                logger.operation_complete(
+                    "sender-send-invites",
+                    result={
+                        "sent": sent_count,
+                        "failed": failed_count,
+                        "skipped": skipped_count,
+                        "limit_reached": limit_reached,
+                        "total": len(leads_to_process),
+                    },
+                )
+            finally:
+                await shutdown(playwright, browser)
+                logger.info("Browser closed")
             return
 
         if args.lead_id:
