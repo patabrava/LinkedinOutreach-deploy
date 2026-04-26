@@ -65,6 +65,10 @@ def get_daily_enrichment_cap() -> int:
     return max(parsed_limit, 1)
 
 
+# NOTE: WeeklyInviteLimitReached, detect_weekly_invite_limit,
+# capture_connect_failure_screenshot, and send_connection_request below are
+# imported by workers/sender/sender.py for the --send-invites flow. Do not
+# delete them when removing the connect_only scraper mode.
 class WeeklyInviteLimitReached(RuntimeError):
     """Raised when LinkedIn blocks additional invites for the week."""
     pass
