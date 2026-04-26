@@ -1861,15 +1861,13 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
         if message_link_count > 0:
             logger.debug("Found Message link - user is connected", {"leadId": lead_id})
             try:
-                await message_link.first.click(timeout=8_000)
-                await page.wait_for_selector(
+                message_page = await click_and_resolve_active_page(page, message_link.first)
+                await message_page.wait_for_selector(
                     "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
                     timeout=10_000,
                 )
                 await random_pause()
-                
-                # Send the message
-                await send_message(page, message, "message")
+                await send_message(message_page, message, SURFACE_MESSAGE)
                 
                 # Mark as SENT, capture acceptance, and initialize sequence progress metadata.
                 accepted_at = datetime.utcnow().isoformat()
@@ -1943,10 +1941,77 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                     return "failed"
                 return "retry"
         else:
-            # No message button found - might still be pending or profile restricted
-            logger.info("No Message button found, connection may still be pending", {"leadId": lead_id})
-            await page.close()
-            return "pending"
+            logger.info("No normal Message button found; trying Sales Navigator fallback", {"leadId": lead_id})
+            sales_page = await open_sales_navigator_message_surface(page)
+            if sales_page is None:
+                logger.info("No Sales Navigator message surface found, connection may still be pending", {"leadId": lead_id})
+                await page.close()
+                return "pending"
+
+            try:
+                await send_sales_navigator_message(sales_page, build_sales_navigator_subject(lead), message)
+                accepted_at = datetime.utcnow().isoformat()
+                sequence_started_at = lead.get("sequence_started_at") or accepted_at
+                lead_update = {
+                    "status": "SENT",
+                    "sent_at": accepted_at,
+                    "connection_accepted_at": lead.get("connection_accepted_at") or accepted_at,
+                    "sequence_step": 1,
+                    "sequence_started_at": sequence_started_at,
+                    "sequence_last_sent_at": accepted_at,
+                    "error_message": None,
+                }
+                try:
+                    client.table("leads").update(lead_update).eq("id", lead_id).execute()
+                except Exception:
+                    fallback_update = {
+                        "status": "SENT",
+                        "sent_at": accepted_at,
+                        "connection_accepted_at": lead.get("connection_accepted_at") or accepted_at,
+                        "error_message": None,
+                    }
+                    client.table("leads").update(fallback_update).eq("id", lead_id).execute()
+
+                accepted_base = _parse_iso_datetime(accepted_at) or _utc_now()
+                try:
+                    schedule_nudge_followup(client, lead, 1, sequence_messages, accepted_base, message)
+                    interval_days = _safe_int(sequence_messages.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS)
+                    if interval_days < 1:
+                        interval_days = SEQUENCE_INTERVAL_DEFAULT_DAYS
+                    second_message = (sequence_messages.get("second_message") or "").strip()
+                    schedule_nudge_followup(
+                        client,
+                        lead,
+                        2,
+                        sequence_messages,
+                        accepted_base + timedelta(days=interval_days),
+                        second_message or message,
+                    )
+                except Exception as schedule_error:
+                    logger.warn(
+                        "Failed to schedule followups after Sales Navigator first message; keeping lead as SENT",
+                        {"leadId": lead_id},
+                        error=schedule_error,
+                    )
+                logger.message_send_complete(lead_id)
+                logger.info("Sales Navigator message sent to lead", {"leadId": lead_id})
+                await sales_page.close()
+                if page != sales_page:
+                    await page.close()
+                return "sent"
+            except Exception as exc:
+                logger.error("Failed to send Sales Navigator message", {"leadId": lead_id}, error=exc)
+                try:
+                    screenshot_path = f"/tmp/sales_nav_error_{lead_id[:8]}.png"
+                    await sales_page.screenshot(path=screenshot_path, full_page=True)
+                    logger.info(f"Sales Navigator screenshot saved to {screenshot_path}")
+                except Exception:
+                    pass
+                attempts = mark_lead_retry_later(client, lead, str(exc))
+                if attempts >= LEAD_MESSAGE_ONLY_MAX_RETRIES:
+                    mark_failed(client, lead_id, f"Retry limit reached: {str(exc)}")
+                    return "failed"
+                return "retry"
             
     except Exception as e:
         logger.error("Error processing message-only lead", {"leadId": lead_id}, error=e)
