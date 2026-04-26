@@ -470,6 +470,12 @@ export type CustomOutreachBatchSummary = {
   lead_count: number;
   draft_count: number;
   approved_count: number;
+  // Per-status counts for the progress card.
+  new_count: number;
+  enriched_count: number;
+  draft_ready_count: number;
+  sent_count: number;
+  failed_count: number;
 };
 
 export async function fetchCustomOutreachBatchSummaries(): Promise<CustomOutreachBatchSummary[]> {
@@ -490,30 +496,31 @@ export async function fetchCustomOutreachBatchSummaries(): Promise<CustomOutreac
 
   const summaries = await Promise.all(
     (batches || []).map(async (batch) => {
-      const [leadCountResult, draftCountResult, approvedCountResult] = await Promise.all([
-        client
-          .from("leads")
-          .select("id", { count: "exact", head: true })
-          .eq("batch_id", batch.id),
-        client
-          .from("leads")
-          .select("id", { count: "exact", head: true })
-          .eq("batch_id", batch.id)
-          .in("status", ["DRAFT_READY", "APPROVED"]),
-        client
-          .from("leads")
-          .select("id", { count: "exact", head: true })
-          .eq("batch_id", batch.id)
-          .eq("status", "APPROVED"),
-      ]);
+      const { data: statusRows, error: statusErr } = await client
+        .from("leads")
+        .select("status")
+        .eq("batch_id", batch.id);
+      if (statusErr) throw statusErr;
+
+      const counts: Record<string, number> = {};
+      for (const row of statusRows ?? []) {
+        counts[row.status] = (counts[row.status] ?? 0) + 1;
+      }
+      const total = (statusRows ?? []).length;
 
       return {
         id: batch.id,
         name: batch.name,
         batch_intent: "custom_outreach" as const,
-        lead_count: leadCountResult.count || 0,
-        draft_count: draftCountResult.count || 0,
-        approved_count: approvedCountResult.count || 0,
+        lead_count: total,
+        // legacy aggregates kept for unchanged consumers
+        draft_count: (counts["DRAFT_READY"] ?? 0) + (counts["APPROVED"] ?? 0),
+        approved_count: counts["APPROVED"] ?? 0,
+        new_count: counts["NEW"] ?? 0,
+        enriched_count: counts["ENRICHED"] ?? 0,
+        draft_ready_count: counts["DRAFT_READY"] ?? 0,
+        sent_count: counts["SENT"] ?? 0,
+        failed_count: (counts["FAILED"] ?? 0) + (counts["ENRICH_FAILED"] ?? 0),
       };
     })
   );
