@@ -22,6 +22,7 @@ def supabase_client() -> Client:
 def get_leads_for_generation(
     client: Client,
     mode: str = "connect_message",
+    batch_id: Optional[int] = None,
     limit: int = 20,
 ) -> List[Dict[str, Any]]:
     normalized_mode = "connect_only" if mode == "connect_only" else "message"
@@ -35,6 +36,9 @@ def get_leads_for_generation(
         .eq("outreach_mode", outreach_filter)
         .limit(limit)
     )
+
+    if batch_id is not None and batch_id > 0:
+        query = query.eq("batch_id", batch_id)
 
     resp = query.execute()
     return resp.data or []

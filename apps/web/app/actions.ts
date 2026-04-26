@@ -7,8 +7,8 @@ import { revalidatePath } from "next/cache";
 
 import { logger } from "../lib/logger";
 import { encryptLinkedinPassword } from "../lib/credentialCrypto";
-import type { OutreachMode } from "../lib/outreachModes";
-import { normalizeOutreachMode, OUTREACH_MODE_TO_DB } from "../lib/outreachModes";
+import type { BatchIntent, OutreachMode } from "../lib/outreachModes";
+import { BATCH_INTENT_LABELS, normalizeBatchIntent, normalizeOutreachMode, OUTREACH_MODE_TO_DB } from "../lib/outreachModes";
 import type { PromptType } from "../lib/promptTypes";
 import { validateSequencePlaceholdersByField } from "../lib/sequencePlaceholders";
 import { isSupabaseAdminConfigured, supabaseAdmin } from "../lib/supabaseAdmin";
@@ -22,6 +22,8 @@ type DraftInput = {
   cta: string;
   ctaType?: string;
   outreachMode?: OutreachMode;
+  batchId?: number;
+  skipSend?: boolean;
 };
 
 const CONNECT_MESSAGE_FEED_STATUSES = ["DRAFT_READY", "APPROVED"] as const;
@@ -79,7 +81,8 @@ function spawnTrackedWorker({
 function startDraftAgent(
   correlationId: string | undefined,
   promptType: PromptType = 1,
-  outreachMode: OutreachMode = "connect_message"
+  outreachMode: OutreachMode = "connect_message",
+  batchId?: number | null
 ) {
   try {
     const repoRoot = path.resolve(process.cwd(), "..", "..");
@@ -96,6 +99,9 @@ function startDraftAgent(
       "--mode",
       outreachMode === "connect_only" ? "connect_only" : "connect_message",
     ];
+    if (Number.isFinite(batchId) && (batchId || 0) > 0) {
+      args.push("--batch-id", String(batchId));
+    }
 
     logger.workerSpawn(
       "draft-agent",
@@ -151,8 +157,8 @@ async function assertConnectOnlyLaunchReadiness(correlationId: string) {
   );
 }
 
-export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_message") {
-  const correlationId = logger.actionStart("fetchDraftFeed", {}, { outreachMode });
+export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_message", batchId?: number) {
+  const correlationId = logger.actionStart("fetchDraftFeed", {}, { outreachMode, batchId: batchId ?? null });
 
   // Message-only mode surfaces pending connections plus message-only draft stages
   // Connect+message mode shows standard DRAFT_READY/APPROVED leads
@@ -165,15 +171,19 @@ export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_messa
   try {
     const client = supabaseAdmin();
 
-    logger.dbQuery("select", "leads", { correlationId }, { status: statusList, outreachMode: dbOutreachMode, limit: 50 });
+    logger.dbQuery("select", "leads", { correlationId }, { status: statusList, outreachMode: dbOutreachMode, batchId: batchId ?? null, limit: 50 });
 
     let query = client
       .from("leads")
-      .select("id, linkedin_url, first_name, last_name, company_name, status, sent_at, sequence_id, batch_id, batch:lead_batches(id, name, sequence_id), sequence:outreach_sequences(id, name), profile_data, recent_activity, drafts(*)")
+      .select("id, linkedin_url, first_name, last_name, company_name, status, sent_at, sequence_id, batch_id, batch:lead_batches(id, name, sequence_id, batch_intent), sequence:outreach_sequences(id, name), profile_data, recent_activity, drafts(*)")
       .in("status", statusList)
       .order("updated_at", { ascending: false })
       .limit(50)
       .eq("outreach_mode", dbOutreachMode);
+
+    if (Number.isFinite(batchId) && (batchId || 0) > 0) {
+      query = query.eq("batch_id", batchId);
+    }
 
     const { data, error } = await query;
 
@@ -217,6 +227,7 @@ export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_messa
           batchId: lead.batch_id ?? batch?.id ?? null,
           batchSequenceId: batch?.sequence_id ?? null,
           batchName: batch?.name || null,
+          batchIntent: batch?.batch_intent || null,
         }));
       }
 
@@ -243,6 +254,7 @@ export async function fetchDraftFeed(outreachMode: OutreachMode = "connect_messa
           batchId: lead.batch_id ?? batch?.id ?? null,
           batchSequenceId: batch?.sequence_id ?? null,
           batchName: batch?.name || null,
+          batchIntent: batch?.batch_intent || null,
         }];
       }
 
@@ -415,6 +427,7 @@ export type LeadBatchRow = {
   id: number;
   name: string;
   source: string;
+  batch_intent: BatchIntent;
   sequence_id: number | null;
   created_at: string;
   updated_at: string;
@@ -442,12 +455,70 @@ export async function fetchLeadBatches(): Promise<LeadBatchRow[]> {
   const client = supabaseAdmin();
   const { data, error } = await client
     .from("lead_batches")
-    .select("id, name, source, sequence_id, created_at, updated_at")
+    .select("id, name, source, batch_intent, sequence_id, created_at, updated_at")
     .order("created_at", { ascending: true });
   if (error) {
     throw error;
   }
   return (data || []) as LeadBatchRow[];
+}
+
+export type CustomOutreachBatchSummary = {
+  id: number;
+  name: string;
+  batch_intent: "custom_outreach";
+  lead_count: number;
+  draft_count: number;
+  approved_count: number;
+};
+
+export async function fetchCustomOutreachBatchSummaries(): Promise<CustomOutreachBatchSummary[]> {
+  if (!isSupabaseAdminConfigured()) {
+    return [];
+  }
+
+  const client = supabaseAdmin();
+  const { data: batches, error } = await client
+    .from("lead_batches")
+    .select("id, name, batch_intent, created_at")
+    .eq("batch_intent", "custom_outreach")
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw error;
+  }
+
+  const summaries = await Promise.all(
+    (batches || []).map(async (batch) => {
+      const [leadCountResult, draftCountResult, approvedCountResult] = await Promise.all([
+        client
+          .from("leads")
+          .select("id", { count: "exact", head: true })
+          .eq("batch_id", batch.id),
+        client
+          .from("leads")
+          .select("id", { count: "exact", head: true })
+          .eq("batch_id", batch.id)
+          .in("status", ["DRAFT_READY", "APPROVED"]),
+        client
+          .from("leads")
+          .select("id", { count: "exact", head: true })
+          .eq("batch_id", batch.id)
+          .eq("status", "APPROVED"),
+      ]);
+
+      return {
+        id: batch.id,
+        name: batch.name,
+        batch_intent: "custom_outreach" as const,
+        lead_count: leadCountResult.count || 0,
+        draft_count: draftCountResult.count || 0,
+        approved_count: approvedCountResult.count || 0,
+      };
+    })
+  );
+
+  return summaries;
 }
 
 export async function saveOutreachSequence(input: {
@@ -914,13 +985,18 @@ export async function triggerInboxScan() {
  *   2 = Vernetzung Thank-You
  *   3 = Process Optimization
  */
-export async function triggerDraftGeneration(promptType: PromptType = 1, outreachMode: OutreachMode = "connect_message") {
-  const correlationId = logger.actionStart("triggerDraftGeneration", {}, { promptType, outreachMode });
+export async function triggerDraftGeneration(
+  promptType: PromptType = 1,
+  outreachMode: OutreachMode = "connect_message",
+  batchId?: number
+) {
+  const correlationId = logger.actionStart("triggerDraftGeneration", {}, { promptType, outreachMode, batchId: batchId ?? null });
   if (outreachMode === "connect_only") {
     await assertConnectOnlyLaunchReadiness(correlationId);
   }
-  startDraftAgent(undefined, promptType, outreachMode);
-  logger.actionComplete("triggerDraftGeneration", { correlationId }, { promptType, outreachMode });
+  startDraftAgent(undefined, promptType, outreachMode, batchId);
+  revalidatePath("/custom-outreach");
+  logger.actionComplete("triggerDraftGeneration", { correlationId }, { promptType, outreachMode, batchId: batchId ?? null });
 }
 
 /**
@@ -1040,6 +1116,7 @@ export async function sendLeadNow(leadId: string, outreachMode: OutreachMode = "
     throw err;
   } finally {
     revalidatePath("/");
+    revalidatePath("/custom-outreach");
   }
 }
 
@@ -1077,6 +1154,7 @@ export async function sendAllApproved(outreachMode: OutreachMode = "connect_mess
     logger.error("sendAllApproved error", { correlationId }, err);
   } finally {
     revalidatePath("/");
+    revalidatePath("/custom-outreach");
   }
   return { senderTriggered };
 }
@@ -1146,6 +1224,19 @@ export async function approveDraft(input: DraftInput) {
 
   try {
     const client = supabaseAdmin();
+    if (Number.isFinite(input.batchId) && (input.batchId || 0) > 0) {
+      const { data: leadRow, error: leadLookupError } = await client
+        .from("leads")
+        .select("id, batch_id")
+        .eq("id", input.leadId)
+        .maybeSingle();
+      if (leadLookupError) {
+        throw leadLookupError;
+      }
+      if (leadRow && leadRow.batch_id !== input.batchId) {
+        throw new Error("Lead does not belong to the selected batch.");
+      }
+    }
 
     // Check daily send limit (enforce minimum of 100 even if env is set lower)
     const parsedEnvLimit = parseInt(process.env.DAILY_SEND_LIMIT || "", 10);
@@ -1200,7 +1291,7 @@ export async function approveDraft(input: DraftInput) {
     logger.dbResult("update", "leads", { correlationId, leadId: input.leadId });
 
     // Fire-and-forget: trigger the sender worker for connect_message approvals only.
-    if (mode === "connect_message") {
+    if (mode === "connect_message" && !input.skipSend) {
       try {
         const repoRoot = path.resolve(process.cwd(), "..", "..");
         const senderDir = path.resolve(repoRoot, "workers", "sender");
@@ -1232,6 +1323,7 @@ export async function approveDraft(input: DraftInput) {
     }
 
     revalidatePath("/");
+    revalidatePath("/custom-outreach");
     logger.actionComplete("approveDraft", { correlationId, leadId: input.leadId });
   } catch (error: any) {
     logger.actionError("approveDraft", { correlationId, leadId: input.leadId }, error, input);
@@ -1239,8 +1331,8 @@ export async function approveDraft(input: DraftInput) {
   }
 }
 
-export async function approveAndSendAllDrafts(outreachMode: OutreachMode = "connect_message") {
-  const correlationId = logger.actionStart("approveAndSendAllDrafts", {}, { outreachMode });
+export async function approveAndSendAllDrafts(outreachMode: OutreachMode = "connect_message", batchId?: number) {
+  const correlationId = logger.actionStart("approveAndSendAllDrafts", {}, { outreachMode, batchId: batchId ?? null });
   const isMessageOnly = outreachMode === "connect_only";
   const dbOutreachMode = OUTREACH_MODE_TO_DB[outreachMode];
   const draftingStatus = isMessageOnly ? "MESSAGE_ONLY_READY" : "DRAFT_READY";
@@ -1249,15 +1341,19 @@ export async function approveAndSendAllDrafts(outreachMode: OutreachMode = "conn
   try {
     const client = supabaseAdmin();
 
-    logger.dbQuery("select", "leads", { correlationId }, { status: draftingStatus, outreachMode: dbOutreachMode });
+    logger.dbQuery("select", "leads", { correlationId }, { status: draftingStatus, outreachMode: dbOutreachMode, batchId: batchId ?? null });
 
-    const { data, error } = await client
+    let query = client
       .from("leads")
-      .select(
-        "id, drafts(id, opener, body_text, cta_text, cta_type, created_at)"
-      )
+      .select("id, drafts(id, opener, body_text, cta_text, cta_type, created_at)")
       .eq("status", draftingStatus)
       .eq("outreach_mode", dbOutreachMode);
+
+    if (Number.isFinite(batchId) && (batchId || 0) > 0) {
+      query = query.eq("batch_id", batchId);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       logger.error("Failed to load drafts for bulk approval", { correlationId }, error);
@@ -1339,6 +1435,9 @@ export async function approveAndSendAllDrafts(outreachMode: OutreachMode = "conn
         const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
         const execToUse = pythonExec;
         const args = outreachMode === "connect_only" ? [senderPath, "--message-only"] : [senderPath];
+        if (Number.isFinite(batchId) && (batchId || 0) > 0) {
+          args.push("--batch-id", String(batchId));
+        }
 
         logger.workerSpawn("sender", args, { correlationId, approvedCount, outreachMode });
 
@@ -1359,11 +1458,13 @@ export async function approveAndSendAllDrafts(outreachMode: OutreachMode = "conn
     }
 
     revalidatePath("/");
+    revalidatePath("/custom-outreach");
     logger.actionComplete("approveAndSendAllDrafts", { correlationId }, {
       approvedCount,
       attempted: leads.length,
       senderTriggered,
       outreachMode,
+      batchId: batchId ?? null,
     });
 
     return {
@@ -1372,6 +1473,7 @@ export async function approveAndSendAllDrafts(outreachMode: OutreachMode = "conn
       errors,
       senderTriggered,
       outreachMode,
+      batchId: batchId ?? null,
     };
   } catch (error: any) {
     logger.actionError("approveAndSendAllDrafts", { correlationId }, error);
@@ -1387,6 +1489,7 @@ export async function rejectDraft(leadId: string) {
     throw error;
   }
   revalidatePath("/");
+  revalidatePath("/custom-outreach");
 }
 
 export async function regenerateDraft(leadId: string, outreachMode: OutreachMode = "connect_message") {
@@ -1410,6 +1513,7 @@ export async function regenerateDraft(leadId: string, outreachMode: OutreachMode
 
   startDraftAgent(correlationId, 1, outreachMode);
   revalidatePath("/");
+  revalidatePath("/custom-outreach");
   logger.actionComplete("regenerateDraft", { correlationId, leadId });
 }
 
@@ -1423,10 +1527,11 @@ type LeadCsvRow = {
 export async function importLeads(
   rows: LeadCsvRow[],
   fileName?: string,
-  outreachMode: OutreachMode = "connect_message"
+  batchIntent: BatchIntent = "connect_message"
 ) {
   if (!rows?.length) return { inserted: 0 };
-  const normalizedMode = normalizeOutreachMode(outreachMode);
+  const normalizedIntent = normalizeBatchIntent(batchIntent);
+  const normalizedMode = normalizedIntent === "custom_outreach" ? "connect_message" : normalizeOutreachMode(normalizedIntent);
   const dbOutreachMode = OUTREACH_MODE_TO_DB[normalizedMode];
   const sanitized = rows
     .map((row) => ({
@@ -1434,19 +1539,17 @@ export async function importLeads(
       first_name: row.first_name?.trim() || null,
       last_name: row.last_name?.trim() || null,
       company_name: row.company_name?.trim() || null,
-      status: "NEW",
+      status: normalizedIntent === "custom_outreach" ? "ENRICHED" : "NEW",
       outreach_mode: dbOutreachMode,
     }))
     .filter((row) => row.linkedin_url);
   if (!sanitized.length) return { inserted: 0 };
 
   const client = supabaseAdmin();
-  const batchName = `${fileName?.trim() || "CSV batch"} (${ 
-    normalizedMode === "connect_only" ? "Connect Only" : "Connect + Message"
-  })`;
+  const batchName = `${fileName?.trim() || "CSV batch"} (${BATCH_INTENT_LABELS[normalizedIntent]})`;
   let sequenceId: number | null = null;
 
-  if (normalizedMode === "connect_only") {
+  if (normalizedIntent === "connect_only") {
     const { data: seededSequence, error: seededSequenceError } = await client
       .from("outreach_sequences")
       .select("id")
@@ -1485,8 +1588,9 @@ export async function importLeads(
     .insert({
       name: batchName,
       source: "csv_upload",
+      batch_intent: normalizedIntent,
       // Repo rule: imported leads inherit `batch_id` and `sequence_id` together.
-      // Even connect-only batches carry a sequence_id so the lead record is consistent.
+      // Even custom and connect-only batches carry a sequence_id so the lead record is consistent.
       sequence_id: sequenceId,
     })
     .select("id")
@@ -1525,6 +1629,7 @@ export async function importLeads(
   try {
     revalidatePath("/");
     revalidatePath("/leads");
+    revalidatePath("/custom-outreach");
   } catch (error) {
     console.warn("importLeads revalidate skipped", error);
   }
