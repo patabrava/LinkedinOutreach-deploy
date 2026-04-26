@@ -222,57 +222,20 @@ def fetch_new_leads(
 
     logger.db_query("select", "leads", query_meta)
 
-    # In connect_only mode, retry previously enriched-but-unsent leads first.
-    # This keeps invite throughput high while preserving the existing send flow.
-    if outreach_mode == "connect_only":
-        query_meta["status"] = "ENRICHED+NEW (unsent)"
+    query = (
+        client.table("leads")
+        .select("id, linkedin_url, first_name, last_name, company_name")
+        .eq("status", "NEW")
+        .limit(limit)
+    )
 
-        enriched_resp = (
-            client.table("leads")
-            .select("id, linkedin_url, first_name, last_name, company_name")
-            .eq("outreach_mode", "connect_only")
-            .eq("status", "ENRICHED")
-            .is_("connection_sent_at", "null")
-            .limit(limit)
-        )
-        if sequence_id is not None:
-            enriched_resp = enriched_resp.eq("sequence_id", sequence_id)
-        enriched_resp = enriched_resp.execute()
+    if outreach_mode:
+        query = query.eq("outreach_mode", outreach_mode)
+    if sequence_id is not None:
+        query = query.eq("sequence_id", sequence_id)
 
-        enriched_rows = enriched_resp.data or []
-        remaining = max(0, limit - len(enriched_rows))
-        new_rows: List[Dict[str, Any]] = []
-
-        if remaining > 0:
-            new_resp = (
-                client.table("leads")
-                .select("id, linkedin_url, first_name, last_name, company_name")
-                .eq("outreach_mode", "connect_only")
-                .eq("status", "NEW")
-                .is_("connection_sent_at", "null")
-                .limit(remaining)
-            )
-            if sequence_id is not None:
-                new_resp = new_resp.eq("sequence_id", sequence_id)
-            new_resp = new_resp.execute()
-            new_rows = new_resp.data or []
-
-        leads = [Lead(**row) for row in [*enriched_rows, *new_rows]]
-    else:
-        query = (
-            client.table("leads")
-            .select("id, linkedin_url, first_name, last_name, company_name")
-            .eq("status", "NEW")
-            .limit(limit)
-        )
-
-        if outreach_mode:
-            query = query.eq("outreach_mode", outreach_mode)
-        if sequence_id is not None:
-            query = query.eq("sequence_id", sequence_id)
-
-        resp = query.execute()
-        leads = [Lead(**row) for row in resp.data or []]
+    resp = query.execute()
+    leads = [Lead(**row) for row in resp.data or []]
 
     logger.db_result("select", "leads", query_meta, len(leads))
     logger.info(
@@ -1187,79 +1150,6 @@ def mark_enrich_failed(client: Client, lead_id: str, reason: Optional[str] = Non
     logger.warn("Lead marked ENRICH_FAILED", {"leadId": lead_id}, error=reason)
 
 
-def mark_connect_sent(client: Client, lead_id: str) -> None:
-    """Mark a lead as CONNECT_ONLY_SENT and capture timestamp."""
-    now_iso = datetime.datetime.utcnow().isoformat()
-    logger.db_query(
-        "update",
-        "leads",
-        {"leadId": lead_id},
-        {"status": "CONNECT_ONLY_SENT", "connection_sent_at": now_iso},
-    )
-    client.table("leads").update(
-        {
-            "status": "CONNECT_ONLY_SENT",
-            "connection_sent_at": now_iso,
-        }
-    ).eq("id", lead_id).execute()
-    try:
-        update_profile_meta(client, lead_id, None, {"connect_only_limit_reached": False})
-    except Exception:
-        pass
-    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
-    logger.info("Lead marked CONNECT_ONLY_SENT", {"leadId": lead_id})
-
-
-def mark_connect_failed(client: Client, lead_id: str, reason: Optional[str] = None) -> None:
-    """Mark a lead as FAILED so connect-only retries do not stall in PROCESSING."""
-    now_iso = datetime.datetime.utcnow().isoformat()
-    logger.db_query(
-        "update",
-        "leads",
-        {"leadId": lead_id},
-        {"status": "FAILED", "reason": (reason or "")[:240]},
-    )
-    update_data = {"status": "FAILED", "updated_at": now_iso}
-    if reason:
-        update_data["error_message"] = reason[:500]
-    client.table("leads").update(update_data).eq("id", lead_id).execute()
-    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
-    logger.warn("Lead marked FAILED", {"leadId": lead_id}, error=reason)
-
-
-def requeue_connect_only_limit_hit(client: Client, lead_id: str, reason: Optional[str] = None) -> None:
-    """Return a blocked invite to the NEW queue and remember why it was paused."""
-    now_iso = datetime.datetime.utcnow().isoformat()
-    logger.db_query(
-        "update",
-        "leads",
-        {"leadId": lead_id},
-        {"status": "NEW", "error_message": (reason or "")[:240]},
-    )
-    update_data = {
-        "status": "NEW",
-        "updated_at": now_iso,
-        "connection_sent_at": None,
-        "error_message": None,
-    }
-    client.table("leads").update(update_data).eq("id", lead_id).execute()
-    try:
-        update_profile_meta(
-            client,
-            lead_id,
-            None,
-            {
-                "connect_only_limit_reached": True,
-                "connect_only_limit_reached_at": now_iso,
-                "connect_only_limit_reached_reason": reason or "Weekly invite limit reached",
-            },
-        )
-    except Exception:
-        pass
-    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
-    logger.warn("Lead requeued to NEW after weekly invite limit", {"leadId": lead_id}, error=reason)
-
-
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 async def enrich_one(page: Page, client: Client, lead: Lead) -> None:
     logger.scrape_start(lead.id, lead.linkedin_url)
@@ -1293,7 +1183,7 @@ async def enrich_one(page: Page, client: Client, lead: Lead) -> None:
         raise
 
 
-async def process_batch(context: BrowserContext, client: Client, leads: List[Lead], mode: str = "enrich") -> None:
+async def process_batch(context: BrowserContext, client: Client, leads: List[Lead]) -> None:
     for lead in leads:
         logger.info(f"Processing lead {lead.id}", {"leadId": lead.id}, {"url": lead.linkedin_url})
         logger.db_query("update", "leads", {"leadId": lead.id}, {"status": "PROCESSING"})
@@ -1301,51 +1191,14 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
 
         page = await context.new_page()
         try:
-            if mode == "connect_only":
-                try:
-                    sent = await send_connection_request(page, lead)
-                    if sent:
-                        mark_connect_sent(client, lead.id)
-                        logger.info(
-                            f"Connection request sent to {lead.id}",
-                            {"leadId": lead.id},
-                            {"mode": mode},
-                        )
-                    else:
-                        mark_connect_failed(client, lead.id, reason="No connect button or invite dialog exhausted.")
-                        logger.info(
-                            f"No connect button for {lead.id}",
-                            {"leadId": lead.id},
-                            {"mode": mode},
-                        )
-                except Exception as exc:
-                    if isinstance(exc, WeeklyInviteLimitReached):
-                        requeue_connect_only_limit_hit(client, lead.id, reason=str(exc))
-                        logger.warn(
-                            f"Connection request blocked by weekly invite limit for {lead.id}",
-                            {"leadId": lead.id},
-                            error=exc,
-                        )
-                        raise
-                    mark_connect_failed(client, lead.id, reason=str(exc))
-                    logger.warn(
-                        f"Connection request failed for {lead.id}",
-                        {"leadId": lead.id},
-                        error=exc,
-                    )
-            else:
-                await enrich_one(page, client, lead)
-                logger.info(f"Lead {lead.id} enriched successfully", {"leadId": lead.id})
+            await enrich_one(page, client, lead)
+            logger.info(f"Lead {lead.id} enriched successfully", {"leadId": lead.id})
         except TimeoutError as exc:
-            logger.error(f"Timeout processing {lead.id}", {"leadId": lead.id, "mode": mode}, error=exc)
-            if mode != "connect_only":
-                mark_enrich_failed(client, lead.id, reason=f"Timeout: {exc}")
+            logger.error(f"Timeout processing {lead.id}", {"leadId": lead.id}, error=exc)
+            mark_enrich_failed(client, lead.id, reason=f"Timeout: {exc}")
         except Exception as exc:
-            logger.error(f"Failed to process {lead.id}", {"leadId": lead.id, "mode": mode}, error=exc)
-            if mode == "connect_only" and isinstance(exc, WeeklyInviteLimitReached):
-                raise
-            if mode != "connect_only":
-                mark_enrich_failed(client, lead.id, reason=str(exc))
+            logger.error(f"Failed to process {lead.id}", {"leadId": lead.id}, error=exc)
+            mark_enrich_failed(client, lead.id, reason=str(exc))
         finally:
             try:
                 await page.close()
@@ -1355,9 +1208,9 @@ async def process_batch(context: BrowserContext, client: Client, leads: List[Lea
         await random_pause()
 
 
-async def main(limit: int = 0, mode: str = "enrich", sequence_id: Optional[int] = None, batch_intent: Optional[str] = None) -> None:
-    operation_name = "connect-only" if mode == "connect_only" else "enrichment"
-    logger.operation_start(operation_name, input_data={"limit": limit, "mode": mode, "sequence_id": sequence_id, "batch_intent": batch_intent})
+async def main(limit: int = 0, sequence_id: Optional[int] = None, batch_intent: Optional[str] = None) -> None:
+    operation_name = "enrichment"
+    logger.operation_start(operation_name, input_data={"limit": limit, "sequence_id": sequence_id, "batch_intent": batch_intent})
 
     try:
         client = get_supabase_client()
@@ -1375,15 +1228,14 @@ async def main(limit: int = 0, mode: str = "enrich", sequence_id: Optional[int] 
             logger.info("No quota left for today")
             return
 
-        os.environ["SCRAPER_MODE"] = mode
+        os.environ["SCRAPER_MODE"] = "enrich"
         if batch_intent:
             leads = fetch_pending_leads_for_intent(client, effective_limit, batch_intent)
         else:
-            outreach_filter = "connect_only" if mode == "connect_only" else None
             leads = fetch_new_leads(
                 client,
                 limit=effective_limit,
-                outreach_mode=outreach_filter,
+                outreach_mode=None,
                 sequence_id=sequence_id,
             )
         if not leads:
@@ -1396,15 +1248,15 @@ async def main(limit: int = 0, mode: str = "enrich", sequence_id: Optional[int] 
             await ensure_linkedin_auth(context, creds)
             logger.info(
                 f"Starting batch processing of {len(leads)} leads",
-                data={"count": len(leads), "mode": mode},
+                data={"count": len(leads)},
             )
-            await process_batch(context, client, leads, mode=mode)
+            await process_batch(context, client, leads)
             logger.operation_complete(operation_name, result={"processed": len(leads)})
         finally:
             await shutdown(playwright, browser)
             logger.info("Browser closed")
     except Exception as exc:
-        logger.operation_error(operation_name, error=exc, input_data={"limit": limit, "mode": mode, "sequence_id": sequence_id, "batch_intent": batch_intent})
+        logger.operation_error(operation_name, error=exc, input_data={"limit": limit, "sequence_id": sequence_id, "batch_intent": batch_intent})
         raise
 
 
@@ -1534,13 +1386,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Maximum number of leads to process in a single run; 0 means no limit (process all).",
-    )
-    parser.add_argument(
-        "--mode",
-        type=str,
-        choices=["enrich", "connect_only"],
-        default="enrich",
-        help="Execution mode: enrich (default) or connect_only for enrichment + invite without note.",
     )
     parser.add_argument(
         "--sequence-id",
@@ -2460,14 +2305,13 @@ if __name__ == "__main__":
         print("Scraper invoked without --run flag. Exiting without processing leads.")
         sys.exit(0)
 
-    # Dispatch based on mode / inbox flag
+    # Dispatch based on inbox flag
     if getattr(args, "inbox", False):
         # For inbox scans, limit=0 means "no limit" (all SENT leads)
         limit = args.limit if isinstance(args.limit, int) and args.limit >= 0 else 0
         asyncio.run(inbox_mode(limit=limit))
     else:
         limit = args.limit if isinstance(args.limit, int) and args.limit >= 0 else 0
-        mode = getattr(args, "mode", "enrich")
         sequence_id = args.sequence_id if isinstance(args.sequence_id, int) and args.sequence_id > 0 else None
         batch_intent = getattr(args, "batch_intent", None)
-        asyncio.run(main(limit=limit, mode=mode, sequence_id=sequence_id, batch_intent=batch_intent))
+        asyncio.run(main(limit=limit, sequence_id=sequence_id, batch_intent=batch_intent))
