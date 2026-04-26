@@ -40,16 +40,16 @@ export async function POST(request: Request) {
       );
     }
 
-    const { limit, sequenceId } = (await request.json().catch(() => ({}))) as { limit?: number; sequenceId?: number };
-    const limitArg = typeof limit === "number" && limit > 0 ? ["--limit", String(limit)] : [];
-    const sequenceArg = typeof sequenceId === "number" && sequenceId > 0 ? ["--sequence-id", String(sequenceId)] : [];
+    const { batchId } = (await request.json().catch(() => ({}))) as { batchId?: number };
+    const batchArg = typeof batchId === "number" && batchId > 0 ? ["--batch-id", String(batchId)] : [];
 
-    const args = ["scraper.py", "--run", ...sequenceArg, ...limitArg];
-    logger.workerSpawn("scraper", args, { correlationId, limit, sequenceId });
+    const senderDir = path.join(repoRoot, "workers", "sender");
+    const args = ["sender.py", "--send-invites", ...batchArg];
+    logger.workerSpawn("sender", args, { correlationId, batchId });
 
-    const logPath = path.join(repoRoot, ".logs", "scraper-spawn.log");
+    const logPath = path.join(repoRoot, ".logs", "sender-spawn.log");
     const child = spawn(pythonCmd, args, {
-      cwd: scraperDir,
+      cwd: senderDir,
       env: { ...process.env, CORRELATION_ID: correlationId },
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
@@ -61,7 +61,7 @@ export async function POST(request: Request) {
     mirrorWorkerOutput(child.stdout, "info", correlationId, "stdout");
     mirrorWorkerOutput(child.stderr, "warn", correlationId, "stderr");
     child.on("exit", (code, signal) => {
-      logger.info("Scraper exited", { correlationId, pid: child.pid }, { code, signal });
+      logger.info("Sender exited", { correlationId, pid: child.pid }, { code, signal });
       fileStream.end();
     });
     child.unref();
@@ -69,17 +69,17 @@ export async function POST(request: Request) {
     persistScraperPid(child, pidFile);
     trackWorkerChild({
       child,
-      kind: "scraper_outreach",
+      kind: "sender_outreach",
       label: "Invitation outreach",
       args,
     });
 
-    logger.info("Scraper process started successfully", { correlationId, pid: child.pid });
+    logger.info("Sender process started successfully", { correlationId, pid: child.pid });
     logger.apiResponse("POST", "/api/enrich", 200, { correlationId });
-    
-    return NextResponse.json({ ok: true, message: "Scraper started. Watch .logs/scraper.log for progress." });
+
+    return NextResponse.json({ ok: true, message: "Sender started. Watch .logs/sender-spawn.log for progress." });
   } catch (err: any) {
-    logger.error("Failed to start scraper", { correlationId }, err);
+    logger.error("Failed to start sender", { correlationId }, err);
     logger.apiResponse("POST", "/api/enrich", 500, { correlationId });
     return NextResponse.json({ ok: false, error: err?.message || "Unknown error" }, { status: 500 });
   }
