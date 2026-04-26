@@ -545,6 +545,32 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
         result["followup_interval_days"] = SEQUENCE_INTERVAL_DEFAULT_DAYS
     return result
 
+
+async def click_and_resolve_active_page(page: Page, locator, timeout_ms: int = 8_000) -> Page:
+    context = page.context
+    before_pages = set(context.pages)
+    popup_task = asyncio.create_task(page.wait_for_event("popup", timeout=timeout_ms))
+    try:
+        await locator.click(timeout=timeout_ms)
+        try:
+            popup = await popup_task
+            await popup.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+            logger.info("Popup page opened for message surface", data={"url": popup.url})
+            return popup
+        except Exception:
+            await page.wait_for_timeout(500)
+            after_pages = [candidate for candidate in context.pages if candidate not in before_pages]
+            if after_pages:
+                candidate = after_pages[-1]
+                await candidate.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+                logger.info("New page opened for message surface", data={"url": candidate.url})
+                return candidate
+            return page
+    finally:
+        if not popup_task.done():
+            popup_task.cancel()
+
+
 async def open_message_surface(page: Page) -> str:
     """Open a messaging surface on a LinkedIn profile page.
     
@@ -726,6 +752,41 @@ async def open_message_surface(page: Page) -> str:
 
     logger.error("All messaging surface paths exhausted")
     raise RuntimeError("No messaging surface found. Check if profile is 3rd-degree or has restrictions.")
+
+
+async def open_sales_navigator_message_surface(page: Page) -> Optional[Page]:
+    sales_nav_selectors = [
+        ("sales nav message button", lambda: page.get_by_role("button", name=re.compile(r"(Nachricht|Message|InMail)", re.I))),
+        ("sales nav message link", lambda: page.get_by_role("link", name=re.compile(r"(Nachricht|Message|InMail)", re.I))),
+        ("sales nav compose button", lambda: page.locator("button:has-text('Nachricht'), button:has-text('Message'), button:has-text('InMail')")),
+        ("sales nav compose link", lambda: page.locator("a:has-text('Nachricht'), a:has-text('Message'), a:has-text('InMail')")),
+    ]
+
+    for selector_name, builder in sales_nav_selectors:
+        try:
+            candidate = builder()
+            count = await candidate.count()
+            logger.element_search(selector_name, count, context={"surface": SURFACE_SALES_NAVIGATOR})
+            if count <= 0:
+                continue
+            target_page = await click_and_resolve_active_page(page, candidate.first)
+            await target_page.wait_for_timeout(1_000)
+            subject_count = await target_page.locator(
+                "input[name='subject'], input[placeholder*='Subject'], input[aria-label*='Subject'], "
+                "input[placeholder*='Betreff'], input[aria-label*='Betreff']"
+            ).count()
+            body_count = await target_page.locator(
+                "textarea[name='message'], textarea[placeholder*='Message'], textarea[aria-label*='Message'], "
+                "div[role='textbox'][contenteditable='true']"
+            ).count()
+            if subject_count > 0 and body_count > 0:
+                logger.path_attempt("Sales Navigator message surface", 1, success=True)
+                return target_page
+            logger.path_attempt("Sales Navigator message surface missing fields", 1, success=False)
+        except Exception as exc:
+            logger.path_attempt("Sales Navigator message surface", 1, success=False)
+            logger.warn("Sales Navigator surface attempt failed", error=exc)
+    return None
 
 
 async def send_message(page: Page, message: str, surface: str, draft: Optional[Dict[str, Any]] = None) -> None:
