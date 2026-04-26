@@ -31,10 +31,10 @@ export default async function LeadsPage({
       <div className="dashboard-grid">
         <div style={{ minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
-            <h1 className="page-title">BATCHES</h1>
-            <span className="pill">Batch Dashboard</span>
+            <h1 className="page-title">LEADS OPERATIONS</h1>
+            <span className="pill">Batch Operations</span>
           </div>
-          <div className="muted" style={{ maxWidth: 620 }}>Upload leads, pick a batch, run the next step for that batch&apos;s intent.</div>
+          <div className="muted" style={{ maxWidth: 620 }}>Upload leads, pick a batch, and run the next step for that batch&apos;s intent.</div>
           <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 10 }}>
             <a className="btn secondary" href="/upload">
               UPLOAD NEW BATCH
@@ -62,6 +62,15 @@ export default async function LeadsPage({
         </div>
 
         <SenderMessageOnlyControl />
+      </div>
+
+      <div style={{ marginTop: 20 }}>
+        <WorkerControlPanel
+          title="STOP MESSAGING WORKERS"
+          description="Stops post-acceptance first-message sends, sequence sends, and draft-generation runs from Mission Control."
+          kinds={["sender_outreach", "draft_agent"]}
+          stopLabel="STOP MESSAGING"
+        />
       </div>
 
       <div style={{ marginTop: 20 }}>

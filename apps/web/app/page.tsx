@@ -1,16 +1,13 @@
-import { DraftFeed } from "../components/DraftFeed";
 import { SequenceEditor } from "../components/SequenceEditor";
-import { WorkerControlPanel } from "../components/WorkerControlPanel";
 import { requireServerSession } from "../lib/auth";
-import { fetchDraftFeed, fetchLeadBatches, fetchOutreachSequences } from "./actions";
+import { fetchLeadBatches, fetchOutreachSequences } from "./actions";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 export default async function MissionControlPage() {
   const session = await requireServerSession("/");
-  const [drafts, sequences, batches] = await Promise.all([
-    fetchDraftFeed("connect_only"),
+  const [sequences, batches] = await Promise.all([
     fetchOutreachSequences(),
     fetchLeadBatches(),
   ]);
@@ -47,17 +44,6 @@ export default async function MissionControlPage() {
       </div>
 
       <SequenceEditor sequences={sequences} batches={batches} />
-
-      <div style={{ marginTop: 24 }}>
-        <WorkerControlPanel
-          title="STOP MESSAGING WORKERS"
-          description="Stops post-acceptance first-message sends, sequence sends, and draft-generation runs from Mission Control."
-          kinds={["sender_outreach", "draft_agent"]}
-          stopLabel="STOP MESSAGING"
-        />
-      </div>
-
-      <DraftFeed drafts={drafts} variant="mission_control" />
     </div>
   );
 }
