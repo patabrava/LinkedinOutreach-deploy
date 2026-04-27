@@ -1339,6 +1339,33 @@ def mark_failed(client: Client, lead_id: str, error_message: str = "") -> None:
     logger.warn(f"Lead marked as FAILED", {"leadId": lead_id, "error": error_message})
 
 
+def mark_connect_only_limit_reached(client: Client, lead: Dict[str, Any], error_message: str) -> None:
+    """Persist the connect-only invite cap in both status and profile metadata."""
+    lead_id = str(lead.get("id") or "")
+    now_iso = datetime.utcnow().isoformat()
+    truncated_error = (error_message or "LinkedIn weekly invite limit reached")[:500]
+
+    current_profile_data = lead.get("profile_data")
+    profile_data: Dict[str, Any] = current_profile_data if isinstance(current_profile_data, dict) else {}
+    meta = dict(profile_data.get("meta") or {})
+    meta["connect_only_limit_reached"] = True
+    meta["connect_only_limit_reason"] = truncated_error
+    meta["connect_only_limit_at"] = now_iso
+
+    update_payload: Dict[str, Any] = {
+        "status": "FAILED",
+        "updated_at": now_iso,
+        "error_message": truncated_error,
+        "profile_data": {**profile_data, "meta": meta},
+    }
+
+    logger.db_query("update", "leads", {"leadId": lead_id}, update_payload)
+    client.table("leads").update(update_payload).eq("id", lead_id).execute()
+    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
+    lead["profile_data"] = update_payload["profile_data"]
+    logger.warn("Connect-only lead marked limit reached", {"leadId": lead_id, "error": truncated_error})
+
+
 def mark_lead_retry_later(client: Client, lead: Dict[str, Any], error_message: str = "") -> int:
     """Mark a connected lead as needing a later retry and persist retry attempts in profile_data."""
     lead_id = str(lead.get("id") or "")
@@ -2017,6 +2044,11 @@ async def _send_invite_with_note(page: Page, lead: Dict[str, Any], note_text: st
         )
         return "failed"
 
+    limit_reason = await detect_weekly_invite_limit(page)
+    if limit_reason:
+        await capture_connect_failure_screenshot(page, "weekly_invite_limit_reached", lead_id)
+        return "limit_reached"
+
     try:
         await send_message(page, note_text, "connect_note", None)
     except Exception as exc:
@@ -2096,11 +2128,7 @@ async def process_invite_one(
         return "sent"
 
     if outcome == "limit_reached":
-        client.table("leads").update({
-            "status": "FAILED",
-            "error_message": "LinkedIn weekly invite limit reached",
-            "updated_at": datetime.utcnow().isoformat(),
-        }).eq("id", lead_id).execute()
+        mark_connect_only_limit_reached(client, lead, "LinkedIn weekly invite limit reached")
         logger.warn("Weekly invite limit reached - aborting run", {"leadId": lead_id})
         return "limit_reached"
 

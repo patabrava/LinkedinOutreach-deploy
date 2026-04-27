@@ -141,13 +141,22 @@ async def detect_weekly_invite_limit(page: Page) -> Optional[str]:
     patterns = [
         "weekly limit",
         "weekly invitation limit",
+        "weekly invitation sending limit",
         "invitation limit",
         "contact requests",
         "contact request limit",
+        "contact request limits",
+        "invite limit",
+        "invite limit reached",
+        "too many invitations",
+        "too many contact requests",
+        "reached a limit",
         "wöchentliche limit",
         "wöchentliche kontaktanfragen",
+        "wöchentliche kontaktanfrage",
         "kontaktanfragen",
         "kontaktanfrage",
+        "kontaktanfragen erreicht",
         "nächste woche",
         "next week",
     ]
@@ -156,6 +165,58 @@ async def detect_weekly_invite_limit(page: Page) -> Optional[str]:
         return "LinkedIn weekly invite limit reached. Please retry next week."
 
     return None
+
+
+def _has_connection_request_confirmation(text: str) -> bool:
+    normalized_text = " ".join(text.split()).lower()
+    if not normalized_text:
+        return False
+
+    confirmation_patterns = [
+        "ausstehend",
+        "pending",
+        "request sent",
+        "invitation sent",
+        "einladung gesendet",
+        "kontaktanfrage gesendet",
+        "invitation pending",
+    ]
+    return any(pattern in normalized_text for pattern in confirmation_patterns)
+
+
+async def confirm_connection_request_sent(page: Page, timeout_ms: int = 8_000) -> bool:
+    """Wait for a visible post-send confirmation that the invite actually landed."""
+    deadline = asyncio.get_event_loop().time() + (timeout_ms / 1000)
+    confirmation_selectors = [
+        "button:has-text('Ausstehend')",
+        "span:has-text('Ausstehend')",
+        "button:has-text('Pending')",
+        "span:has-text('Pending')",
+        "button:has-text('Einladung gesendet')",
+        "span:has-text('Einladung gesendet')",
+        "button:has-text('Request sent')",
+        "span:has-text('Request sent')",
+    ]
+
+    while asyncio.get_event_loop().time() < deadline:
+        for selector in confirmation_selectors:
+            try:
+                locator = page.locator(selector)
+                if await locator.count() > 0 and await locator.first.is_visible(timeout=500):
+                    return True
+            except Exception:
+                continue
+
+        try:
+            body_text = await page.locator("body").inner_text(timeout=1_500)
+        except Exception:
+            body_text = ""
+        if _has_connection_request_confirmation(body_text):
+            return True
+
+        await page.wait_for_timeout(250)
+
+    return False
 
 
 def execute_with_retry(query, desc: str, attempts: int = 3, delay: float = 1.0):
@@ -735,7 +796,7 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
         await random_pause(1.0, 2.0)
         logger.element_search("main", 1, context={"phase": "connect_profile_load"})
     except Exception as exc:
-        logger.connection_flow("navigate", "FAILED", data={"url": normalized}, error=exc)
+        logger.connection_flow("navigate", "FAILED", data={"url": normalized, "error": str(exc)})
         return False
 
     await wiggle_mouse(page)
@@ -775,6 +836,8 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
                 logger.dialog_detected("connection_invite", context={"path": 1})
                 logger.path_attempt("Invite link", 1, success=True)
                 return await _click_send_without_note(page, normalized, lead.id)
+        except WeeklyInviteLimitReached:
+            raise
         except Exception as e:
             logger.element_click("Invite link", success=False)
             logger.path_attempt("Invite link", 1, success=False)
@@ -799,6 +862,8 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
                     logger.dialog_detected("connection_direct_anchor", context={"path": 2, "selector": css})
                     logger.path_attempt(f"Direct Connect anchor ({css})", 2, success=True)
                     return await _click_send_without_note(page, normalized, lead.id)
+            except WeeklyInviteLimitReached:
+                raise
             except Exception as e:
                 logger.element_click(f"Connect anchor: {css}", success=False)
                 logger.path_attempt(f"Direct Connect anchor ({css})", 2, success=False)
@@ -820,6 +885,8 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
             logger.dialog_detected("connection_direct", context={"path": 2})
             logger.path_attempt("Direct Connect button", 2, success=True)
             return await _click_send_without_note(page, normalized, lead.id)
+        except WeeklyInviteLimitReached:
+            raise
         except Exception as e:
             logger.element_click("Vernetzen button", success=False)
             logger.path_attempt("Direct Connect button", 2, success=False)
@@ -861,6 +928,8 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
                 return await _click_send_without_note(page, normalized, lead.id)
             else:
                 logger.path_attempt("More -> Invite", 3, success=False)
+        except WeeklyInviteLimitReached:
+            raise
         except Exception as e:
             logger.element_click("More button flow", success=False)
             logger.path_attempt("More -> Invite", 3, success=False)
@@ -872,6 +941,16 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
 
 async def _click_send_without_note(page: Page, url: str, lead_id: Optional[str] = None) -> bool:
     """Click 'Ohne Notiz senden' button in the connection dialog."""
+    limit_reason = await detect_weekly_invite_limit(page)
+    if limit_reason:
+        screenshot_path = await capture_connect_failure_screenshot(page, "weekly_invite_limit_reached", lead_id)
+        logger.connection_flow(
+            "send_button",
+            "LIMIT_REACHED",
+            data={"url": url, "reason": limit_reason, "screenshot": screenshot_path},
+        )
+        raise WeeklyInviteLimitReached(limit_reason)
+
     # Try exact German buttons first, then fallback to regex
     send_label = page.get_by_role("button", name="Ohne Notiz senden")
     send_count = await send_label.count()
@@ -909,6 +988,14 @@ async def _click_send_without_note(page: Page, url: str, lead_id: Optional[str] 
                 data={"url": url, "reason": limit_reason, "screenshot": screenshot_path},
             )
             raise WeeklyInviteLimitReached(limit_reason)
+        if not await confirm_connection_request_sent(page):
+            screenshot_path = await capture_connect_failure_screenshot(page, "send_button_unconfirmed", lead_id)
+            logger.connection_flow(
+                "send_button",
+                "UNCONFIRMED",
+                data={"url": url, "screenshot": screenshot_path},
+            )
+            return False
         logger.element_click("Send button", success=True)
         logger.connection_flow("send_button", "CLICKED", data={"url": url})
         return True
@@ -917,7 +1004,11 @@ async def _click_send_without_note(page: Page, url: str, lead_id: Optional[str] 
     except Exception as exc:
         logger.element_click("Send button", success=False)
         screenshot_path = await capture_connect_failure_screenshot(page, "send_button_click_failed", lead_id)
-        logger.connection_flow("send_button", "CLICK_FAILED", data={"url": url, "screenshot": screenshot_path}, error=exc)
+        logger.connection_flow(
+            "send_button",
+            "CLICK_FAILED",
+            data={"url": url, "screenshot": screenshot_path, "error": str(exc)},
+        )
         return False
 
 

@@ -12,6 +12,7 @@ from sender import (
     connect_only_invite_limit_active,
     build_sales_navigator_subject,
     _is_message_only_candidate,
+    mark_connect_only_limit_reached,
     mark_message_only_processing,
     normalize_linkedin_profile_url,
     strip_sales_navigator_signature,
@@ -235,6 +236,22 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         result = connect_only_invite_limit_active(client)
 
         self.assertIsNotNone(result)
+
+    def test_mark_connect_only_limit_reached_persists_pause_metadata(self):
+        lead = {"id": "lead-1", "profile_data": {"meta": {"existing": True}}}
+        client = FakeClient(lead)
+
+        mark_connect_only_limit_reached(client, lead, "LinkedIn weekly invite limit reached")
+
+        self.assertEqual(client.lead["status"], "FAILED")
+        self.assertEqual(client.lead["error_message"], "LinkedIn weekly invite limit reached")
+        self.assertTrue(client.lead["profile_data"]["meta"]["connect_only_limit_reached"])
+        self.assertEqual(
+            client.lead["profile_data"]["meta"]["connect_only_limit_reason"],
+            "LinkedIn weekly invite limit reached",
+        )
+        self.assertIn("connect_only_limit_at", client.lead["profile_data"]["meta"])
+        self.assertTrue(client.lead["profile_data"]["meta"]["existing"])
 
     def test_message_only_candidate_accepts_invite_sent_timestamp(self):
         self.assertTrue(
