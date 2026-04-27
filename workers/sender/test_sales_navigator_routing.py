@@ -280,6 +280,18 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
             "invite_available",
         )
 
+    def test_connect_only_surface_classifier_returns_surface_exhausted_when_no_actions_exist(self):
+        self.assertEqual(
+            classify_connect_only_surface(
+                message_button_count=0,
+                message_link_count=0,
+                invite_link_count=0,
+                connect_button_count=0,
+                more_button_count=0,
+            ),
+            "surface_exhausted",
+        )
+
     def test_classify_connect_only_probe_surface_ignores_ambiguous_generic_message_link(self):
         self.assertEqual(
             classify_connect_only_probe_surface(
