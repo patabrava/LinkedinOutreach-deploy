@@ -9,12 +9,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from sender import (
     MESSAGE_ONLY_PROCESSING_STATUSES,
+    classify_connect_only_surface,
     connect_only_invite_limit_active,
     build_sales_navigator_subject,
     _is_message_only_candidate,
     mark_connect_only_limit_reached,
     mark_message_only_processing,
     normalize_linkedin_profile_url,
+    promote_connect_only_to_connected,
     strip_sales_navigator_signature,
 )
 
@@ -252,6 +254,39 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         )
         self.assertIn("connect_only_limit_at", client.lead["profile_data"]["meta"])
         self.assertTrue(client.lead["profile_data"]["meta"]["existing"])
+
+    def test_classify_connect_only_surface_prefers_message_surface(self):
+        self.assertEqual(
+            classify_connect_only_surface(
+                message_button_count=1,
+                message_link_count=0,
+                invite_link_count=0,
+                connect_button_count=0,
+                more_button_count=0,
+            ),
+            "already_connected",
+        )
+
+    def test_classify_connect_only_surface_keeps_invite_flow_when_message_surface_is_absent(self):
+        self.assertEqual(
+            classify_connect_only_surface(
+                message_button_count=0,
+                message_link_count=0,
+                invite_link_count=1,
+                connect_button_count=0,
+                more_button_count=0,
+            ),
+            "invite_available",
+        )
+
+    def test_promote_connect_only_to_connected_updates_lead_status(self):
+        lead = {"id": "lead-1", "status": "NEW"}
+        client = FakeClient(lead)
+
+        result = promote_connect_only_to_connected(client, lead)
+
+        self.assertEqual(result, "connected")
+        self.assertEqual(client.lead["status"], "CONNECTED")
 
     def test_message_only_candidate_accepts_invite_sent_timestamp(self):
         self.assertTrue(
