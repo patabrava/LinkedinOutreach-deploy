@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from sender import (
     MESSAGE_ONLY_PROCESSING_STATUSES,
     classify_connect_only_surface,
+    classify_connect_only_probe_surface,
     connect_only_invite_limit_active,
     build_sales_navigator_subject,
     _is_message_only_candidate,
@@ -277,6 +278,34 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
                 more_button_count=0,
             ),
             "invite_available",
+        )
+
+    def test_classify_connect_only_probe_surface_ignores_ambiguous_generic_message_link(self):
+        self.assertEqual(
+            classify_connect_only_probe_surface(
+                explicit_message_button_count=0,
+                explicit_message_link_count=0,
+                generic_message_link_count=1,
+                invite_link_count=1,
+                connect_button_count=0,
+                more_button_count=0,
+                has_visible_connect_or_pending_state=True,
+            ),
+            "invite_available",
+        )
+
+    def test_classify_connect_only_probe_surface_accepts_generic_message_link_without_invite_state(self):
+        self.assertEqual(
+            classify_connect_only_probe_surface(
+                explicit_message_button_count=0,
+                explicit_message_link_count=0,
+                generic_message_link_count=1,
+                invite_link_count=0,
+                connect_button_count=0,
+                more_button_count=0,
+                has_visible_connect_or_pending_state=False,
+            ),
+            "already_connected",
         )
 
     def test_promote_connect_only_to_connected_updates_lead_status(self):

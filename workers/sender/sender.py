@@ -274,6 +274,31 @@ def classify_connect_only_surface(
     return "surface_exhausted"
 
 
+def classify_connect_only_probe_surface(
+    *,
+    explicit_message_button_count: int,
+    explicit_message_link_count: int,
+    generic_message_link_count: int,
+    invite_link_count: int,
+    connect_button_count: int,
+    more_button_count: int,
+    has_visible_connect_or_pending_state: bool,
+) -> str:
+    if explicit_message_button_count > 0 or explicit_message_link_count > 0:
+        return "already_connected"
+    if generic_message_link_count > 0 and has_visible_connect_or_pending_state:
+        return "invite_available"
+    if has_visible_connect_or_pending_state:
+        return "invite_available"
+    return classify_connect_only_surface(
+        message_button_count=0,
+        message_link_count=generic_message_link_count,
+        invite_link_count=invite_link_count,
+        connect_button_count=connect_button_count,
+        more_button_count=more_button_count,
+    )
+
+
 def _derive_sales_navigator_subject_from_message(message: str) -> str:
     lines = [re.sub(r"\s+", " ", line).strip() for line in (message or "").splitlines()]
     lines = [line for line in lines if line]
@@ -2125,13 +2150,17 @@ async def probe_connect_only_surface(page: Page, lead: ScraperLead) -> str:
         except Exception:
             profile_container = page
 
-    message_button = profile_container.get_by_role(
+    explicit_message_button = profile_container.get_by_role(
         "button",
         name=re.compile(r"(Nachricht an|Message to)", re.I),
     )
-    message_link = profile_container.get_by_role(
+    explicit_message_link = profile_container.get_by_role(
         "link",
-        name=re.compile(r"(Nachricht an|Message to|Message|Nachricht)", re.I),
+        name=re.compile(r"(Nachricht an|Message to)", re.I),
+    )
+    generic_message_link = profile_container.get_by_role(
+        "link",
+        name=re.compile(r"(Message|Nachricht)", re.I),
     )
     invite_link = profile_container.get_by_role(
         "link",
@@ -2143,28 +2172,34 @@ async def probe_connect_only_surface(page: Page, lead: ScraperLead) -> str:
     )
     more_button = profile_container.get_by_role("button", name=re.compile(r"(More|Mehr)", re.I))
 
-    message_button_count = await message_button.count()
-    message_link_count = await message_link.count()
+    explicit_message_button_count = await explicit_message_button.count()
+    explicit_message_link_count = await explicit_message_link.count()
+    generic_message_link_count = await generic_message_link.count()
     invite_link_count = await invite_link.count()
     connect_button_count = await direct_connect_button.count()
     more_button_count = await more_button.count()
-    surface = classify_connect_only_surface(
-        message_button_count=message_button_count,
-        message_link_count=message_link_count,
+    has_visible_connect_or_pending_state = await _has_visible_connect_or_pending_state(profile_container)
+    surface = classify_connect_only_probe_surface(
+        explicit_message_button_count=explicit_message_button_count,
+        explicit_message_link_count=explicit_message_link_count,
+        generic_message_link_count=generic_message_link_count,
         invite_link_count=invite_link_count,
         connect_button_count=connect_button_count,
         more_button_count=more_button_count,
+        has_visible_connect_or_pending_state=has_visible_connect_or_pending_state,
     )
     logger.info(
         "Connect-only surface probe complete",
         data={
             "leadId": lead.id,
             "surface": surface,
-            "messageButtonCount": message_button_count,
-            "messageLinkCount": message_link_count,
+            "explicitMessageButtonCount": explicit_message_button_count,
+            "explicitMessageLinkCount": explicit_message_link_count,
+            "genericMessageLinkCount": generic_message_link_count,
             "inviteLinkCount": invite_link_count,
             "connectButtonCount": connect_button_count,
             "moreButtonCount": more_button_count,
+            "hasVisibleConnectOrPendingState": has_visible_connect_or_pending_state,
         },
     )
     return surface
@@ -2177,7 +2212,7 @@ async def process_invite_one(
 ) -> str:
     """Render connect_note from sequence and send the LinkedIn invite.
 
-    Returns one of: 'sent', 'failed', 'limit_reached'.
+    Returns one of: 'sent', 'connected', 'failed', 'limit_reached'.
     """
     from sequence_render import render
 
@@ -2885,6 +2920,7 @@ async def main() -> None:
                     "sender-send-invites",
                     result={
                         "sent": 0,
+                        "connected": 0,
                         "failed": 0,
                         "skipped": 0,
                         "limit_reached": True,
@@ -2908,6 +2944,7 @@ async def main() -> None:
                 await ensure_linkedin_auth(context, client)
 
                 sent_count = 0
+                connected_count = 0
                 failed_count = 0
                 skipped_count = 0
                 limit_reached = False
@@ -2921,6 +2958,8 @@ async def main() -> None:
                         result = await process_invite_one(context, client, lead)
                         if result == "sent":
                             sent_count += 1
+                        elif result == "connected":
+                            connected_count += 1
                         elif result == "limit_reached":
                             limit_reached = True
                             break
@@ -2943,6 +2982,7 @@ async def main() -> None:
                     "sender-send-invites",
                     result={
                         "sent": sent_count,
+                        "connected": connected_count,
                         "failed": failed_count,
                         "skipped": skipped_count,
                         "limit_reached": limit_reached,
