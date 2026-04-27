@@ -308,6 +308,48 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
             "already_connected",
         )
 
+    def test_classify_connect_only_probe_surface_keeps_invite_link_before_generic_message(self):
+        self.assertEqual(
+            classify_connect_only_probe_surface(
+                explicit_message_button_count=0,
+                explicit_message_link_count=0,
+                generic_message_link_count=1,
+                invite_link_count=1,
+                connect_button_count=0,
+                more_button_count=0,
+                has_visible_connect_or_pending_state=False,
+            ),
+            "invite_available",
+        )
+
+    def test_classify_connect_only_probe_surface_keeps_connect_button_before_generic_message(self):
+        self.assertEqual(
+            classify_connect_only_probe_surface(
+                explicit_message_button_count=0,
+                explicit_message_link_count=0,
+                generic_message_link_count=1,
+                invite_link_count=0,
+                connect_button_count=1,
+                more_button_count=0,
+                has_visible_connect_or_pending_state=False,
+            ),
+            "invite_available",
+        )
+
+    def test_classify_connect_only_probe_surface_keeps_more_button_before_generic_message(self):
+        self.assertEqual(
+            classify_connect_only_probe_surface(
+                explicit_message_button_count=0,
+                explicit_message_link_count=0,
+                generic_message_link_count=1,
+                invite_link_count=0,
+                connect_button_count=0,
+                more_button_count=1,
+                has_visible_connect_or_pending_state=False,
+            ),
+            "invite_available",
+        )
+
     def test_promote_connect_only_to_connected_updates_lead_status(self):
         lead = {"id": "lead-1", "status": "NEW"}
         client = FakeClient(lead)

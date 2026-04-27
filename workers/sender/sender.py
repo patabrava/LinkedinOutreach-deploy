@@ -286,6 +286,8 @@ def classify_connect_only_probe_surface(
 ) -> str:
     if explicit_message_button_count > 0 or explicit_message_link_count > 0:
         return "already_connected"
+    if invite_link_count > 0 or connect_button_count > 0 or more_button_count > 0:
+        return "invite_available"
     if generic_message_link_count > 0 and has_visible_connect_or_pending_state:
         return "invite_available"
     if has_visible_connect_or_pending_state:
