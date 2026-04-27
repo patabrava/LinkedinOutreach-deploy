@@ -260,6 +260,7 @@ def normalize_linkedin_profile_url(url: str) -> str:
 
 
 def classify_connect_only_surface(
+    *,
     message_button_count: int,
     message_link_count: int,
     invite_link_count: int,
