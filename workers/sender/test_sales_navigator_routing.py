@@ -12,6 +12,7 @@ from sender import (
     classify_connect_only_surface,
     classify_connect_only_probe_surface,
     connect_only_invite_limit_active,
+    fetch_message_only_leads,
     build_sales_navigator_subject,
     _is_message_only_candidate,
     mark_connect_only_limit_reached,
@@ -148,6 +149,55 @@ class FakeLimitClient:
         return FakeLimitQuery(self)
 
 
+class FakeMessageOnlyQuery:
+    def __init__(self, client):
+        self.client = client
+        self.filters = []
+        self.selected = None
+
+    def select(self, fields):
+        self.selected = fields
+        return self
+
+    def eq(self, key, value):
+        self.filters.append(("eq", key, value))
+        return self
+
+    def is_(self, key, value):
+        self.filters.append(("is", key, value))
+        return self
+
+    def order(self, key, desc=False):
+        self.filters.append(("order", key, desc))
+        return self
+
+    def limit(self, value):
+        self.filters.append(("limit", value))
+        return self
+
+    def or_(self, value):
+        self.filters.append(("or", value))
+        return self
+
+    def execute(self):
+        self.client.calls.append(
+            {
+                "selected": self.selected,
+                "filters": list(self.filters),
+            }
+        )
+        return FakeResponse(self.client.rows)
+
+
+class FakeMessageOnlyClient:
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.calls = []
+
+    def table(self, _table_name):
+        return FakeMessageOnlyQuery(self)
+
+
 class SalesNavigatorRoutingTest(unittest.TestCase):
     def test_normalize_linkedin_profile_url_removes_query_and_trailing_slash(self):
         result = normalize_linkedin_profile_url(
@@ -178,6 +228,18 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
             "Hi Marina,\n\n"
             "freut mich, dass wir uns hier vernetzen.\n\n"
             "Viele Grüße,\nKatharina"
+        )
+
+        self.assertEqual(
+            strip_sales_navigator_signature(body),
+            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.",
+        )
+
+    def test_strip_sales_navigator_signature_removes_single_line_closing(self):
+        body = (
+            "Hi Marina,\n\n"
+            "freut mich, dass wir uns hier vernetzen.\n\n"
+            "Viele Grüße, Katharina"
         )
 
         self.assertEqual(
@@ -391,6 +453,32 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
                     "sent_at": None,
                 }
             )
+        )
+
+    def test_fetch_message_only_leads_queries_only_post_invite_candidates(self):
+        eligible_row = {
+            "id": "lead-eligible",
+            "status": "NEW",
+            "sent_at": None,
+            "connection_sent_at": "2026-04-26T00:00:00Z",
+            "connection_accepted_at": None,
+            "outreach_mode": "connect_only",
+        }
+        client = FakeMessageOnlyClient([eligible_row])
+
+        rows = fetch_message_only_leads(client, 25)
+
+        self.assertEqual(rows, [eligible_row])
+        self.assertEqual(client.calls[0]["filters"][0], ("eq", "outreach_mode", "connect_only"))
+        self.assertEqual(client.calls[0]["filters"][1], ("is", "sent_at", "null"))
+        self.assertEqual(
+            client.calls[0]["filters"][2],
+            (
+                "or",
+                "connection_sent_at.not.is.null,"
+                "connection_accepted_at.not.is.null,"
+                "status.in.(CONNECT_ONLY_SENT,CONNECTED,MESSAGE_ONLY_READY,MESSAGE_ONLY_APPROVED)",
+            ),
         )
 
 

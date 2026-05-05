@@ -330,12 +330,34 @@ def strip_sales_navigator_signature(message: str) -> str:
     shows the sender identity separately, so duplicating the manual closing adds
     a second footer-like signature.
     """
-    lines = (message or "").splitlines()
+    lines = [line.rstrip() for line in (message or "").splitlines()]
     while lines and not lines[-1].strip():
         lines.pop()
-    if len(lines) >= 2 and lines[-2].strip().lower() == "viele grüße,":
-        return "\n".join(lines[:-2]).strip()
-    return (message or "").strip()
+
+    signoff_re = re.compile(
+        r"^(viele grüße|beste grüße|liebe grüße|herzliche grüße|mit freundlichen grüßen|freundliche grüße)(?:,\s*.*)?$",
+        re.I,
+    )
+    if not lines:
+        return ""
+
+    # Sales Navigator renders the sender identity next to the composer, so any
+    # manual closing block at the end of the template becomes duplicated.
+    cutoff = len(lines)
+    for idx in range(len(lines) - 1, -1, -1):
+        current = lines[idx].strip()
+        if not current:
+            continue
+        if signoff_re.match(current):
+            cutoff = idx
+            break
+        if idx > 0 and signoff_re.match(lines[idx - 1].strip()):
+            cutoff = idx - 1
+            break
+
+    if cutoff < len(lines):
+        return "\n".join(lines[:cutoff]).strip()
+    return "\n".join(lines).strip()
 
 
 async def _has_visible_connect_or_pending_state(profile_container) -> bool:
@@ -386,6 +408,11 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
             .select(select_fields_extended)
             .eq("outreach_mode", "connect_only")
             .is_("sent_at", "null")
+            .or_(
+                "connection_sent_at.not.is.null,"
+                "connection_accepted_at.not.is.null,"
+                "status.in.(CONNECT_ONLY_SENT,CONNECTED,MESSAGE_ONLY_READY,MESSAGE_ONLY_APPROVED)"
+            )
             .order("updated_at", desc=True)
         )
         if batch_id is not None:
@@ -397,6 +424,11 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
             .select(select_fields_legacy)
             .eq("outreach_mode", "connect_only")
             .is_("sent_at", "null")
+            .or_(
+                "connection_sent_at.not.is.null,"
+                "connection_accepted_at.not.is.null,"
+                "status.in.(CONNECT_ONLY_SENT,CONNECTED,MESSAGE_ONLY_READY,MESSAGE_ONLY_APPROVED)"
+            )
             .order("updated_at", desc=True)
         )
         if batch_id is not None:
