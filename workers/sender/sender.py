@@ -548,7 +548,12 @@ def _is_invite_candidate(lead: Dict[str, Any]) -> bool:
     return outreach_mode in {"connect_only", "message", "connect_message"}
 
 
-def fetch_invite_queue(client: Client, limit: int, batch_id: Optional[int] = None) -> list[Dict[str, Any]]:
+def fetch_invite_queue(
+    client: Client,
+    limit: int,
+    batch_id: Optional[int] = None,
+    exclude_ids: Optional[set[str]] = None,
+) -> list[Dict[str, Any]]:
     """Fetch sequence-driven leads eligible for connect-invite send.
 
     Joins through lead_batches to filter by batch_intent so we never grab
@@ -562,6 +567,7 @@ def fetch_invite_queue(client: Client, limit: int, batch_id: Optional[int] = Non
     if batch_id is not None:
         query_meta["batch_id"] = batch_id
     logger.db_query("select", "leads", query_meta)
+    excluded = exclude_ids or set()
     query = (
         client.table("leads")
         .select(
@@ -571,7 +577,7 @@ def fetch_invite_queue(client: Client, limit: int, batch_id: Optional[int] = Non
         .in_("status", INVITE_RETRY_STATUSES)
         .is_("connection_sent_at", "null")
         .in_("lead_batches.batch_intent", ["connect_message", "connect_only"])
-        .limit(max(limit * 5, limit))
+        .limit(max((limit + len(excluded)) * 5, limit))
     )
     if batch_id is not None:
         query = query.eq("batch_id", batch_id)
@@ -579,6 +585,8 @@ def fetch_invite_queue(client: Client, limit: int, batch_id: Optional[int] = Non
     rows = response.data or []
     filtered_rows: list[Dict[str, Any]] = []
     for row in rows:
+        if str(row.get("id") or "") in excluded:
+            continue
         if not _is_invite_candidate(row):
             continue
         filtered_rows.append(row)
@@ -3194,42 +3202,71 @@ async def main() -> None:
                 failed_count = 0
                 skipped_count = 0
                 limit_reached = False
+                attempted_invite_ids: set[str] = set()
+                total_seen = 0
 
-                for lead in leads_to_process:
-                    lead_id = str(lead.get("id") or "")
-                    if not mark_invite_processing(client, lead_id):
-                        skipped_count += 1
-                        continue
-                    try:
-                        result = await process_invite_one(
-                            context,
-                            client,
-                            lead,
-                            allow_invite_send=True,
-                        )
-                        if result == "sent":
-                            sent_count += 1
-                        elif result == "connected":
-                            connected_count += 1
-                        elif result == "limit_reached":
-                            limit_reached = True
+                while leads_to_process and not limit_reached and sent_count < remaining:
+                    total_seen += len(leads_to_process)
+                    for lead in leads_to_process:
+                        if sent_count >= remaining:
                             break
-                        elif result == "paused":
+                        lead_id = str(lead.get("id") or "")
+                        if lead_id:
+                            attempted_invite_ids.add(lead_id)
+                        if not mark_invite_processing(client, lead_id):
                             skipped_count += 1
-                        else:
-                            failed_count += 1
-                    except Exception as exc:
-                        logger.error("Failed to process invite lead", {"leadId": lead_id}, error=exc)
-                        failed_count += 1
+                            continue
                         try:
-                            client.table("leads").update({
-                                "status": "FAILED",
-                                "error_message": f"unexpected: {exc}"[:240],
-                                "updated_at": datetime.utcnow().isoformat(),
-                            }).eq("id", lead_id).execute()
-                        except Exception:
-                            pass
-                    await random_pause(2, 4)
+                            result = await process_invite_one(
+                                context,
+                                client,
+                                lead,
+                                allow_invite_send=True,
+                            )
+                            if result == "sent":
+                                sent_count += 1
+                            elif result == "connected":
+                                connected_count += 1
+                            elif result == "limit_reached":
+                                limit_reached = True
+                                break
+                            elif result == "paused":
+                                skipped_count += 1
+                            else:
+                                failed_count += 1
+                        except Exception as exc:
+                            logger.error("Failed to process invite lead", {"leadId": lead_id}, error=exc)
+                            failed_count += 1
+                            try:
+                                client.table("leads").update({
+                                    "status": "FAILED",
+                                    "error_message": f"unexpected: {exc}"[:240],
+                                    "updated_at": datetime.utcnow().isoformat(),
+                                }).eq("id", lead_id).execute()
+                            except Exception:
+                                pass
+                        await random_pause(2, 4)
+
+                    if args.lead_id or limit_reached or sent_count >= remaining:
+                        break
+
+                    next_remaining = remaining - sent_count
+                    leads_to_process = fetch_invite_queue(
+                        client,
+                        next_remaining,
+                        args.batch_id,
+                        exclude_ids=attempted_invite_ids,
+                    )
+                    if leads_to_process:
+                        logger.info(
+                            f"send-invites: processing {len(leads_to_process)} replacement leads",
+                            data={
+                                "leadIds": [l.get("id") for l in leads_to_process],
+                                "sent": sent_count,
+                                "remaining": next_remaining,
+                                "attempted": len(attempted_invite_ids),
+                            },
+                        )
 
                 logger.operation_complete(
                     "sender-send-invites",
@@ -3239,7 +3276,8 @@ async def main() -> None:
                         "failed": failed_count,
                         "skipped": skipped_count,
                         "limit_reached": limit_reached,
-                        "total": len(leads_to_process),
+                        "total": total_seen,
+                        "target": remaining,
                     },
                 )
             finally:

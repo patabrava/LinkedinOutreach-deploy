@@ -369,7 +369,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual(
             build_sales_navigator_body(message),
-            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.",
+            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.\n\nViele Grüße,",
         )
 
     def test_mark_message_only_processing_locks_only_eligible_status(self):
@@ -418,6 +418,18 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual([row["id"] for row in rows], ["lead-new", "lead-failed"])
         self.assertIn(("in", "status", INVITE_RETRY_STATUSES), client.calls[0]["filters"])
+
+    def test_fetch_invite_queue_excludes_attempted_leads_for_current_run(self):
+        client = FakeInviteQueueClient(
+            [
+                {"id": "lead-failed", "status": "FAILED", "outreach_mode": "connect_only", "profile_data": {}},
+                {"id": "lead-replacement", "status": "NEW", "outreach_mode": "connect_only", "profile_data": {}},
+            ]
+        )
+
+        rows = fetch_invite_queue(client, 1, exclude_ids={"lead-failed"})
+
+        self.assertEqual([row["id"] for row in rows], ["lead-replacement"])
 
     def test_mark_invite_processing_claims_failed_invite_lead_for_retry(self):
         lead = {"id": "lead-1", "status": "FAILED"}
