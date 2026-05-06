@@ -7,6 +7,7 @@ import { revalidatePath } from "next/cache";
 
 import { logger } from "../lib/logger";
 import { encryptLinkedinPassword } from "../lib/credentialCrypto";
+import { isVisibleFollowup } from "../lib/followupVisibility";
 import type { BatchIntent, OutreachMode } from "../lib/outreachModes";
 import { BATCH_INTENT_LABELS, normalizeBatchIntent, normalizeOutreachMode, OUTREACH_MODE_TO_DB } from "../lib/outreachModes";
 import type { PromptType } from "../lib/promptTypes";
@@ -32,6 +33,8 @@ const MESSAGE_ONLY_FEED_STATUSES = [
   "MESSAGE_ONLY_READY",
   "MESSAGE_ONLY_APPROVED",
 ] as const;
+const CONNECT_ONLY_SEQUENCE_NAME = "SEQUENZ b ohne Vertrag";
+const DEFAULT_CONNECT_MESSAGE_SEQUENCE_NAME = "Default Sequence";
 
 export type LinkedinCredentialSummary = {
   email?: string;
@@ -76,6 +79,43 @@ function spawnTrackedWorker({
   });
   proc.unref();
   return proc;
+}
+
+export async function resolveSequenceIdForBatchIntent(
+  client: ReturnType<typeof supabaseAdmin>,
+  normalizedIntent: BatchIntent
+): Promise<number> {
+  if (normalizedIntent === "connect_only") {
+    const { data: seededSequence, error: seededSequenceError } = await client
+      .from("outreach_sequences")
+      .select("id")
+      .ilike("name", CONNECT_ONLY_SEQUENCE_NAME)
+      .maybeSingle();
+
+    if (seededSequenceError) {
+      console.error("importLeads connect-only sequence lookup error", seededSequenceError);
+      throw seededSequenceError;
+    }
+    if (!seededSequence?.id) {
+      throw new Error(`Sequence not found: ${CONNECT_ONLY_SEQUENCE_NAME}`);
+    }
+    return seededSequence.id;
+  }
+
+  const { data: defaultSequence, error: defaultSequenceError } = await client
+    .from("outreach_sequences")
+    .select("id")
+    .eq("name", DEFAULT_CONNECT_MESSAGE_SEQUENCE_NAME)
+    .maybeSingle();
+
+  if (defaultSequenceError) {
+    console.error("importLeads default sequence error", defaultSequenceError);
+    throw defaultSequenceError;
+  }
+  if (!defaultSequence?.id) {
+    throw new Error(`${DEFAULT_CONNECT_MESSAGE_SEQUENCE_NAME} not found.`);
+  }
+  return defaultSequence.id;
 }
 
 function startDraftAgent(
@@ -639,6 +679,11 @@ export type FollowupRow = {
     last_name: string | null;
     company_name: string | null;
     linkedin_url: string;
+    status?: string | null;
+    sent_at?: string | null;
+    connection_accepted_at?: string | null;
+    sequence_step?: number | null;
+    sequence_last_sent_at?: string | null;
     last_reply_at?: string | null;
     followup_count?: number | null;
     profile_data?: any;
@@ -660,7 +705,7 @@ export async function fetchFollowups(statuses: Array<FollowupRow["status"]> = ["
 
     let query = client
       .from("followups")
-      .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, last_reply_at, followup_count, profile_data)")
+      .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, status, sent_at, connection_accepted_at, sequence_step, sequence_last_sent_at, last_reply_at, followup_count, profile_data)")
       .in("status", statuses)
       .order("updated_at", { ascending: false })
       .limit(limit);
@@ -671,10 +716,12 @@ export async function fetchFollowups(statuses: Array<FollowupRow["status"]> = ["
       return [] as FollowupRow[];
     }
 
-    logger.dbResult("select", "followups", { correlationId }, data);
-    logger.actionComplete("fetchFollowups", { correlationId }, { count: data?.length || 0 });
+    const visible = (data || []).filter((row) => isVisibleFollowup(row as any));
 
-    return (data || []) as FollowupRow[];
+    logger.dbResult("select", "followups", { correlationId }, visible);
+    logger.actionComplete("fetchFollowups", { correlationId }, { count: visible.length });
+
+    return visible as FollowupRow[];
   } catch (error: any) {
     logger.actionError("fetchFollowups", { correlationId }, error, { statuses, limit });
     return [] as FollowupRow[];
@@ -1554,41 +1601,7 @@ export async function importLeads(
 
   const client = supabaseAdmin();
   const batchName = `${fileName?.trim() || "CSV batch"} (${BATCH_INTENT_LABELS[normalizedIntent]})`;
-  let sequenceId: number | null = null;
-
-  if (normalizedIntent === "connect_only") {
-    const { data: seededSequence, error: seededSequenceError } = await client
-      .from("outreach_sequences")
-      .select("id")
-      .eq("is_active", true)
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .maybeSingle();
-
-    if (seededSequenceError) {
-      console.error("importLeads connect-only sequence seed error", seededSequenceError);
-      throw seededSequenceError;
-    }
-    if (!seededSequence?.id) {
-      throw new Error("No active outreach sequence found for connect-only batch seeding.");
-    }
-    sequenceId = seededSequence.id;
-  } else {
-    const { data: defaultSequence, error: defaultSequenceError } = await client
-      .from("outreach_sequences")
-      .select("id")
-      .eq("name", "Default Sequence")
-      .maybeSingle();
-
-    if (defaultSequenceError) {
-      console.error("importLeads default sequence error", defaultSequenceError);
-      throw defaultSequenceError;
-    }
-    if (!defaultSequence?.id) {
-      throw new Error("Default Sequence not found.");
-    }
-    sequenceId = defaultSequence.id;
-  }
+  const sequenceId = await resolveSequenceIdForBatchIntent(client, normalizedIntent);
 
   const { data: batchData, error: batchError } = await client
     .from("lead_batches")

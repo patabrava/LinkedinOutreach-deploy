@@ -79,3 +79,4 @@ END_LLM_FRIENDLY_PLAN_TEST_DEBUG
 - `connect_only` scraper runs must skip `enrich_one()` entirely and go straight to `send_connection_request()`; never reintroduce scrape-first behavior on the invite-only path.
 - Scraper launches must treat omitted `--limit` as "use the remaining daily quota" and never silently fall back to 10; only explicit positive limits may cap a run.
 - When a `Nachricht` click opens the Sales Navigator/InMail composer instead of the direct-message overlay, detect the subject/body fields and send there immediately; do not wait for the old DM overlay selector first.
+- Message-only candidate fetches must constrain the SQL query itself to post-invite rows (`connection_sent_at`, `connection_accepted_at`, or message-only statuses) before `limit` applies; filtering broad `connect_only` unsent rows only in Python can starve accepted/invite-sent leads and make the daemon look idle.

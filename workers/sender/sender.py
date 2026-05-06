@@ -286,9 +286,13 @@ def classify_connect_only_probe_surface(
 ) -> str:
     if explicit_message_button_count > 0 or explicit_message_link_count > 0:
         return "already_connected"
-    if invite_link_count > 0 or connect_button_count > 0 or more_button_count > 0:
+    if invite_link_count > 0 or connect_button_count > 0:
         return "invite_available"
     if generic_message_link_count > 0 and has_visible_connect_or_pending_state:
+        return "invite_available"
+    if generic_message_link_count > 0:
+        return "already_connected"
+    if more_button_count > 0:
         return "invite_available"
     if has_visible_connect_or_pending_state:
         return "invite_available"
@@ -445,14 +449,29 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
     return filtered_rows
 
 
+INVITE_RETRY_STATUSES = ["NEW", "FAILED"]
+
+
+def _is_invite_candidate(lead: Dict[str, Any]) -> bool:
+    if not isinstance(lead, dict):
+        return False
+    if lead.get("connection_sent_at") or lead.get("sent_at"):
+        return False
+    status = str(lead.get("status") or "").upper()
+    if status not in INVITE_RETRY_STATUSES:
+        return False
+    outreach_mode = str(lead.get("outreach_mode") or "").lower()
+    return outreach_mode in {"connect_only", "message", "connect_message"}
+
+
 def fetch_invite_queue(client: Client, limit: int, batch_id: Optional[int] = None) -> list[Dict[str, Any]]:
-    """Fetch NEW sequence-driven leads eligible for connect-invite send.
+    """Fetch sequence-driven leads eligible for connect-invite send.
 
     Joins through lead_batches to filter by batch_intent so we never grab
     custom_outreach leads (those go through the draft-review path).
     """
     query_meta: Dict[str, Any] = {
-        "status": "NEW",
+        "status": INVITE_RETRY_STATUSES,
         "batch_intent": ["connect_message", "connect_only"],
         "limit": limit,
     }
@@ -463,9 +482,9 @@ def fetch_invite_queue(client: Client, limit: int, batch_id: Optional[int] = Non
         client.table("leads")
         .select(
             "id, linkedin_url, first_name, last_name, company_name, "
-            "sequence_id, outreach_mode, batch_id, profile_data, lead_batches!inner(batch_intent)"
+            "sequence_id, outreach_mode, batch_id, status, profile_data, lead_batches!inner(batch_intent)"
         )
-        .eq("status", "NEW")
+        .in_("status", INVITE_RETRY_STATUSES)
         .is_("connection_sent_at", "null")
         .in_("lead_batches.batch_intent", ["connect_message", "connect_only"])
         .limit(max(limit * 5, limit))
@@ -477,6 +496,8 @@ def fetch_invite_queue(client: Client, limit: int, batch_id: Optional[int] = Non
     filtered_rows: list[Dict[str, Any]] = []
     skipped_paused = 0
     for row in rows:
+        if not _is_invite_candidate(row):
+            continue
         meta = ((row.get("profile_data") or {}).get("meta") or {})
         if meta.get("connect_only_limit_reached") is True:
             skipped_paused += 1
@@ -536,7 +557,7 @@ def fetch_lead_by_id(client: Client, lead_id: str) -> Optional[Dict[str, Any]]:
         "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
         "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
         "sequence_id, sequence_step, sequence_started_at, sequence_last_sent_at, "
-        "csv_batch_id, outreach_mode, profile_data, ai_tags"
+        "csv_batch_id, batch_id, outreach_mode, profile_data, ai_tags"
     )
     select_fields_legacy = (
         "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
@@ -2062,13 +2083,13 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
 
 # ------------------------- SEND-INVITES FLOW -------------------------
 def mark_invite_processing(client: Client, lead_id: str) -> bool:
-    """Atomically claim a NEW lead for invite send. Returns False if no-op."""
+    """Atomically claim an invite-eligible lead. Returns False if no-op."""
     try:
         resp = (
             client.table("leads")
             .update({"status": "PROCESSING", "updated_at": datetime.utcnow().isoformat()})
             .eq("id", lead_id)
-            .eq("status", "NEW")
+            .in_("status", INVITE_RETRY_STATUSES)
             .execute()
         )
     except Exception as exc:
@@ -2076,6 +2097,62 @@ def mark_invite_processing(client: Client, lead_id: str) -> bool:
         return False
     rows = getattr(resp, "data", None) or []
     return len(rows) > 0
+
+
+def persist_invite_sent(client: Client, lead_id: str, outreach_mode: Optional[str] = None) -> None:
+    """Persist the post-invite state and prove the row moved into the next queue."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    update_payload = {
+        "status": "CONNECT_ONLY_SENT",
+        "connection_sent_at": now_iso,
+        "updated_at": now_iso,
+    }
+    logger.db_query(
+        "update",
+        "leads",
+        {"leadId": lead_id},
+        {"status": "CONNECT_ONLY_SENT", "outreach_mode": outreach_mode},
+    )
+    resp = (
+        client.table("leads")
+        .update(update_payload)
+        .eq("id", lead_id)
+        .execute()
+    )
+    error = getattr(resp, "error", None)
+    if error:
+        raise RuntimeError(f"Failed to persist invite sent for lead {lead_id}: {error}")
+    rows = getattr(resp, "data", None) or []
+    if rows:
+        persisted = rows[0]
+    else:
+        persisted_resp = (
+            client.table("leads")
+            .select("id, status, connection_sent_at, outreach_mode")
+            .eq("id", lead_id)
+            .limit(1)
+            .execute()
+        )
+        persisted_error = getattr(persisted_resp, "error", None)
+        if persisted_error:
+            raise RuntimeError(f"Failed to verify invite sent for lead {lead_id}: {persisted_error}")
+        persisted_rows = getattr(persisted_resp, "data", None) or []
+        persisted = persisted_rows[0] if persisted_rows else None
+
+    if not persisted:
+        raise RuntimeError(f"Invite sent update matched no lead row for {lead_id}")
+    if persisted.get("status") != "CONNECT_ONLY_SENT" or not persisted.get("connection_sent_at"):
+        raise RuntimeError(
+            "Invite sent update did not persist expected state for "
+            f"{lead_id}: status={persisted.get('status')} connection_sent_at={persisted.get('connection_sent_at')}"
+        )
+    if outreach_mode == "connect_only" and persisted.get("outreach_mode") != "connect_only":
+        raise RuntimeError(
+            f"Invite sent lead {lead_id} is not in connect_only outreach mode after update: "
+            f"{persisted.get('outreach_mode')}"
+        )
+
+    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
 
 
 def _fetch_sequence_connect_note(client: Client, sequence_id: Any) -> str:
@@ -2243,10 +2320,12 @@ async def process_invite_one(
     context: BrowserContext,
     client: Client,
     lead: Dict[str, Any],
+    *,
+    allow_invite_send: bool = True,
 ) -> str:
     """Render connect_note from sequence and send the LinkedIn invite.
 
-    Returns one of: 'sent', 'connected', 'failed', 'limit_reached'.
+    Returns one of: 'sent', 'connected', 'failed', 'limit_reached', 'paused'.
     """
     from sequence_render import render
 
@@ -2280,6 +2359,17 @@ async def process_invite_one(
                         {"leadId": lead_id},
                     )
                     return result
+                if not allow_invite_send:
+                    client.table("leads").update({
+                        "status": "FAILED",
+                        "error_message": "invite_send_paused_weekly_limit",
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }).eq("id", lead_id).execute()
+                    logger.warn(
+                        "Invite send paused after connected-state probe",
+                        {"leadId": lead_id, "surface": surface},
+                    )
+                    return "paused"
             try:
                 ok = await send_connection_request(page, scraper_lead)
             except WeeklyInviteLimitReached:
@@ -2293,11 +2383,7 @@ async def process_invite_one(
             pass
 
     if outcome == "sent":
-        client.table("leads").update({
-            "status": "CONNECT_ONLY_SENT",
-            "connection_sent_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
-        }).eq("id", lead_id).execute()
+        persist_invite_sent(client, lead_id, outreach_mode)
         logger.message_send_complete(lead_id, {"mode": "send-invites", "outreach_mode": outreach_mode})
         return "sent"
 
@@ -2948,7 +3034,7 @@ async def main() -> None:
 
         if args.send_invites:
             limit_pause_reason = connect_only_invite_limit_active(client)
-            if limit_pause_reason:
+            if limit_pause_reason and not args.lead_id:
                 logger.warn("Connect-only invite sending paused", data={"reason": limit_pause_reason})
                 logger.operation_complete(
                     "sender-send-invites",
@@ -2959,14 +3045,38 @@ async def main() -> None:
                         "skipped": 0,
                         "limit_reached": True,
                         "total": 0,
-                    },
+                        },
                 )
                 return
+            if limit_pause_reason and args.lead_id:
+                logger.warn(
+                    "Connect-only invite sending paused; probing requested lead for already-connected state only",
+                    data={"reason": limit_pause_reason, "leadId": args.lead_id},
+                )
 
-            leads_to_process = fetch_invite_queue(client, remaining, args.batch_id)
-            if not leads_to_process:
-                logger.info("No NEW sequence-driven leads to invite", {"batchId": args.batch_id})
-                return
+            if args.lead_id:
+                lead = fetch_lead_by_id(client, args.lead_id)
+                if not lead:
+                    logger.warn("Requested invite lead id not found", {"leadId": args.lead_id})
+                    return
+                if not _is_invite_candidate(lead):
+                    logger.warn(
+                        "Requested lead is not eligible for invite send",
+                        {
+                            "leadId": args.lead_id,
+                            "status": lead.get("status"),
+                            "outreach_mode": lead.get("outreach_mode"),
+                            "connection_sent_at": lead.get("connection_sent_at"),
+                            "sent_at": lead.get("sent_at"),
+                        },
+                    )
+                    return
+                leads_to_process = [lead]
+            else:
+                leads_to_process = fetch_invite_queue(client, remaining, args.batch_id)
+                if not leads_to_process:
+                    logger.info("No NEW or FAILED sequence-driven leads to invite", {"batchId": args.batch_id})
+                    return
 
             logger.info(
                 f"send-invites: processing {len(leads_to_process)} leads",
@@ -2989,7 +3099,12 @@ async def main() -> None:
                         skipped_count += 1
                         continue
                     try:
-                        result = await process_invite_one(context, client, lead)
+                        result = await process_invite_one(
+                            context,
+                            client,
+                            lead,
+                            allow_invite_send=not bool(limit_pause_reason),
+                        )
                         if result == "sent":
                             sent_count += 1
                         elif result == "connected":
@@ -2997,6 +3112,8 @@ async def main() -> None:
                         elif result == "limit_reached":
                             limit_reached = True
                             break
+                        elif result == "paused":
+                            skipped_count += 1
                         else:
                             failed_count += 1
                     except Exception as exc:

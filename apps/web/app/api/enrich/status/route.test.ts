@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { detectConnectOnlyLimitPause, hasConnectOnlyLimitMarker } from "./route";
+import { detectConnectOnlyLimitPause, hasConnectOnlyLimitMarker } from "./pause";
+import { getConnectOnlyLimitWindowStart } from "./window";
 
 test("hasConnectOnlyLimitMarker reads the explicit connect-only pause flag", () => {
   assert.equal(
@@ -49,4 +50,9 @@ test("detectConnectOnlyLimitPause stays false when no pause marker exists", () =
     ]),
     false,
   );
+});
+
+test("getConnectOnlyLimitWindowStart uses a 7-day lookback", () => {
+  const now = new Date("2026-05-06T12:00:00.000Z");
+  assert.equal(getConnectOnlyLimitWindowStart(now), "2026-04-29T12:00:00.000Z");
 });

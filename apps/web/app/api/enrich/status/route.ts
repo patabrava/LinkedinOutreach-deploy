@@ -4,6 +4,8 @@ import { requireOperatorAccess } from "../../../../lib/apiGuard";
 import { logger } from "../../../../lib/logger";
 import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 import { listActiveWorkers } from "../../../../lib/workerControl";
+import { detectConnectOnlyLimitPause } from "./pause";
+import { getConnectOnlyLimitWindowStart } from "./window";
 
 // Force dynamic rendering - disable all caching
 export const dynamic = 'force-dynamic';
@@ -53,50 +55,6 @@ const MODE_CONFIG = {
     completedStatuses: ["CONNECT_ONLY_SENT"] as StatusKey[],
   },
 } as const;
-
-const WEEKLY_LIMIT_PATTERNS = [
-  "weekly limit",
-  "weekly invitation limit",
-  "invitation limit",
-  "contact request limit",
-  "contact requests",
-  "invite limit",
-  "invite limit reached",
-  "too many invitations",
-  "too many contact requests",
-  "reached a limit",
-  "wöchentliche limit",
-  "wöchentliche kontaktanfragen",
-  "kontaktanfragen",
-  "kontaktanfrage",
-  "kontaktanfragen erreicht",
-  "nächste woche",
-  "next week",
-];
-
-const detectWeeklyLimit = (text: string | null | undefined) => {
-  const normalized = (text || "").toLowerCase();
-  return WEEKLY_LIMIT_PATTERNS.some((pattern) => normalized.includes(pattern));
-};
-
-export const hasConnectOnlyLimitMarker = (profileData: unknown) => {
-  if (!profileData || typeof profileData !== "object") return false;
-  const meta = (profileData as { meta?: unknown }).meta;
-  if (!meta || typeof meta !== "object") return false;
-  const metaRecord = meta as Record<string, unknown>;
-  return metaRecord.connect_only_limit_reached === true;
-};
-
-export const detectConnectOnlyLimitPause = (
-  recentFailed: Array<{ error_message?: string | null; profile_data?: unknown }> | null | undefined,
-) => {
-  return (recentFailed || []).some((row) => {
-    if (hasConnectOnlyLimitMarker(row.profile_data)) {
-      return true;
-    }
-    return detectWeeklyLimit(row.error_message);
-  });
-};
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -165,6 +123,7 @@ export async function GET(request: Request) {
     let completedTodayError: any = null;
     let limitReached = false;
     let limitMessage: string | null = null;
+    const connectOnlyWindowStart = getConnectOnlyLimitWindowStart();
 
     if (isConnectOnly) {
       logger.dbQuery(
@@ -211,7 +170,7 @@ export async function GET(request: Request) {
         .select("id, error_message, profile_data, updated_at")
         .eq("outreach_mode", modeConfig.outreachMode)
         .eq("status", "FAILED")
-        .gte("updated_at", startIso)
+        .gte("updated_at", connectOnlyWindowStart)
         .order("updated_at", { ascending: false })
         .limit(10);
 
@@ -232,6 +191,7 @@ export async function GET(request: Request) {
           .eq("outreach_mode", modeConfig.outreachMode)
           .eq("status", "NEW")
           .contains("profile_data", { meta: { connect_only_limit_reached: true } })
+          .gte("updated_at", connectOnlyWindowStart)
           .limit(1);
 
         if (pausedLeadsError) {
