@@ -53,7 +53,7 @@ def _resolve_scraper_auth_path() -> Path:
 
 
 AUTH_STATE_PATH = _resolve_scraper_auth_path()
-DAILY_SEND_DEFAULT = 100
+DAILY_SEND_DEFAULT = 50
 SEQUENCE_INTERVAL_DEFAULT_DAYS = 3
 LEAD_MESSAGE_ONLY_MAX_RETRIES = 3
 FOLLOWUP_PROCESSING_STALE_MINUTES = 45
@@ -214,6 +214,42 @@ def sent_today_count(client: Client) -> int:
     return count
 
 
+def connect_only_sent_today_count(client: Client) -> int:
+    start_iso = today_utc_iso()
+    logger.db_query(
+        "select-count",
+        "leads",
+        {"outreach_mode": "connect_only", "metric": "connection_sent_at"},
+        {"since": start_iso},
+    )
+    resp = (
+        client.table("leads")
+        .select("id", count="exact")
+        .eq("outreach_mode", "connect_only")
+        .not_.is_("connection_sent_at", "null")
+        .gte("connection_sent_at", start_iso)
+        .execute()
+    )
+    count = getattr(resp, "count", None) or 0
+    logger.db_result(
+        "select-count",
+        "leads",
+        {"outreach_mode": "connect_only", "metric": "connection_sent_at"},
+        count,
+    )
+    logger.info("Connect-only invites sent today", data={"count": count})
+    return count
+
+
+def resolve_daily_send_limit() -> int:
+    env_limit = os.getenv("DAILY_SEND_LIMIT")
+    try:
+        parsed_limit = int(env_limit) if env_limit else DAILY_SEND_DEFAULT
+    except Exception:
+        parsed_limit = DAILY_SEND_DEFAULT
+    return max(parsed_limit, 1)
+
+
 def fetch_approved_leads(client: Client, limit: int) -> list[Dict[str, Any]]:
     """Fetch multiple approved leads at once to prevent duplicate fetching."""
     logger.db_query("select", "leads", {"status": "APPROVED", "limit": limit})
@@ -264,6 +300,20 @@ def normalize_linkedin_profile_url(url: str) -> str:
     if normalized.startswith("www.linkedin.com/"):
         normalized = f"https://{normalized}"
     return normalized
+
+
+def _resolve_launch_sequence_id(lead: Dict[str, Any]) -> Optional[int]:
+    env_value = os.getenv("OUTREACH_SEQUENCE_ID", "").strip()
+    if env_value.isdigit():
+        sequence_id = int(env_value)
+        if sequence_id > 0:
+            return sequence_id
+
+    lead_sequence_id = lead.get("sequence_id")
+    if isinstance(lead_sequence_id, int) and lead_sequence_id > 0:
+        return lead_sequence_id
+
+    return None
 
 
 def classify_connect_only_surface(
@@ -493,56 +543,14 @@ def fetch_invite_queue(client: Client, limit: int, batch_id: Optional[int] = Non
     response = query.execute()
     rows = response.data or []
     filtered_rows: list[Dict[str, Any]] = []
-    skipped_paused = 0
     for row in rows:
         if not _is_invite_candidate(row):
-            continue
-        meta = ((row.get("profile_data") or {}).get("meta") or {})
-        if meta.get("connect_only_limit_reached") is True:
-            skipped_paused += 1
             continue
         filtered_rows.append(row)
         if len(filtered_rows) >= limit:
             break
     logger.db_result("select", "leads", query_meta, len(filtered_rows))
-    if skipped_paused:
-        logger.info(
-            "Skipped paused connect-only leads already marked as limit reached",
-            data={"skipped": skipped_paused, "batch_id": batch_id},
-        )
     return filtered_rows
-
-
-def connect_only_invite_limit_active(client: Client) -> Optional[str]:
-    """Return a reason string when connect-only invites should be paused."""
-    start_of_week_window = (datetime.utcnow() - timedelta(days=7)).isoformat()
-
-    recent_failed = (
-        client.table("leads")
-        .select("id, error_message, updated_at")
-        .eq("outreach_mode", "connect_only")
-        .eq("status", "FAILED")
-        .gte("updated_at", start_of_week_window)
-        .order("updated_at", desc=True)
-        .limit(10)
-        .execute()
-    ).data or []
-    if any("weekly invite limit" in str(row.get("error_message") or "").lower() for row in recent_failed):
-        return "LinkedIn weekly invite limit reached. Stop until next week."
-
-    paused = (
-        client.table("leads")
-        .select("id")
-        .eq("outreach_mode", "connect_only")
-        .eq("status", "NEW")
-        .contains("profile_data", { "meta": { "connect_only_limit_reached": True } })
-        .limit(1)
-        .execute()
-    ).data or []
-    if paused:
-        return "LinkedIn weekly invite limit reached. Some leads are paused for retry next week."
-
-    return None
 
 
 def fetch_next_lead(client: Client) -> Optional[Dict[str, Any]]:
@@ -703,7 +711,7 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
         "source": "defaults",
     }
 
-    sequence_id = lead.get("sequence_id")
+    sequence_id = _resolve_launch_sequence_id(lead)
     if sequence_id is None and lead.get("batch_id"):
         try:
             batch_resp = (
@@ -2948,15 +2956,9 @@ async def main() -> None:
     try:
         client = get_supabase_client()
        
-        # Compute daily limit with a hard minimum of 100 to avoid getting stuck at 20
-        env_limit = os.getenv("DAILY_SEND_LIMIT")
-        try:
-            parsed_limit = int(env_limit) if env_limit else DAILY_SEND_DEFAULT
-        except Exception:
-            parsed_limit = DAILY_SEND_DEFAULT
-        daily_limit = max(parsed_limit, 100)
-        logger.info("Daily send limit computed", data={"limit": daily_limit, "env": env_limit, "default": DAILY_SEND_DEFAULT})
-        already_sent = sent_today_count(client)
+        daily_limit = resolve_daily_send_limit()
+        logger.info("Daily send limit computed", data={"limit": daily_limit, "env": os.getenv("DAILY_SEND_LIMIT"), "default": DAILY_SEND_DEFAULT})
+        already_sent = connect_only_sent_today_count(client) if args.send_invites else sent_today_count(client)
 
         if already_sent >= daily_limit and not args.followup:
             logger.warn("Daily send limit reached", data={"limit": daily_limit, "sent": already_sent})
@@ -3098,27 +3100,6 @@ async def main() -> None:
             return
 
         if args.send_invites:
-            limit_pause_reason = connect_only_invite_limit_active(client)
-            if limit_pause_reason and not args.lead_id:
-                logger.warn("Connect-only invite sending paused", data={"reason": limit_pause_reason})
-                logger.operation_complete(
-                    "sender-send-invites",
-                    result={
-                        "sent": 0,
-                        "connected": 0,
-                        "failed": 0,
-                        "skipped": 0,
-                        "limit_reached": True,
-                        "total": 0,
-                        },
-                )
-                return
-            if limit_pause_reason and args.lead_id:
-                logger.warn(
-                    "Connect-only invite sending paused; probing requested lead for already-connected state only",
-                    data={"reason": limit_pause_reason, "leadId": args.lead_id},
-                )
-
             if args.lead_id:
                 lead = fetch_lead_by_id(client, args.lead_id)
                 if not lead:
@@ -3168,7 +3149,7 @@ async def main() -> None:
                             context,
                             client,
                             lead,
-                            allow_invite_send=not bool(limit_pause_reason),
+                            allow_invite_send=True,
                         )
                         if result == "sent":
                             sent_count += 1
