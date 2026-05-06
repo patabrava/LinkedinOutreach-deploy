@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from sender import load_sequence_messages
+from sender import fetch_lead_by_id, load_sequence_messages
 
 
 class FakeResponse:
@@ -47,6 +47,36 @@ class FakeClient:
         return FakeQuery(self.rows, table_name)
 
 
+class SelectFallbackQuery:
+    def __init__(self, row):
+        self.row = row
+        self.selected = ""
+
+    def select(self, selected, *_args, **_kwargs):
+        self.selected = selected
+        return self
+
+    def eq(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, *_args, **_kwargs):
+        return self
+
+    def execute(self):
+        if "csv_batch_id" in self.selected:
+            raise RuntimeError("column leads.csv_batch_id does not exist")
+        return FakeResponse([self.row])
+
+
+class SelectFallbackClient:
+    def __init__(self, row):
+        self.row = row
+
+    def table(self, table_name):
+        assert table_name == "leads"
+        return SelectFallbackQuery(self.row)
+
+
 class LoadSequenceMessagesTest(unittest.TestCase):
     def test_connect_note_is_hydrated_from_sequence_row(self):
         client = FakeClient(
@@ -71,6 +101,21 @@ class LoadSequenceMessagesTest(unittest.TestCase):
         result = load_sequence_messages(client, lead)
 
         self.assertEqual(result["connect_note"], "Hi Mia")
+
+    def test_fetch_lead_by_id_fallback_preserves_sequence_fields(self):
+        client = SelectFallbackClient(
+            {
+                "id": "lead-1",
+                "sequence_id": 4,
+                "batch_id": 21,
+                "outreach_mode": "connect_only",
+            }
+        )
+
+        result = fetch_lead_by_id(client, "lead-1")
+
+        self.assertEqual(result["sequence_id"], 4)
+        self.assertEqual(result["batch_id"], 21)
 
 
 if __name__ == "__main__":

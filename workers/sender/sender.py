@@ -57,6 +57,13 @@ DAILY_SEND_DEFAULT = 100
 SEQUENCE_INTERVAL_DEFAULT_DAYS = 3
 LEAD_MESSAGE_ONLY_MAX_RETRIES = 3
 FOLLOWUP_PROCESSING_STALE_MINUTES = 45
+LEAD_SELECT_FIELDS_CORE = (
+    "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
+    "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
+    "sequence_id, sequence_step, sequence_started_at, sequence_last_sent_at, "
+    "batch_id, outreach_mode, profile_data"
+)
+LEAD_SELECT_FIELDS_EXTENDED = f"{LEAD_SELECT_FIELDS_CORE}, csv_batch_id, ai_tags"
 SEQUENCE_DEFAULT_MESSAGES = {
     "first_message": (
         "Hi {first_name},\n\n"
@@ -387,17 +394,6 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
     so leads whose invite was sent remain eligible even if a status promotion
     never happened.
     """
-    select_fields_extended = (
-        "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
-        "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
-        "sequence_id, sequence_step, sequence_started_at, sequence_last_sent_at, "
-        "csv_batch_id, outreach_mode, profile_data, ai_tags"
-    )
-    select_fields_legacy = (
-        "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
-        "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
-        "outreach_mode, profile_data, ai_tags"
-    )
     query_meta: Dict[str, Any] = {
         "status": MESSAGE_ONLY_PIPELINE_STATUSES,
         "outreach_mode": "connect_only",
@@ -409,7 +405,7 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
     try:
         query = (
             client.table("leads")
-            .select(select_fields_extended)
+            .select(LEAD_SELECT_FIELDS_EXTENDED)
             .eq("outreach_mode", "connect_only")
             .is_("sent_at", "null")
             .or_(
@@ -422,10 +418,11 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
         if batch_id is not None:
             query = query.eq("batch_id", batch_id)
         resp = query.limit(limit).execute()
-    except Exception:
+    except Exception as exc:
+        logger.warn("Message-only lead extended select failed; retrying core fields", error=exc)
         query = (
             client.table("leads")
-            .select(select_fields_legacy)
+            .select(LEAD_SELECT_FIELDS_CORE)
             .eq("outreach_mode", "connect_only")
             .is_("sent_at", "null")
             .or_(
@@ -553,29 +550,19 @@ def fetch_next_lead(client: Client) -> Optional[Dict[str, Any]]:
 
 
 def fetch_lead_by_id(client: Client, lead_id: str) -> Optional[Dict[str, Any]]:
-    select_fields_extended = (
-        "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
-        "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
-        "sequence_id, sequence_step, sequence_started_at, sequence_last_sent_at, "
-        "csv_batch_id, batch_id, outreach_mode, profile_data, ai_tags"
-    )
-    select_fields_legacy = (
-        "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
-        "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
-        "outreach_mode, profile_data, ai_tags"
-    )
     try:
         resp = (
             client.table("leads")
-            .select(select_fields_extended)
+            .select(LEAD_SELECT_FIELDS_EXTENDED)
             .eq("id", lead_id)
             .limit(1)
             .execute()
         )
-    except Exception:
+    except Exception as exc:
+        logger.warn("Lead extended select failed; retrying core fields", {"leadId": lead_id}, error=exc)
         resp = (
             client.table("leads")
-            .select(select_fields_legacy)
+            .select(LEAD_SELECT_FIELDS_CORE)
             .eq("id", lead_id)
             .limit(1)
             .execute()
@@ -715,6 +702,27 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
     }
 
     sequence_id = lead.get("sequence_id")
+    if sequence_id is None and lead.get("batch_id"):
+        try:
+            batch_resp = (
+                client.table("lead_batches")
+                .select("sequence_id")
+                .eq("id", lead.get("batch_id"))
+                .limit(1)
+                .execute()
+            )
+            batch_rows = batch_resp.data or []
+            batch_sequence_id = batch_rows[0].get("sequence_id") if batch_rows else None
+            if isinstance(batch_sequence_id, int) and batch_sequence_id > 0:
+                sequence_id = batch_sequence_id
+        except Exception as exc:
+            logger.warn(
+                "Failed to resolve sequence from lead batch",
+                {"leadId": lead.get("id"), "batchId": lead.get("batch_id")},
+                error=exc,
+            )
+
+    require_explicit_sequence = str(lead.get("outreach_mode") or "").lower() == "connect_only"
     rows: list[Dict[str, Any]] = []
     try:
         query = client.table("outreach_sequences").select(
@@ -726,7 +734,8 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
             query = query.eq("is_active", True).order("created_at", desc=False).limit(1)
         resp = query.execute()
         rows = resp.data or []
-    except Exception:
+    except Exception as exc:
+        logger.warn("Failed to load sequence messages", {"leadId": lead.get("id"), "sequenceId": sequence_id}, error=exc)
         rows = []
 
     if rows:
@@ -742,6 +751,26 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
                 ),
                 "source": "outreach_sequences",
             }
+        )
+        logger.info(
+            "Resolved sequence messages",
+            {"leadId": lead.get("id")},
+            {"sequenceId": row.get("id"), "source": result["source"], "firstMessagePreview": str(result["first_message"])[:80]},
+        )
+    elif require_explicit_sequence:
+        result.update(
+            {
+                "connect_note": "",
+                "first_message": "",
+                "second_message": "",
+                "third_message": "",
+                "source": "missing_connect_only_sequence",
+            }
+        )
+        logger.error(
+            "Connect-only lead has no resolvable sequence; refusing active-sequence fallback",
+            {"leadId": lead.get("id")},
+            data={"leadSequenceId": lead.get("sequence_id"), "batchId": lead.get("batch_id")},
         )
     else:
         for key in ["outreach_sequences", "outreach_sequence", "sequence_templates"]:
@@ -1039,19 +1068,42 @@ async def open_sales_navigator_message_surface(page: Page) -> Optional[Page]:
     return None
 
 
+def normalize_typed_text(text: str) -> str:
+    return "\n".join(line.rstrip() for line in (text or "").replace("\r\n", "\n").split("\n")).strip()
+
+
+async def clear_text_field(page: Page, locator) -> None:
+    await locator.click()
+    for shortcut in ("Meta+A", "Control+A"):
+        try:
+            await page.keyboard.press(shortcut)
+            await page.keyboard.press("Backspace")
+            await page.wait_for_timeout(100)
+        except Exception:
+            continue
+    try:
+        await locator.evaluate(
+            """el => {
+                if ('value' in el) el.value = '';
+                if (el.isContentEditable) el.innerHTML = '';
+                el.textContent = '';
+                el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }"""
+        )
+    except Exception:
+        pass
+    await page.wait_for_timeout(200)
+
+
 async def fill_text_field(page: Page, selector_name: str, locator, value: str) -> None:
     await locator.wait_for(state="visible", timeout=10_000)
     await locator.click()
-    try:
-        await page.keyboard.press("Meta+A")
-        await page.keyboard.press("Backspace")
-    except Exception:
-        await page.keyboard.press("Control+A")
-        await page.keyboard.press("Backspace")
+    await clear_text_field(page, locator)
     await human_type(page, value)
     await page.wait_for_timeout(500)
     actual_text = await locator.evaluate("el => el.value || el.textContent || el.innerText || ''") or ""
-    if len(actual_text.strip()) < max(1, len(value.strip()) - 2):
+    if normalize_typed_text(actual_text) != normalize_typed_text(value):
         raise RuntimeError(f"{selector_name} verification failed after typing.")
     logger.element_type(selector_name, len(value), text_preview=value[:40])
 
@@ -1294,6 +1346,7 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
         raise RuntimeError("Could not find message input box")
 
     await editor.click()
+    await clear_text_field(page, editor)
     await human_type(page, message)
     logger.element_type(used_selector, len(message), text_preview=message[:40])
     await random_pause()
@@ -1306,20 +1359,30 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
     for verification_attempt in range(10):
         try:
             actual_text = await editor.evaluate("el => el.value || el.textContent || el.innerText || ''") or ""
-            actual_length = len(actual_text.strip())
-            expected_length = len(message.strip())
+            actual_normalized = normalize_typed_text(actual_text)
+            expected_normalized = normalize_typed_text(message)
 
-            if actual_length >= expected_length - 2:  # Allow 1-2 char margin for encoding
-                logger.debug(f"Text verification passed", data={"expected": expected_length, "actual": actual_length})
+            if actual_normalized == expected_normalized:
+                logger.debug(
+                    "Text verification passed",
+                    data={"expected": len(expected_normalized), "actual": len(actual_normalized)},
+                )
                 break
             else:
-                logger.debug(f"Text still being entered", data={"expected": expected_length, "actual": actual_length, "attempt": verification_attempt})
+                logger.debug(
+                    "Text still being entered",
+                    data={
+                        "expected": len(expected_normalized),
+                        "actual": len(actual_normalized),
+                        "attempt": verification_attempt,
+                    },
+                )
                 await page.wait_for_timeout(200)
         except Exception as e:
             logger.warn(f"Text verification attempt {verification_attempt} failed", error=e)
             await page.wait_for_timeout(200)
     else:
-        logger.warn("Could not verify full direct message text was entered, proceeding anyway")
+        raise RuntimeError("Direct message composer verification failed after typing.")
 
     # Find and click Send button
     send_btn = page.locator(
