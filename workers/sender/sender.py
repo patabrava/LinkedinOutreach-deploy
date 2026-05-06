@@ -340,12 +340,17 @@ def classify_connect_only_probe_surface(
     connect_button_count: int,
     more_button_count: int,
     has_visible_connect_or_pending_state: bool,
+    has_more_menu_pending_state: bool = False,
 ) -> str:
+    if has_more_menu_pending_state:
+        return "pending_invite"
     if explicit_message_button_count > 0 or explicit_message_link_count > 0:
         return "already_connected"
     if invite_link_count > 0 or connect_button_count > 0:
         return "invite_available"
     if generic_message_link_count > 0 and has_visible_connect_or_pending_state:
+        return "invite_available"
+    if generic_message_link_count > 0 and more_button_count > 0:
         return "invite_available"
     if generic_message_link_count > 0:
         return "already_connected"
@@ -437,6 +442,36 @@ async def _has_visible_connect_or_pending_state(profile_container) -> bool:
         except Exception:
             continue
     return False
+
+
+async def _more_menu_has_pending_invite(page: Page, profile_container) -> bool:
+    """Open profile More/Mehr actions and detect pending invitation state."""
+    try:
+        more_button = profile_container.get_by_role("button", name=re.compile(r"(More|Mehr)", re.I))
+        if await more_button.count() == 0:
+            return False
+        await more_button.first.click(timeout=5_000)
+        await page.wait_for_timeout(700)
+        pending_items = [
+            page.get_by_role("menuitem", name=re.compile(r"(Ausstehend|Pending)", re.I)),
+            page.get_by_role("button", name=re.compile(r"(Ausstehend|Pending)", re.I)),
+            page.locator("[role='menuitem']:has-text('Ausstehend'), [role='menuitem']:has-text('Pending')"),
+        ]
+        for item in pending_items:
+            try:
+                if await item.count() > 0:
+                    return True
+            except Exception:
+                continue
+        return False
+    except Exception as exc:
+        logger.warn("Failed to inspect More menu for pending invite state", error=exc)
+        return False
+    finally:
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
 
 
 def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int] = None) -> list[Dict[str, Any]]:
@@ -2178,6 +2213,7 @@ def persist_invite_sent(client: Client, lead_id: str, outreach_mode: Optional[st
     update_payload = {
         "status": "CONNECT_ONLY_SENT",
         "connection_sent_at": now_iso,
+        "error_message": None,
         "updated_at": now_iso,
     }
     logger.db_query(
@@ -2363,6 +2399,10 @@ async def probe_connect_only_surface(page: Page, lead: ScraperLead) -> str:
     connect_button_count = await direct_connect_button.count()
     more_button_count = await more_button.count()
     has_visible_connect_or_pending_state = await _has_visible_connect_or_pending_state(profile_container)
+    has_more_menu_pending_state = False
+    if generic_message_link_count > 0 and more_button_count > 0 and not has_visible_connect_or_pending_state:
+        has_more_menu_pending_state = await _more_menu_has_pending_invite(page, profile_container)
+        has_visible_connect_or_pending_state = has_more_menu_pending_state
     surface = classify_connect_only_probe_surface(
         explicit_message_button_count=explicit_message_button_count,
         explicit_message_link_count=explicit_message_link_count,
@@ -2371,6 +2411,7 @@ async def probe_connect_only_surface(page: Page, lead: ScraperLead) -> str:
         connect_button_count=connect_button_count,
         more_button_count=more_button_count,
         has_visible_connect_or_pending_state=has_visible_connect_or_pending_state,
+        has_more_menu_pending_state=has_more_menu_pending_state,
     )
     logger.info(
         "Connect-only surface probe complete",
@@ -2384,6 +2425,7 @@ async def probe_connect_only_surface(page: Page, lead: ScraperLead) -> str:
             "connectButtonCount": connect_button_count,
             "moreButtonCount": more_button_count,
             "hasVisibleConnectOrPendingState": has_visible_connect_or_pending_state,
+            "hasMoreMenuPendingState": has_more_menu_pending_state,
         },
     )
     return surface
@@ -2432,6 +2474,13 @@ async def process_invite_one(
                         {"leadId": lead_id},
                     )
                     return result
+                if surface == "pending_invite":
+                    persist_invite_sent(client, lead_id, outreach_mode)
+                    logger.info(
+                        "Connect-only lead already has pending invite; persisted sent state",
+                        {"leadId": lead_id},
+                    )
+                    return "sent"
                 if not allow_invite_send:
                     client.table("leads").update({
                         "status": "FAILED",
@@ -2562,6 +2611,13 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
             if explicit_message_link is None and await _has_visible_connect_or_pending_state(profile_container):
                 logger.info(
                     "Generic message surface is ambiguous; connect/pending state is still visible",
+                    {"leadId": lead_id},
+                )
+                await page.close()
+                return "pending"
+            if explicit_message_link is None and await _more_menu_has_pending_invite(page, profile_container):
+                logger.info(
+                    "Generic message surface is Sales Navigator/InMail while More menu still shows pending invite",
                     {"leadId": lead_id},
                 )
                 await page.close()

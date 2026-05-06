@@ -219,6 +219,102 @@ async def confirm_connection_request_sent(page: Page, timeout_ms: int = 8_000) -
     return False
 
 
+async def confirm_connection_request_sent_with_profile_recheck(
+    page: Page,
+    profile_url: str,
+    *,
+    timeout_ms: int = 8_000,
+    recheck_timeout_ms: int = 20_000,
+) -> bool:
+    """Confirm invite delivery, recovering from LinkedIn's post-click loading page."""
+    if await confirm_connection_request_sent(page, timeout_ms=timeout_ms):
+        return True
+
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=3_000)
+    except Exception:
+        pass
+
+    if await confirm_connection_request_sent(page, timeout_ms=2_000):
+        return True
+
+    normalized = profile_url.replace("http://", "https://").split("?")[0].rstrip("/")
+    if not normalized:
+        return False
+
+    logger.info("Connect-only send not confirmed on current page; rechecking profile state", data={"url": normalized})
+    try:
+        await gentle_nav(page, normalized)
+        await page.wait_for_selector("main", timeout=recheck_timeout_ms)
+        await page.wait_for_timeout(1_500)
+    except Exception as exc:
+        logger.warn("Connect-only profile recheck navigation failed", error=exc, data={"url": normalized})
+        return False
+
+    if await confirm_connection_request_sent(page, timeout_ms=recheck_timeout_ms):
+        return True
+
+    try:
+        profile_container = page.get_by_test_id("lazy-column")
+        await profile_container.wait_for(state="visible", timeout=3_000)
+    except Exception:
+        try:
+            profile_container = page.locator("main.scaffold-layout__main, section.artdeco-card").first
+            await profile_container.wait_for(state="visible", timeout=3_000)
+        except Exception:
+            profile_container = page
+
+    try:
+        more_button = profile_container.get_by_role("button", name=re.compile(r"(More|Mehr)", re.I))
+        if await more_button.count() > 0:
+            await more_button.first.click(timeout=6_000, force=True)
+            await page.wait_for_timeout(700)
+            menu_text = await page.locator("body").inner_text(timeout=2_000)
+            if _has_connection_request_confirmation(menu_text):
+                return True
+    except Exception as exc:
+        logger.warn("Connect-only profile recheck More menu inspection failed", error=exc, data={"url": normalized})
+    finally:
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+    return False
+
+
+async def profile_has_pending_invite(page: Page, profile_container) -> bool:
+    """Detect a pending invite on the profile action bar or More/Mehr menu."""
+    pending_pattern = re.compile(r"(Ausstehend|Pending)", re.I)
+    for role in ("button", "link"):
+        try:
+            pending = profile_container.get_by_role(role, name=pending_pattern)
+            if await pending.count() > 0:
+                return True
+        except Exception:
+            continue
+
+    try:
+        more_button = profile_container.get_by_role("button", name=re.compile(r"(More|Mehr)", re.I))
+        if await more_button.count() == 0:
+            return False
+        await more_button.first.click(timeout=6_000, force=True)
+        await page.wait_for_timeout(700)
+        menu_pending = page.get_by_role("menuitem", name=pending_pattern)
+        if await menu_pending.count() > 0:
+            return True
+        menu_text = await page.locator("body").inner_text(timeout=2_000)
+        return bool(pending_pattern.search(menu_text))
+    except Exception as exc:
+        logger.warn("Connect-only pending invite inspection failed", error=exc)
+        return False
+    finally:
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+
 def execute_with_retry(query, desc: str, attempts: int = 3, delay: float = 1.0):
     """Execute a Supabase query with basic retry/backoff for transient network errors."""
     last_exc = None
@@ -822,6 +918,10 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
             # Last resort: use page itself (risky but better than failing)
             profile_container = page
             logger.warn("connect-only: using page-level selectors as last resort")
+
+    if await profile_has_pending_invite(page, profile_container):
+        logger.connection_flow("pending_invite", "ALREADY_SENT", data={"url": normalized})
+        return True
     
     # PATH 1: Direct invite link inside profile container (Invite <Name> to ...)
     invite_link = profile_container.get_by_role("link", name=re.compile(r"(Invite .+ to|Einladen .+ zu)", re.I))
@@ -988,7 +1088,7 @@ async def _click_send_without_note(page: Page, url: str, lead_id: Optional[str] 
                 data={"url": url, "reason": limit_reason, "screenshot": screenshot_path},
             )
             raise WeeklyInviteLimitReached(limit_reason)
-        if not await confirm_connection_request_sent(page):
+        if not await confirm_connection_request_sent_with_profile_recheck(page, url):
             screenshot_path = await capture_connect_failure_screenshot(page, "send_button_unconfirmed", lead_id)
             logger.connection_flow(
                 "send_button",

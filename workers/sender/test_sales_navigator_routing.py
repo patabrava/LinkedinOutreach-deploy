@@ -12,7 +12,7 @@ from sender import (
     MESSAGE_ONLY_PROCESSING_STATUSES,
     classify_connect_only_surface,
     classify_connect_only_probe_surface,
-    connect_only_invite_limit_active,
+    connect_only_sent_today_count,
     fetch_invite_queue,
     fetch_message_only_leads,
     build_sales_navigator_body,
@@ -174,10 +174,11 @@ class FakeInvitePersistClient:
         return FakeInvitePersistQuery(self, table_name)
 
 
-class FakeLimitQuery:
+class FakeCountQuery:
     def __init__(self, client):
         self.client = client
         self.filters = []
+        self.not_ = self
 
     def select(self, *_args, **_kwargs):
         return self
@@ -198,27 +199,22 @@ class FakeLimitQuery:
         self.filters.append(("limit", value))
         return self
 
-    def contains(self, key, value):
-        self.filters.append(("contains", key, value))
+    def is_(self, key, value):
+        self.filters.append(("not_is", key, value))
         return self
 
     def execute(self):
         self.client.calls.append(self.filters)
-        if any(f[:2] == ("eq", "status") and f[2] == "FAILED" for f in self.filters):
-            return FakeResponse(self.client.failed_rows)
-        if any(f[0] == "contains" for f in self.filters):
-            return FakeResponse(self.client.paused_rows)
-        return FakeResponse([])
+        return FakeResponse(count=self.client.count)
 
 
-class FakeLimitClient:
-    def __init__(self, failed_rows=None, paused_rows=None):
-        self.failed_rows = failed_rows or []
-        self.paused_rows = paused_rows or []
+class FakeCountClient:
+    def __init__(self, count=0):
+        self.count = count
         self.calls = []
 
     def table(self, _table_name):
-        return FakeLimitQuery(self)
+        return FakeCountQuery(self)
 
 
 class FakeInviteQueueQuery:
@@ -373,7 +369,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual(
             build_sales_navigator_body(message),
-            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.\n\nViele Grüße,",
+            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.",
         )
 
     def test_mark_message_only_processing_locks_only_eligible_status(self):
@@ -457,21 +453,14 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
             )
         )
 
-    def test_connect_only_invite_limit_active_detects_recent_failed_limit(self):
-        client = FakeLimitClient(
-            failed_rows=[{"id": "lead-1", "error_message": "LinkedIn weekly invite limit reached"}],
-        )
+    def test_connect_only_sent_today_count_uses_connection_sent_at_for_connect_only_rows(self):
+        client = FakeCountClient(count=7)
 
-        result = connect_only_invite_limit_active(client)
+        result = connect_only_sent_today_count(client)
 
-        self.assertIsNotNone(result)
-
-    def test_connect_only_invite_limit_active_detects_paused_new_lead(self):
-        client = FakeLimitClient(paused_rows=[{"id": "lead-1"}])
-
-        result = connect_only_invite_limit_active(client)
-
-        self.assertIsNotNone(result)
+        self.assertEqual(result, 7)
+        self.assertTrue(any(item[0] == "eq" and item[1] == "outreach_mode" and item[2] == "connect_only" for item in client.calls[0]))
+        self.assertTrue(any(item[0] == "not_is" and item[1] == "connection_sent_at" and item[2] == "null" for item in client.calls[0]))
 
     def test_mark_connect_only_limit_reached_persists_pause_metadata(self):
         lead = {"id": "lead-1", "profile_data": {"meta": {"existing": True}}}
@@ -564,7 +553,22 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
             "invite_available",
         )
 
-    def test_classify_connect_only_probe_surface_treats_generic_message_without_connect_state_as_connected(self):
+    def test_classify_connect_only_probe_surface_detects_pending_invite_from_more_menu(self):
+        self.assertEqual(
+            classify_connect_only_probe_surface(
+                explicit_message_button_count=0,
+                explicit_message_link_count=0,
+                generic_message_link_count=1,
+                invite_link_count=0,
+                connect_button_count=0,
+                more_button_count=1,
+                has_visible_connect_or_pending_state=True,
+                has_more_menu_pending_state=True,
+            ),
+            "pending_invite",
+        )
+
+    def test_classify_connect_only_probe_surface_keeps_more_menu_before_generic_message(self):
         self.assertEqual(
             classify_connect_only_probe_surface(
                 explicit_message_button_count=0,
@@ -575,7 +579,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
                 more_button_count=1,
                 has_visible_connect_or_pending_state=False,
             ),
-            "already_connected",
+            "invite_available",
         )
 
     def test_classify_connect_only_probe_surface_accepts_generic_message_link_without_invite_state(self):
@@ -620,7 +624,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
             "invite_available",
         )
 
-    def test_classify_connect_only_probe_surface_ignores_more_button_when_generic_message_is_unambiguous(self):
+    def test_classify_connect_only_probe_surface_requires_more_menu_verification_before_generic_message(self):
         self.assertEqual(
             classify_connect_only_probe_surface(
                 explicit_message_button_count=0,
@@ -631,7 +635,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
                 more_button_count=1,
                 has_visible_connect_or_pending_state=False,
             ),
-            "already_connected",
+            "invite_available",
         )
 
     def test_promote_connect_only_to_connected_updates_lead_status(self):
