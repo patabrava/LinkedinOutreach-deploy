@@ -350,28 +350,26 @@ def strip_sales_navigator_signature(message: str) -> str:
         lines.pop()
 
     signoff_re = re.compile(
-        r"^(viele grüße|beste grüße|liebe grüße|herzliche grüße|mit freundlichen grüßen|freundliche grüße)(?:,\s*.*)?$",
+        r"^(?P<closing>viele grüße|beste grüße|liebe grüße|herzliche grüße|mit freundlichen grüßen|freundliche grüße)(?P<punct>[,!]?)\s*(?P<name>.*)?$",
         re.I,
     )
     if not lines:
         return ""
 
-    # Sales Navigator renders the sender identity next to the composer, so any
-    # manual closing block at the end of the template becomes duplicated.
-    cutoff = len(lines)
-    for idx in range(len(lines) - 1, -1, -1):
-        current = lines[idx].strip()
-        if not current:
-            continue
-        if signoff_re.match(current):
-            cutoff = idx
-            break
-        if idx > 0 and signoff_re.match(lines[idx - 1].strip()):
-            cutoff = idx - 1
-            break
+    # Sales Navigator renders the sender identity below the body. Keep the
+    # human closing phrase, but remove the duplicated name.
+    last_idx = len(lines) - 1
+    last_line = lines[last_idx].strip()
+    if last_idx > 0 and signoff_re.match(lines[last_idx - 1].strip()) and last_line:
+        return "\n".join(lines[:last_idx]).strip()
 
-    if cutoff < len(lines):
-        return "\n".join(lines[:cutoff]).strip()
+    match = signoff_re.match(last_line)
+    if match and (match.group("name") or "").strip():
+        closing = match.group("closing")
+        punct = match.group("punct") or ","
+        lines[last_idx] = f"{closing}{punct}"
+        return "\n".join(lines).strip()
+
     return "\n".join(lines).strip()
 
 

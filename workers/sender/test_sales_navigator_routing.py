@@ -335,7 +335,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual(subject, "Kurze Frage zu deiner bAV")
 
-    def test_strip_sales_navigator_signature_removes_manual_closing_only(self):
+    def test_strip_sales_navigator_signature_keeps_manual_closing_without_name(self):
         body = (
             "Hi Marina,\n\n"
             "freut mich, dass wir uns hier vernetzen.\n\n"
@@ -344,10 +344,10 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual(
             strip_sales_navigator_signature(body),
-            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.",
+            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.\n\nViele Grüße,",
         )
 
-    def test_strip_sales_navigator_signature_removes_single_line_closing(self):
+    def test_strip_sales_navigator_signature_keeps_single_line_closing_without_name(self):
         body = (
             "Hi Marina,\n\n"
             "freut mich, dass wir uns hier vernetzen.\n\n"
@@ -356,7 +356,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual(
             strip_sales_navigator_signature(body),
-            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.",
+            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.\n\nViele Grüße,",
         )
 
     def test_strip_sales_navigator_signature_keeps_non_signature_body(self):
@@ -373,7 +373,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual(
             build_sales_navigator_body(message),
-            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.",
+            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.\n\nViele Grüße,",
         )
 
     def test_mark_message_only_processing_locks_only_eligible_status(self):
