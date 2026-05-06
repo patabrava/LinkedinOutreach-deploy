@@ -15,6 +15,7 @@ from sender import (
     connect_only_invite_limit_active,
     fetch_invite_queue,
     fetch_message_only_leads,
+    build_sales_navigator_body,
     build_sales_navigator_subject,
     _is_invite_candidate,
     _is_message_only_candidate,
@@ -362,6 +363,18 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         body = "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen."
 
         self.assertEqual(strip_sales_navigator_signature(body), body)
+
+    def test_build_sales_navigator_body_removes_katharina_signature(self):
+        message = (
+            "Hi Marina,\n\n"
+            "freut mich, dass wir uns hier vernetzen.\n\n"
+            "Viele Grüße,\nKatharina"
+        )
+
+        self.assertEqual(
+            build_sales_navigator_body(message),
+            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.",
+        )
 
     def test_mark_message_only_processing_locks_only_eligible_status(self):
         lead = {"id": "lead-1", "status": "CONNECTED"}

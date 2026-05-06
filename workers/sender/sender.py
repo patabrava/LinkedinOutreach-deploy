@@ -334,6 +334,10 @@ def build_sales_navigator_subject(lead: Dict[str, Any], message: str = "") -> st
     return "Kurze Frage zu deiner bAV"
 
 
+def build_sales_navigator_body(message: str) -> str:
+    return strip_sales_navigator_signature(message)
+
+
 def strip_sales_navigator_signature(message: str) -> str:
     """Remove the manual sign-off from Sales Navigator bodies.
 
@@ -2566,7 +2570,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                     await send_sales_navigator_message(
                         message_page,
                         build_sales_navigator_subject(lead, message),
-                        message,
+                        build_sales_navigator_body(message),
                     )
                 else:
                     await message_page.wait_for_selector(
@@ -2658,7 +2662,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                 await send_sales_navigator_message(
                     sales_page,
                     build_sales_navigator_subject(lead, message),
-                    strip_sales_navigator_signature(message),
+                    build_sales_navigator_body(message),
                 )
                 accepted_at = datetime.utcnow().isoformat()
                 sequence_started_at = lead.get("sequence_started_at") or accepted_at
