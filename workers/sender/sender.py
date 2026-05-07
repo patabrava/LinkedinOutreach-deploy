@@ -64,6 +64,25 @@ LEAD_SELECT_FIELDS_CORE = (
     "batch_id, outreach_mode, profile_data"
 )
 LEAD_SELECT_FIELDS_EXTENDED = f"{LEAD_SELECT_FIELDS_CORE}, csv_batch_id, ai_tags"
+DIRECT_MESSAGE_COMPOSER_SELECTOR = (
+    "div.msg-overlay-conversation-bubble, "
+    "section[role='dialog'] div[role='textbox'][contenteditable='true'], "
+    "div.msg-form__contenteditable[contenteditable='true'], "
+    "div[aria-label*='Write a message'][contenteditable='true'], "
+    "div[aria-label*='Nachricht schreiben'][contenteditable='true'], "
+    "div[role='textbox'][contenteditable='true']:not([id^='g-recaptcha']), "
+    "div[id^='msg-form-ember'] div[role='textbox'][contenteditable='true']"
+)
+DIRECT_MESSAGE_SEND_BUTTON_SELECTOR = (
+    "button.msg-form__send-button:visible, "
+    "form.msg-form button[type='submit']:visible, "
+    "button[aria-label*='Send message']:visible, "
+    "button[aria-label*='Nachricht senden']:visible, "
+    "button:has-text('Send'):visible, "
+    "button:has-text('Senden'):visible, "
+    "button[aria-label*='Send']:visible, "
+    "button[aria-label*='Senden']:visible"
+)
 SEQUENCE_DEFAULT_MESSAGES = {
     "first_message": (
         "Hi {first_name},\n\n"
@@ -269,7 +288,6 @@ def fetch_approved_leads(client: Client, limit: int) -> list[Dict[str, Any]]:
 
 
 MESSAGE_ONLY_PIPELINE_STATUSES = [
-    "CONNECT_ONLY_SENT",
     "CONNECTED",
     "MESSAGE_ONLY_READY",
     "MESSAGE_ONLY_APPROVED",
@@ -291,6 +309,15 @@ def _is_message_only_candidate(lead: Dict[str, Any]) -> bool:
         return True
     status = str(lead.get("status") or "").upper()
     return status in MESSAGE_ONLY_PIPELINE_STATUSES
+
+
+def _message_only_priority(lead: Dict[str, Any]) -> Tuple[int, str]:
+    status = str(lead.get("status") or "").upper()
+    if lead.get("connection_accepted_at") or status in MESSAGE_ONLY_PROCESSING_STATUSES:
+        return (0, str(lead.get("updated_at") or ""))
+    if lead.get("connection_sent_at"):
+        return (1, str(lead.get("updated_at") or ""))
+    return (2, str(lead.get("updated_at") or ""))
 
 
 def normalize_linkedin_profile_url(url: str) -> str:
@@ -428,7 +455,26 @@ def strip_sales_navigator_signature(message: str) -> str:
     return "\n".join(lines).strip()
 
 
-async def _has_visible_connect_or_pending_state(profile_container) -> bool:
+def _connect_or_pending_label_matches(label: str, lead_name: str = "") -> bool:
+    normalized = re.sub(r"\s+", " ", label or "").strip().lower()
+    if not normalized:
+        return False
+    if re.search(r"\b(ausstehend|pending)\b", normalized, re.I):
+        return True
+    if not re.search(r"\b(vernetzen|connect|einladen|kontaktanfrage|invite|anfrage)\b", normalized, re.I):
+        return False
+
+    name_tokens = [
+        token.lower()
+        for token in re.findall(r"[\wÄÖÜäöüß]+", lead_name or "")
+        if len(token) >= 3
+    ]
+    if not name_tokens:
+        return True
+    return all(token in normalized for token in name_tokens)
+
+
+async def _has_visible_connect_or_pending_state(profile_container, lead_name: str = "") -> bool:
     """Detect whether the profile still exposes invite/pending actions."""
     selectors = [
         ("button", r"(Ausstehend|Pending|Vernetzen|Connect|Einladen|Kontaktanfrage|Invite|Anfrage)"),
@@ -437,8 +483,23 @@ async def _has_visible_connect_or_pending_state(profile_container) -> bool:
     for role, pattern in selectors:
         try:
             locator = profile_container.get_by_role(role, name=re.compile(pattern, re.I))
-            if await locator.count() > 0:
-                return True
+            count = await locator.count()
+            for index in range(min(count, 25)):
+                item = locator.nth(index)
+                label_parts = []
+                for getter in (
+                    lambda: item.inner_text(timeout=1_000),
+                    lambda: item.get_attribute("aria-label", timeout=1_000),
+                    lambda: item.get_attribute("title", timeout=1_000),
+                ):
+                    try:
+                        value = await getter()
+                    except Exception:
+                        value = None
+                    if value:
+                        label_parts.append(value)
+                if _connect_or_pending_label_matches(" ".join(label_parts), lead_name):
+                    return True
         except Exception:
             continue
     return False
@@ -498,13 +559,13 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
             .or_(
                 "connection_sent_at.not.is.null,"
                 "connection_accepted_at.not.is.null,"
-                "status.in.(CONNECT_ONLY_SENT,CONNECTED,MESSAGE_ONLY_READY,MESSAGE_ONLY_APPROVED)"
+                "status.in.(CONNECTED,MESSAGE_ONLY_READY,MESSAGE_ONLY_APPROVED)"
             )
             .order("updated_at", desc=True)
         )
         if batch_id is not None:
             query = query.eq("batch_id", batch_id)
-        resp = query.limit(limit).execute()
+        resp = query.limit(max(limit * 4, limit, 100)).execute()
     except Exception as exc:
         logger.warn("Message-only lead extended select failed; retrying core fields", error=exc)
         query = (
@@ -515,16 +576,19 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
             .or_(
                 "connection_sent_at.not.is.null,"
                 "connection_accepted_at.not.is.null,"
-                "status.in.(CONNECT_ONLY_SENT,CONNECTED,MESSAGE_ONLY_READY,MESSAGE_ONLY_APPROVED)"
+                "status.in.(CONNECTED,MESSAGE_ONLY_READY,MESSAGE_ONLY_APPROVED)"
             )
             .order("updated_at", desc=True)
         )
         if batch_id is not None:
             query = query.eq("batch_id", batch_id)
-        resp = query.limit(limit).execute()
+        resp = query.limit(max(limit * 4, limit, 100)).execute()
     rows = resp.data or []
     logger.db_result("select", "leads", query_meta, len(rows))
-    filtered_rows = [row for row in rows if _is_message_only_candidate(row)]
+    filtered_rows = sorted(
+        [row for row in rows if _is_message_only_candidate(row)],
+        key=_message_only_priority,
+    )[:limit]
     if filtered_rows:
         logger.info(
             "Fetched %d message-only leads",
@@ -1122,11 +1186,78 @@ async def open_sales_navigator_message_surface(page: Page) -> Optional[Page]:
 
 
 def normalize_typed_text(text: str) -> str:
-    return "\n".join(line.rstrip() for line in (text or "").replace("\r\n", "\n").split("\n")).strip()
+    normalized = (text or "").replace("\r\n", "\n").replace("\xa0", " ")
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def typed_text_matches(actual_text: str, expected_text: str) -> Tuple[bool, Dict[str, Any]]:
+    actual = normalize_typed_text(actual_text)
+    expected = normalize_typed_text(expected_text)
+    if actual == expected:
+        return True, {"expected": len(expected), "actual": len(actual), "missingWords": []}
+
+    expected_words = [w.lower() for w in re.findall(r"\b[\wÄÖÜäöüß]{4,}\b", expected)]
+    actual_words = set(w.lower() for w in re.findall(r"\b[\wÄÖÜäöüß]{4,}\b", actual))
+    missing_words = [w for w in dict.fromkeys(expected_words) if w not in actual_words]
+    length_floor = max(0, len(expected) - max(10, int(len(expected) * 0.03)))
+    matched = len(actual) >= length_floor and not missing_words
+    return matched, {
+        "expected": len(expected),
+        "actual": len(actual),
+        "lengthFloor": length_floor,
+        "missingWords": missing_words[:10],
+    }
+
+
+async def locator_has_viewport_intersection(locator) -> bool:
+    try:
+        return bool(
+            await locator.evaluate(
+                """el => {
+                    const rect = el.getBoundingClientRect();
+                    const visible = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                    if (!visible || rect.width <= 0 || rect.height <= 0) return false;
+                    const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+                    const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+                    return rect.bottom > 0 && rect.right > 0 && rect.top < viewportHeight && rect.left < viewportWidth;
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+async def focus_text_field(page: Page, locator, selector_name: str) -> None:
+    try:
+        await locator.click(timeout=5_000)
+        return
+    except Exception as click_error:
+        logger.warn(f"{selector_name} normal click failed; trying force/focus fallback", error=click_error)
+
+    try:
+        await locator.click(timeout=5_000, force=True)
+        return
+    except Exception as force_error:
+        logger.warn(f"{selector_name} force click failed; focusing through DOM", error=force_error)
+
+    await locator.evaluate(
+        """el => {
+            el.focus();
+            if (el.isContentEditable) {
+                const selection = window.getSelection();
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                range.collapse(false);
+                selection.removeAllRanges();
+                selection.addRange(range);
+            }
+        }"""
+    )
+    await page.wait_for_timeout(100)
 
 
 async def clear_text_field(page: Page, locator) -> None:
-    await locator.click()
+    await focus_text_field(page, locator, "text field")
     for shortcut in ("Meta+A", "Control+A"):
         try:
             await page.keyboard.press(shortcut)
@@ -1151,14 +1282,103 @@ async def clear_text_field(page: Page, locator) -> None:
 
 async def fill_text_field(page: Page, selector_name: str, locator, value: str) -> None:
     await locator.wait_for(state="visible", timeout=10_000)
-    await locator.click()
+    await focus_text_field(page, locator, selector_name)
     await clear_text_field(page, locator)
     await human_type(page, value)
     await page.wait_for_timeout(500)
     actual_text = await locator.evaluate("el => el.value || el.textContent || el.innerText || ''") or ""
-    if normalize_typed_text(actual_text) != normalize_typed_text(value):
+    matched, verification = typed_text_matches(actual_text, value)
+    if not matched:
+        logger.warn(f"{selector_name} typed text mismatch", data=verification)
         raise RuntimeError(f"{selector_name} verification failed after typing.")
     logger.element_type(selector_name, len(value), text_preview=value[:40])
+
+
+async def wait_for_composer_cleared(editor, timeout_ms: int = 5_000) -> bool:
+    deadline = asyncio.get_event_loop().time() + (timeout_ms / 1000)
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            current = await editor.evaluate("el => el.value || el.textContent || el.innerText || ''") or ""
+            if not normalize_typed_text(current):
+                return True
+        except Exception:
+            return True
+        await asyncio.sleep(0.25)
+    return False
+
+
+async def click_editor_scoped_send_button(editor) -> bool:
+    try:
+        return bool(
+            await editor.evaluate(
+                """el => {
+                    const root = el.closest('form') || el.closest('[class*="msg-form"]') || el.closest('[role="dialog"]') || document;
+                    const buttons = Array.from(root.querySelectorAll('button'));
+                    const candidates = buttons.filter((button) => {
+                        const text = (button.innerText || button.textContent || button.getAttribute('aria-label') || '').trim();
+                        const visible = !!(button.offsetWidth || button.offsetHeight || button.getClientRects().length);
+                        return visible && !button.disabled && /^(Send|Senden)|Send message|Nachricht senden/i.test(text);
+                    });
+                    const button = candidates[candidates.length - 1];
+                    if (!button) return false;
+                    button.click();
+                    return true;
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+async def find_direct_message_editor(page: Page):
+    editor_candidates = [
+        ("dialog textbox", "section[role='dialog'] div[role='textbox'][contenteditable='true']"),
+        ("dialog msg-form contenteditable", "section[role='dialog'] div.msg-form__contenteditable[contenteditable='true']"),
+        ("visible msg overlay contenteditable", "div.msg-overlay-conversation-bubble:not(.msg-overlay-conversation-bubble--is-minimized) div.msg-form__contenteditable[contenteditable='true']"),
+        ("Write a message", "div[aria-label*='Write a message'][contenteditable='true']"),
+        ("Nachricht verfassen", "div[aria-label*='Nachricht verfassen'][contenteditable='true']"),
+        ("Nachricht schreiben", "div[aria-label*='Nachricht schreiben'][contenteditable='true']"),
+        ("msg-form-ember", "div[id^='msg-form-ember'] div[role='textbox'][contenteditable='true']"),
+        ("msg-form contenteditable", "div.msg-form__contenteditable[contenteditable='true']"),
+        ("generic textbox", "div[role='textbox'][contenteditable='true']:not([id^='g-recaptcha'])"),
+    ]
+
+    first_visible = None
+    first_visible_name = ""
+    for name, sel in editor_candidates:
+        locators = page.locator(sel)
+        try:
+            count = await locators.count()
+        except Exception:
+            continue
+        for index in range(min(count, 8)):
+            loc = locators.nth(index)
+            try:
+                await loc.wait_for(state="visible", timeout=1_000)
+            except Exception:
+                continue
+            if first_visible is None:
+                first_visible = loc
+                first_visible_name = name
+            if await locator_has_viewport_intersection(loc):
+                logger.element_search(
+                    name,
+                    1,
+                    context={"surface": "message", "candidateIndex": index, "viewport": True},
+                )
+                return loc, name
+        if count > 0:
+            logger.element_search(name, count, context={"surface": "message", "viewport": False})
+
+    if first_visible is not None:
+        logger.warn(
+            "Using visible direct-message editor outside viewport with force/focus fallback",
+            data={"selector": first_visible_name},
+        )
+        return first_visible, first_visible_name
+
+    logger.element_search("message editor (all selectors)", 0, context={"surface": "message"})
+    raise RuntimeError("Could not find message input box")
 
 
 async def send_sales_navigator_message(page: Page, subject: str, body: str) -> None:
@@ -1206,12 +1426,7 @@ async def send_sales_navigator_message(page: Page, subject: str, body: str) -> N
     await fill_text_field(page, subject_selector, subject_locator, safe_subject)
     await fill_text_field(page, body_selector, body_locator, safe_body)
 
-    send_btn = page.locator(
-        "button:has-text('Send'):visible, "
-        "button:has-text('Senden'):visible, "
-        "button[aria-label*='Send']:visible, "
-        "button[aria-label*='Senden']:visible"
-    ).first
+    send_btn = page.locator(DIRECT_MESSAGE_SEND_BUTTON_SELECTOR).first
     await send_btn.wait_for(state="visible", timeout=10_000)
     if not await send_btn.is_enabled():
         raise RuntimeError("Sales Navigator send button is disabled.")
@@ -1371,34 +1586,8 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
     # Direct message composer path (for existing connections)
     logger.info("Sending direct message", data={"surface": surface})
 
-    # Find message input box
-    editor_candidates = [
-        ("msg-form contenteditable", "div.msg-form__contenteditable[contenteditable='true']"),
-        ("msg-form textarea", "div.msg-form__textarea"),
-        ("dialog textbox", "section[role='dialog'] div[role='textbox'][contenteditable='true']"),
-        ("Write a message", "div[aria-label*='Write a message'][contenteditable='true']"),
-        ("generic textbox", "div[role='textbox'][contenteditable='true']:not([id^='g-recaptcha'])"),
-        ("msg-form-ember", "div[id^='msg-form-ember'] div[role='textbox'][contenteditable='true']"),
-    ]
-
-    editor = None
-    used_selector = ""
-    for name, sel in editor_candidates:
-        try:
-            loc = page.locator(sel).first
-            await loc.wait_for(state="visible", timeout=3_000)
-            editor = loc
-            used_selector = name
-            logger.element_search(name, 1, context={"surface": "message"})
-            break
-        except Exception:
-            continue
-
-    if editor is None:
-        logger.element_search("message editor (all selectors)", 0, context={"surface": "message"})
-        raise RuntimeError("Could not find message input box")
-
-    await editor.click()
+    editor, used_selector = await find_direct_message_editor(page)
+    await focus_text_field(page, editor, used_selector)
     await clear_text_field(page, editor)
     await human_type(page, message)
     logger.element_type(used_selector, len(message), text_preview=message[:40])
@@ -1415,18 +1604,18 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
             actual_normalized = normalize_typed_text(actual_text)
             expected_normalized = normalize_typed_text(message)
 
-            if actual_normalized == expected_normalized:
+            matched, verification = typed_text_matches(actual_text, message)
+            if matched:
                 logger.debug(
                     "Text verification passed",
-                    data={"expected": len(expected_normalized), "actual": len(actual_normalized)},
+                    data=verification,
                 )
                 break
             else:
                 logger.debug(
                     "Text still being entered",
                     data={
-                        "expected": len(expected_normalized),
-                        "actual": len(actual_normalized),
+                        **verification,
                         "attempt": verification_attempt,
                     },
                 )
@@ -1453,10 +1642,24 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
 
         await send_btn.click()
         logger.element_click("Send button (message)", success=True)
+        if not await wait_for_composer_cleared(editor):
+            raise RuntimeError("Direct message composer did not clear after clicking send.")
         await random_pause()
     except Exception as e:
         logger.element_click("Send button (message)", success=False)
-        raise
+        logger.warn("Send button unavailable or ineffective; trying Enter key fallback", error=e)
+        if await click_editor_scoped_send_button(editor):
+            if await wait_for_composer_cleared(editor):
+                logger.element_click("Send button (message scoped fallback)", success=True)
+                await random_pause()
+                return
+            raise RuntimeError("Direct message composer did not clear after scoped send fallback.")
+        await editor.click()
+        await page.keyboard.press("Enter")
+        if not await wait_for_composer_cleared(editor):
+            raise RuntimeError("Direct message composer did not clear after Enter send fallback.")
+        logger.element_click("Send button (message enter fallback)", success=True)
+        await random_pause()
 
 
 def mark_processing(client: Client, lead_id: str) -> None:
@@ -1473,6 +1676,14 @@ def mark_message_only_processing(client: Client, lead: Dict[str, Any]) -> bool:
         return False
 
     has_invite_timestamp = bool(lead.get("connection_sent_at") or lead.get("connection_accepted_at"))
+    status = str(lead.get("status") or "").upper()
+    if not has_invite_timestamp and status not in MESSAGE_ONLY_PROCESSING_STATUSES:
+        logger.info(
+            "Skipping message-only lead without invite evidence",
+            data={"leadId": lead_id, "status": status},
+        )
+        return False
+
     logger.db_query(
         "update",
         "leads",
@@ -1506,6 +1717,22 @@ def mark_message_only_processing(client: Client, lead: Dict[str, Any]) -> bool:
     else:
         logger.info("Message-only lead was already claimed or no longer eligible", {"leadId": lead_id})
     return locked
+
+
+def mark_message_only_pending(client: Client, lead: Dict[str, Any]) -> None:
+    lead_id = str(lead.get("id") or "")
+    if not lead_id:
+        return
+    update_payload = {
+        "status": "CONNECT_ONLY_SENT",
+        "connection_accepted_at": None,
+        "error_message": None,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+    logger.db_query("update", "leads", {"leadId": lead_id}, update_payload)
+    client.table("leads").update(update_payload).eq("id", lead_id).execute()
+    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
+    lead.update(update_payload)
 
 
 def mark_sent(client: Client, lead_id: str) -> None:
@@ -1580,16 +1807,35 @@ def mark_connect_only_limit_reached(client: Client, lead: Dict[str, Any], error_
 def promote_connect_only_to_connected(client: Client, lead: Dict[str, Any]) -> str:
     """Mark an invite-only lead as connected so the message-only worker can pick it up."""
     lead_id = str(lead.get("id") or "")
+    accepted_at = datetime.utcnow().isoformat()
     update_payload = {
         "status": "CONNECTED",
+        "connection_accepted_at": lead.get("connection_accepted_at") or accepted_at,
         "error_message": None,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": accepted_at,
     }
     logger.db_query("update", "leads", {"leadId": lead_id}, update_payload)
     client.table("leads").update(update_payload).eq("id", lead_id).execute()
     logger.db_result("update", "leads", {"leadId": lead_id}, 1)
     lead.update(update_payload)
     return "connected"
+
+
+def clear_message_only_retry_profile_data(lead: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    current_profile_data = lead.get("profile_data")
+    if not isinstance(current_profile_data, dict):
+        return None
+    updated_profile_data = dict(current_profile_data)
+    changed = False
+    for key in (
+        "message_only_retry_attempts",
+        "message_only_last_error",
+        "message_only_last_retry_at",
+    ):
+        if key in updated_profile_data:
+            updated_profile_data.pop(key, None)
+            changed = True
+    return updated_profile_data if changed else current_profile_data
 
 
 def mark_lead_retry_later(client: Client, lead: Dict[str, Any], error_message: str = "") -> int:
@@ -2406,7 +2652,15 @@ async def probe_connect_only_surface(page: Page, lead: ScraperLead) -> str:
     invite_link_count = await invite_link.count()
     connect_button_count = await direct_connect_button.count()
     more_button_count = await more_button.count()
-    has_visible_connect_or_pending_state = await _has_visible_connect_or_pending_state(profile_container)
+    lead_name = " ".join(
+        part
+        for part in [getattr(lead, "first_name", None), getattr(lead, "last_name", None)]
+        if part
+    ).strip()
+    has_visible_connect_or_pending_state = await _has_visible_connect_or_pending_state(
+        profile_container,
+        lead_name,
+    )
     has_more_menu_pending_state = False
     if generic_message_link_count > 0 and more_button_count > 0 and not has_visible_connect_or_pending_state:
         has_more_menu_pending_state = await _more_menu_has_pending_invite(page, profile_container)
@@ -2578,6 +2832,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
             try:
                 if await indicator.count() > 0 and await indicator.first.is_visible(timeout=2_000):
                     logger.info("Connection still pending (Ausstehend), skipping", {"leadId": lead_id})
+                    mark_message_only_pending(client, lead)
                     await page.close()
                     return "pending"
             except Exception:
@@ -2616,11 +2871,12 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
             message_link_count = 1
 
         if message_link_count > 0:
-            if explicit_message_link is None and await _has_visible_connect_or_pending_state(profile_container):
+            if explicit_message_link is None and await _has_visible_connect_or_pending_state(profile_container, full_name):
                 logger.info(
                     "Generic message surface is ambiguous; connect/pending state is still visible",
                     {"leadId": lead_id},
                 )
+                mark_message_only_pending(client, lead)
                 await page.close()
                 return "pending"
             if explicit_message_link is None and await _more_menu_has_pending_invite(page, profile_container):
@@ -2628,14 +2884,29 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                     "Generic message surface is Sales Navigator/InMail while More menu still shows pending invite",
                     {"leadId": lead_id},
                 )
+                mark_message_only_pending(client, lead)
                 await page.close()
                 return "pending"
 
             logger.debug("Found Message link - user is connected", {"leadId": lead_id})
             try:
-                message_page = await click_and_resolve_active_page(page, message_link.first)
+                message_target = message_link.first
+                message_href = ""
+                try:
+                    message_href = (await message_target.get_attribute("href")) or ""
+                except Exception:
+                    message_href = ""
+                if "/sales/" in message_href:
+                    sales_url = message_href if message_href.startswith("http") else f"https://www.linkedin.com{message_href}"
+                    message_page = await context.new_page()
+                    await message_page.goto(sales_url, wait_until="domcontentloaded", timeout=60_000)
+                else:
+                    message_page = await click_and_resolve_active_page(page, message_target)
                 await random_pause()
-                if await wait_for_sales_navigator_composer(message_page):
+                is_sales_page = "linkedin.com/sales/" in (message_page.url or "")
+                if is_sales_page:
+                    await wait_for_sales_navigator_composer(message_page, timeout_ms=20_000)
+                if is_sales_page or await wait_for_sales_navigator_composer(message_page):
                     logger.info("Nachricht opened Sales Navigator composer", {"leadId": lead_id})
                     await send_sales_navigator_message(
                         message_page,
@@ -2644,8 +2915,8 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                     )
                 else:
                     await message_page.wait_for_selector(
-                        "div.msg-overlay-conversation-bubble, section[role='dialog'] div[role='textbox'][contenteditable='true'], div.msg-form__contenteditable[contenteditable='true']",
-                        timeout=10_000,
+                        DIRECT_MESSAGE_COMPOSER_SELECTOR,
+                        timeout=20_000,
                     )
                     await send_message(message_page, message, SURFACE_MESSAGE)
                 
@@ -2661,6 +2932,9 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                     "sequence_last_sent_at": accepted_at,
                     "error_message": None,
                 }
+                cleaned_profile_data = clear_message_only_retry_profile_data(lead)
+                if cleaned_profile_data is not None:
+                    lead_update["profile_data"] = cleaned_profile_data
                 try:
                     client.table("leads").update(lead_update).eq("id", lead_id).execute()
                 except Exception:
@@ -2671,6 +2945,8 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                         "connection_accepted_at": accepted_at,
                         "error_message": None,
                     }
+                    if cleaned_profile_data is not None:
+                        fallback_update["profile_data"] = cleaned_profile_data
                     client.table("leads").update(fallback_update).eq("id", lead_id).execute()
 
                 accepted_base = _parse_iso_datetime(accepted_at) or _utc_now()
@@ -2725,6 +3001,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
             sales_page = await open_sales_navigator_message_surface(page)
             if sales_page is None:
                 logger.info("No Sales Navigator message surface found, connection may still be pending", {"leadId": lead_id})
+                mark_message_only_pending(client, lead)
                 await page.close()
                 return "pending"
 
@@ -2745,6 +3022,9 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                     "sequence_last_sent_at": accepted_at,
                     "error_message": None,
                 }
+                cleaned_profile_data = clear_message_only_retry_profile_data(lead)
+                if cleaned_profile_data is not None:
+                    lead_update["profile_data"] = cleaned_profile_data
                 try:
                     client.table("leads").update(lead_update).eq("id", lead_id).execute()
                 except Exception:
@@ -2754,6 +3034,8 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                         "connection_accepted_at": lead.get("connection_accepted_at") or accepted_at,
                         "error_message": None,
                     }
+                    if cleaned_profile_data is not None:
+                        fallback_update["profile_data"] = cleaned_profile_data
                     client.table("leads").update(fallback_update).eq("id", lead_id).execute()
 
                 accepted_base = _parse_iso_datetime(accepted_at) or _utc_now()

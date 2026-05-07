@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from sender import (
     INVITE_RETRY_STATUSES,
+    DIRECT_MESSAGE_COMPOSER_SELECTOR,
+    DIRECT_MESSAGE_SEND_BUTTON_SELECTOR,
     MESSAGE_ONLY_PROCESSING_STATUSES,
     classify_connect_only_surface,
     classify_connect_only_probe_surface,
@@ -17,15 +19,20 @@ from sender import (
     fetch_message_only_leads,
     build_sales_navigator_body,
     build_sales_navigator_subject,
+    clear_message_only_retry_profile_data,
     _is_invite_candidate,
     _is_message_only_candidate,
     mark_connect_only_limit_reached,
     mark_invite_processing,
     mark_message_only_processing,
+    normalize_typed_text,
     normalize_linkedin_profile_url,
     persist_invite_sent,
     promote_connect_only_to_connected,
     strip_sales_navigator_signature,
+    typed_text_matches,
+    _message_only_priority,
+    _connect_or_pending_label_matches,
 )
 
 
@@ -314,6 +321,62 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual(result, "https://www.linkedin.com/in/marcel-ohlendorf-42335a197")
 
+    def test_normalize_typed_text_matches_linkedin_collapsed_paragraph_spacing(self):
+        expected = "Hi Sabrina,\n\nfreut mich, dass wir uns vernetzen.\n\nViele Gruesse,\nKatharina"
+        actual = "Hi Sabrina, freut mich, dass wir uns vernetzen. Viele Gruesse, Katharina"
+
+        self.assertEqual(normalize_typed_text(actual), normalize_typed_text(expected))
+
+    def test_direct_message_wait_selector_covers_current_linkedin_composer(self):
+        self.assertIn("Write a message", DIRECT_MESSAGE_COMPOSER_SELECTOR)
+        self.assertIn("msg-form-ember", DIRECT_MESSAGE_COMPOSER_SELECTOR)
+        self.assertIn("role='textbox'", DIRECT_MESSAGE_COMPOSER_SELECTOR)
+
+    def test_direct_message_send_selector_covers_current_linkedin_button(self):
+        self.assertIn("msg-form__send-button", DIRECT_MESSAGE_SEND_BUTTON_SELECTOR)
+        self.assertIn("Nachricht senden", DIRECT_MESSAGE_SEND_BUTTON_SELECTOR)
+        self.assertIn("type='submit'", DIRECT_MESSAGE_SEND_BUTTON_SELECTOR)
+
+    def test_typed_text_matches_accepts_small_extraction_gap_when_words_match(self):
+        expected = "Hi Sabrina, freut mich, dass wir uns vernetzen. Viele Gruesse, Katharina"
+        actual = "Hi Sabrina, freut mich, dass wir uns vernetzen. Viele Gruesse Katharina"
+
+        matched, details = typed_text_matches(actual, expected)
+
+        self.assertTrue(matched, details)
+
+    def test_typed_text_matches_rejects_missing_name(self):
+        expected = "Hi Sabrina, freut mich, dass wir uns vernetzen. Viele Gruesse, Katharina"
+        actual = "Hi, freut mich, dass wir uns vernetzen. Viele Gruesse, Katharina"
+
+        matched, details = typed_text_matches(actual, expected)
+
+        self.assertFalse(matched)
+        self.assertIn("sabrina", details["missingWords"])
+
+    def test_clear_message_only_retry_profile_data_preserves_unrelated_metadata(self):
+        lead = {
+            "profile_data": {
+                "message_only_retry_attempts": 2,
+                "message_only_last_error": "old composer error",
+                "message_only_last_retry_at": "2026-05-06T22:23:39",
+                "source": "live-test",
+            }
+        }
+
+        cleaned = clear_message_only_retry_profile_data(lead)
+
+        self.assertEqual(cleaned, {"source": "live-test"})
+
+    def test_connect_or_pending_label_ignores_unrelated_recommendation_connect_button(self):
+        self.assertFalse(_connect_or_pending_label_matches("Stefanie Vogt als Kontakt einladen", "Daniel Herm"))
+
+    def test_connect_or_pending_label_accepts_profile_pending_state(self):
+        self.assertTrue(_connect_or_pending_label_matches("Ausstehend", "Daniel Herm"))
+
+    def test_connect_or_pending_label_accepts_profile_invite_action(self):
+        self.assertTrue(_connect_or_pending_label_matches("Daniel Herm als Kontakt einladen", "Daniel Herm"))
+
     def test_build_sales_navigator_subject_uses_sales_navigator_subject_copy(self):
         subject = build_sales_navigator_subject(
             {
@@ -372,8 +435,8 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
             "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.\n\nViele Grüße,",
         )
 
-    def test_mark_message_only_processing_locks_only_eligible_status(self):
-        lead = {"id": "lead-1", "status": "CONNECTED"}
+    def test_mark_message_only_processing_locks_connected_without_legacy_timestamp(self):
+        lead = {"id": "lead-1", "status": "CONNECTED", "sent_at": None}
         client = FakeClient(lead)
 
         result = mark_message_only_processing(client, lead)
@@ -381,6 +444,16 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(client.lead["status"], "PROCESSING")
         self.assertEqual(client.calls[0]["filters"][1], ("in", "status", list(MESSAGE_ONLY_PROCESSING_STATUSES)))
+
+    def test_mark_message_only_processing_skips_processing_without_invite_timestamp(self):
+        lead = {"id": "lead-1", "status": "PROCESSING", "sent_at": None}
+        client = FakeClient(lead)
+
+        result = mark_message_only_processing(client, lead)
+
+        self.assertFalse(result)
+        self.assertEqual(client.lead["status"], "PROCESSING")
+        self.assertEqual(client.calls, [])
 
     def test_mark_message_only_processing_locks_invite_sent_lead_even_if_status_is_new(self):
         lead = {
@@ -405,6 +478,23 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertFalse(result)
         self.assertEqual(client.lead["status"], "SENT")
+
+    def test_mark_message_only_pending_restores_invite_sent_state(self):
+        from sender import mark_message_only_pending
+
+        lead = {
+            "id": "lead-1",
+            "status": "PROCESSING",
+            "connection_sent_at": "2026-05-06T10:00:00Z",
+            "connection_accepted_at": "2026-05-06T11:00:00Z",
+        }
+        client = FakeClient(lead)
+
+        mark_message_only_pending(client, lead)
+
+        self.assertEqual(client.lead["status"], "CONNECT_ONLY_SENT")
+        self.assertIsNone(client.lead["error_message"])
+        self.assertIsNone(client.lead["connection_accepted_at"])
 
     def test_fetch_invite_queue_includes_failed_invite_leads_for_retry(self):
         client = FakeInviteQueueClient(
@@ -658,6 +748,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual(result, "connected")
         self.assertEqual(client.lead["status"], "CONNECTED")
+        self.assertTrue(client.lead["connection_accepted_at"])
 
     def test_message_only_candidate_accepts_invite_sent_timestamp(self):
         self.assertTrue(
@@ -681,6 +772,30 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
             )
         )
 
+    def test_message_only_candidate_accepts_connected_without_legacy_timestamp(self):
+        self.assertTrue(
+            _is_message_only_candidate(
+                {
+                    "status": "CONNECTED",
+                    "connection_sent_at": None,
+                    "connection_accepted_at": None,
+                    "sent_at": None,
+                }
+            )
+        )
+
+    def test_message_only_priority_prefers_accepted_before_pending_invites(self):
+        rows = [
+            {"id": "pending", "status": "CONNECT_ONLY_SENT", "connection_sent_at": "2026-05-06T10:00:00Z"},
+            {"id": "message-ready", "status": "MESSAGE_ONLY_READY", "connection_sent_at": None},
+            {"id": "connected", "status": "CONNECTED", "connection_sent_at": None},
+            {"id": "accepted", "status": "PROCESSING", "connection_accepted_at": "2026-05-06T11:00:00Z"},
+        ]
+
+        ordered = sorted(rows, key=_message_only_priority)
+
+        self.assertEqual([row["id"] for row in ordered], ["message-ready", "connected", "accepted", "pending"])
+
     def test_fetch_message_only_leads_queries_only_post_invite_candidates(self):
         eligible_row = {
             "id": "lead-eligible",
@@ -690,11 +805,27 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
             "connection_accepted_at": None,
             "outreach_mode": "connect_only",
         }
-        client = FakeMessageOnlyClient([eligible_row])
+        legacy_connected_row = {
+            "id": "lead-legacy-connected",
+            "status": "CONNECTED",
+            "sent_at": None,
+            "connection_sent_at": None,
+            "connection_accepted_at": None,
+            "outreach_mode": "connect_only",
+        }
+        stale_processing_row = {
+            "id": "lead-stale-processing",
+            "status": "PROCESSING",
+            "sent_at": None,
+            "connection_sent_at": None,
+            "connection_accepted_at": None,
+            "outreach_mode": "connect_only",
+        }
+        client = FakeMessageOnlyClient([stale_processing_row, legacy_connected_row, eligible_row])
 
         rows = fetch_message_only_leads(client, 25)
 
-        self.assertEqual(rows, [eligible_row])
+        self.assertEqual(rows, [legacy_connected_row, eligible_row])
         self.assertEqual(client.calls[0]["filters"][0], ("eq", "outreach_mode", "connect_only"))
         self.assertEqual(client.calls[0]["filters"][1], ("is", "sent_at", "null"))
         self.assertEqual(
@@ -703,7 +834,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
                 "or",
                 "connection_sent_at.not.is.null,"
                 "connection_accepted_at.not.is.null,"
-                "status.in.(CONNECT_ONLY_SENT,CONNECTED,MESSAGE_ONLY_READY,MESSAGE_ONLY_APPROVED)",
+                "status.in.(CONNECTED,MESSAGE_ONLY_READY,MESSAGE_ONLY_APPROVED)",
             ),
         )
 
