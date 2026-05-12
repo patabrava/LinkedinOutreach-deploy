@@ -2662,8 +2662,13 @@ def schedule_nudge_followup(
 
 
 async def process_followup_one(context: BrowserContext, client: Client, followup: Dict[str, Any]) -> str:
-    """Process a single followup. Returns 'sent', 'failed', or 'retry'.
-    
+    """Process a single followup. Returns 'sent', 'skipped', 'failed', or 'retry'.
+
+    'skipped' is returned when the live thread inspection detected that the
+    lead replied since the nudge was scheduled — in that case the followup
+    row is marked SKIPPED and `leads.last_reply_at` is updated, but no
+    outbound DOM action is taken.
+
     The followup should already be marked as PROCESSING before calling this.
     """
     followup_id = followup["id"]
@@ -2701,6 +2706,52 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
         await random_pause()
 
         message_page, surface = await open_followup_message_surface(page)
+
+        # --- Just-in-time reply check (Sales Navigator surface deliberately skipped) ---
+        if surface != SURFACE_SALES_NAVIGATOR:
+            try:
+                bubble = await extract_last_bubble(message_page)
+            except Exception as bubble_exc:
+                logger.warn(
+                    "Reply check raised; proceeding with send (fail-open)",
+                    {"followupId": followup_id, "leadId": lead_id},
+                    error=bubble_exc,
+                )
+                bubble = None
+
+            if bubble is not None:
+                lead_full = " ".join(
+                    p for p in [(lead.get("first_name") or ""), (lead.get("last_name") or "")] if p
+                ).strip()
+                verdict = classify_last_sender(bubble, lead_full, (lead.get("first_name") or ""))
+                if verdict == "lead":
+                    logger.info(
+                        "Lead replied since nudge was scheduled; skipping send",
+                        {
+                            "followupId": followup_id,
+                            "leadId": lead_id,
+                            "sender": (bubble.get("sender") or "")[:80],
+                            "preview": (bubble.get("text") or "")[:120],
+                        },
+                    )
+                    _record_reply_at_send_time(client, lead_id, followup_id, bubble.get("text") or "")
+                    mark_followup_skipped(client, followup_id, "reply_detected_at_send_time")
+                    return "skipped"
+                if verdict == "unknown":
+                    logger.warn(
+                        "Reply check inconclusive; proceeding with send",
+                        {
+                            "followupId": followup_id,
+                            "leadId": lead_id,
+                            "sender": (bubble.get("sender") or "")[:80],
+                        },
+                    )
+            # bubble is None → fresh thread / loader hadn't finished → fall through to send (fail-open).
+        else:
+            logger.debug(
+                "Reply check skipped: Sales Navigator surface",
+                {"followupId": followup_id, "leadId": lead_id},
+            )
 
         if surface == SURFACE_SALES_NAVIGATOR:
             logger.info(
@@ -3684,12 +3735,15 @@ async def main() -> None:
                 sent_count = 0
                 failed_count = 0
                 retry_count = 0
+                skipped_count = 0
 
                 for fu in items:
                     try:
                         result = await process_followup_one(context, client, fu)
                         if result == "sent":
                             sent_count += 1
+                        elif result == "skipped":
+                            skipped_count += 1
                         elif result == "failed":
                             failed_count += 1
                         else:  # retry
@@ -3706,6 +3760,7 @@ async def main() -> None:
 
                 logger.operation_complete("sender-followup", result={
                     "sent": sent_count,
+                    "skipped": skipped_count,
                     "failed": failed_count,
                     "retry": retry_count,
                     "total": len(items),
