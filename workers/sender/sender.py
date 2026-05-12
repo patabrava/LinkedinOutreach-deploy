@@ -1185,6 +1185,110 @@ async def open_sales_navigator_message_surface(page: Page) -> Optional[Page]:
     return None
 
 
+async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
+    """Open a messaging surface for a follow-up send.
+
+    Mirrors `process_message_only`'s SN-aware pattern so a Sales Navigator
+    InMail composer (Subject + Body) is not mistaken for a normal LinkedIn
+    DM overlay. Strictly profile-scoped: refuses page-level fallback to
+    avoid matching the global top-nav "Nachrichten" link.
+
+    Returns (target_page, surface) where surface is SURFACE_MESSAGE or
+    SURFACE_SALES_NAVIGATOR. Raises RuntimeError on failure.
+    """
+    await wiggle_mouse(page)
+
+    profile_container = None
+    try:
+        profile_container = page.get_by_test_id("lazy-column")
+        await profile_container.wait_for(state="visible", timeout=5_000)
+        logger.element_search("lazy-column", 1, context={"method": "test_id"})
+    except Exception:
+        try:
+            profile_container = page.locator("main.scaffold-layout__main, section.artdeco-card").first
+            await profile_container.wait_for(state="visible", timeout=5_000)
+            logger.selector_fallback("lazy-column", "main.scaffold-layout__main", success=True)
+        except Exception:
+            logger.selector_fallback("lazy-column", "main.scaffold-layout__main", success=False)
+            raise RuntimeError(
+                "Profile container not found; refusing to fall back to page-level "
+                "selectors (which can match the global 'Nachrichten' nav link)."
+            )
+
+    explicit_targets = [
+        profile_container.get_by_role("button", name=re.compile(r"(Nachricht an|Message to)", re.I)),
+        profile_container.get_by_role("link", name=re.compile(r"(Nachricht an|Message to)", re.I)),
+    ]
+    target_locator = None
+    target_kind = ""
+    for candidate in explicit_targets:
+        if await candidate.count() > 0:
+            target_locator = candidate.first
+            target_kind = "explicit"
+            break
+
+    if target_locator is None:
+        generic_link = profile_container.get_by_role(
+            "link", name=re.compile(r"(Message|Nachricht|InMail)", re.I)
+        )
+        if await generic_link.count() > 0:
+            target_locator = generic_link.first
+            target_kind = "generic_link"
+    if target_locator is None:
+        generic_button = profile_container.get_by_role(
+            "button", name=re.compile(r"(Message|Nachricht|InMail)", re.I)
+        )
+        if await generic_button.count() > 0:
+            target_locator = generic_button.first
+            target_kind = "generic_button"
+
+    if target_locator is None:
+        raise RuntimeError(
+            "No messaging surface found. Check if profile is 3rd-degree or has restrictions."
+        )
+
+    logger.element_search(
+        f"followup message target ({target_kind})", 1, context={"surface": "followup"}
+    )
+
+    href = ""
+    try:
+        href = (await target_locator.get_attribute("href")) or ""
+    except Exception:
+        href = ""
+
+    if "/sales/" in href:
+        sales_url = href if href.startswith("http") else f"https://www.linkedin.com{href}"
+        message_page = await page.context.new_page()
+        await message_page.goto(sales_url, wait_until="domcontentloaded", timeout=60_000)
+        logger.info(
+            "Followup target href is /sales/; opened SN URL in new page",
+            data={"url": sales_url},
+        )
+    else:
+        message_page = await click_and_resolve_active_page(page, target_locator)
+
+    await random_pause()
+
+    is_sales_page = "linkedin.com/sales/" in (message_page.url or "")
+    if is_sales_page:
+        await wait_for_sales_navigator_composer(message_page, timeout_ms=20_000)
+    if is_sales_page or await wait_for_sales_navigator_composer(message_page):
+        logger.info(
+            "Followup surface is Sales Navigator composer",
+            data={"url": message_page.url},
+        )
+        return message_page, SURFACE_SALES_NAVIGATOR
+
+    try:
+        await message_page.wait_for_selector(DIRECT_MESSAGE_COMPOSER_SELECTOR, timeout=20_000)
+    except Exception as exc:
+        raise RuntimeError(
+            f"No direct-message composer appeared after click; url={message_page.url}: {exc}"
+        )
+    return message_page, SURFACE_MESSAGE
+
+
 def normalize_typed_text(text: str) -> str:
     normalized = (text or "").replace("\r\n", "\n").replace("\xa0", " ")
     return re.sub(r"\s+", " ", normalized).strip()
@@ -1484,13 +1588,25 @@ async def send_sales_navigator_message(page: Page, subject: str, body: str) -> N
     await fill_text_field(page, subject_selector, subject_locator, safe_subject)
     await fill_text_field(page, body_selector, body_locator, safe_body)
 
+    # SN page DOM is much busier than a normal DM overlay: timeline message
+    # items, right-rail insights, and global-nav buttons all match the generic
+    # "Send/Senden" text selectors. Scope the send button to the composer
+    # form/dialog by walking up from the body locator.
+    await page.wait_for_timeout(800)
+    if await click_editor_scoped_send_button(body_locator):
+        logger.element_click("Sales Navigator send button (scoped)", success=True)
+        await random_pause()
+        return
+
+    # Fallback: the broad selector chain (used by direct messages). Last
+    # resort - keep it for cases where the body locator's closest form
+    # cannot be resolved.
     send_btn = page.locator(DIRECT_MESSAGE_SEND_BUTTON_SELECTOR).first
     await send_btn.wait_for(state="visible", timeout=10_000)
     if not await send_btn.is_enabled():
         raise RuntimeError("Sales Navigator send button is disabled.")
-    await page.wait_for_timeout(800)
     await send_btn.click()
-    logger.element_click("Sales Navigator send button", success=True)
+    logger.element_click("Sales Navigator send button (fallback)", success=True)
     await random_pause()
 
 
@@ -2496,38 +2612,48 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
     )
 
     page = await context.new_page()
+    message_page: Optional[Page] = None
     try:
         await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
         await page.wait_for_timeout(1_000)
         await random_pause()
-        
-        surface = await open_message_surface(page)
-        logger.debug(f"Message surface opened for followup", {"followupId": followup_id}, {"surface": surface})
-        if surface != "message":
-            raise RuntimeError(
-                f"Followup requires direct-message surface only; got non-sendable surface '{surface}'"
+
+        message_page, surface = await open_followup_message_surface(page)
+
+        if surface == SURFACE_SALES_NAVIGATOR:
+            logger.info(
+                "Followup routing through Sales Navigator composer",
+                {"followupId": followup_id, "leadId": lead_id},
             )
+            await send_sales_navigator_message(
+                message_page,
+                build_sales_navigator_subject(lead, message),
+                build_sales_navigator_body(message),
+            )
+        else:
+            await send_message(message_page, message, surface)
 
-        await send_message(page, message, surface)
-        await page.close()
         mark_followup_sent(client, followup_id, message, followup, sequence_step=resolved_step)
-
         logger.message_send_complete(lead_id or "unknown", {"followupId": followup_id})
-        logger.info(f"Followup sent successfully", {"followupId": followup_id, "leadId": lead_id})
+        logger.info(
+            f"Followup sent successfully via {surface}",
+            {"followupId": followup_id, "leadId": lead_id},
+        )
         return "sent"
-        
+
     except Exception as e:
         error_msg = str(e)
         logger.error(f"Failed to send followup", {"followupId": followup_id}, error=e)
-        
+
         # Take screenshot for debugging
         try:
             screenshot_path = f"/tmp/followup_error_{followup_id[:8]}.png"
-            await page.screenshot(path=screenshot_path)
+            target = message_page if message_page is not None else page
+            await target.screenshot(path=screenshot_path)
             logger.info(f"Screenshot saved to {screenshot_path}")
         except Exception:
             pass
-        
+
         # Determine if this is a permanent or transient failure
         permanent_indicators = [
             "No messaging surface found",
@@ -2535,9 +2661,10 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
             "restrictions",
             "no draft_text",
             "no linked lead URL",
+            "Profile container not found",
         ]
         is_permanent = any(ind in error_msg for ind in permanent_indicators)
-        
+
         if is_permanent:
             mark_followup_failed(client, followup_id, error_msg, permanent=True)
             return "failed"
@@ -2545,6 +2672,11 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
             mark_followup_failed(client, followup_id, error_msg, permanent=False)
             return "retry"
     finally:
+        if message_page is not None and message_page is not page:
+            try:
+                await message_page.close()
+            except Exception:
+                pass
         try:
             await page.close()
         except Exception:
@@ -3427,6 +3559,29 @@ async def main() -> None:
             if args.followup_id:
                 row = fetch_followup_by_id(client, args.followup_id)
                 items = [row] if row else []
+                batch_limit = 1
+            elif args.lead_id:
+                # Targeted run by lead id: pick the APPROVED row for this lead.
+                recover_stale_processing_followups(client)
+                resp = (
+                    client.table("followups")
+                    .select(
+                        "id, lead_id, status, followup_type, draft_text, sent_text, next_send_at, "
+                        "last_message_text, last_message_from, updated_at, "
+                        "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step)"
+                    )
+                    .eq("lead_id", args.lead_id)
+                    .eq("status", "APPROVED")
+                    .order("updated_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                items = resp.data or []
+                if items:
+                    client.table("followups").update({
+                        "status": "PROCESSING",
+                        "processing_started_at": datetime.utcnow().isoformat(),
+                    }).eq("id", items[0]["id"]).execute()
                 batch_limit = 1
             else:
                 recover_stale_processing_followups(client)

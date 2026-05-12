@@ -839,5 +839,196 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         )
 
 
+class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
+    """process_followup_one must detect Sales Navigator composers so the
+    Subject field is filled; otherwise the InMail Send button stays disabled.
+    """
+
+    def _build_followup(self) -> dict:
+        lead = {
+            "id": "lead-1",
+            "first_name": "Marina",
+            "last_name": "Schulz",
+            "company_name": "Acme",
+            "linkedin_url": "https://www.linkedin.com/in/marina-schulz",
+        }
+        return {
+            "id": "fu-1",
+            "lead_id": "lead-1",
+            "draft_text": (
+                "Hi Marina,\n\nnur ein kurzer Followup zu meiner letzten Nachricht.\n\n"
+                "Viele Grüße,\nKatharina"
+            ),
+            "followup_type": "NUDGE",
+            "attempt": 2,
+            "lead": lead,
+        }
+
+    def _build_mock_page(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        page = MagicMock()
+        page.goto = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        page.close = AsyncMock()
+        page.screenshot = AsyncMock()
+        return page
+
+    def _patches(self, *, surface_result):
+        """Patch `open_followup_message_surface` with `surface_result`.
+
+        `surface_result` is either an Exception (side_effect) or a
+        `(target_page, surface_string)` tuple (return_value).
+        """
+        from contextlib import ExitStack
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import sender as sender_mod
+
+        stack = ExitStack()
+        mocks = {}
+
+        if isinstance(surface_result, Exception):
+            mocks["open_followup_message_surface"] = stack.enter_context(
+                patch.object(
+                    sender_mod,
+                    "open_followup_message_surface",
+                    AsyncMock(side_effect=surface_result),
+                )
+            )
+        else:
+            mocks["open_followup_message_surface"] = stack.enter_context(
+                patch.object(
+                    sender_mod,
+                    "open_followup_message_surface",
+                    AsyncMock(return_value=surface_result),
+                )
+            )
+        mocks["send_sales_navigator_message"] = stack.enter_context(
+            patch.object(sender_mod, "send_sales_navigator_message", AsyncMock())
+        )
+        mocks["send_message"] = stack.enter_context(
+            patch.object(sender_mod, "send_message", AsyncMock())
+        )
+        mocks["mark_followup_sent"] = stack.enter_context(
+            patch.object(sender_mod, "mark_followup_sent", MagicMock())
+        )
+        mocks["mark_followup_failed"] = stack.enter_context(
+            patch.object(sender_mod, "mark_followup_failed", MagicMock())
+        )
+        mocks["resolve_followup_message"] = stack.enter_context(
+            patch.object(
+                sender_mod,
+                "resolve_followup_message",
+                MagicMock(return_value=(
+                    "Hi Marina,\n\nnur ein kurzer Followup zu meiner letzten Nachricht.\n\n"
+                    "Viele Grüße,\nKatharina",
+                    2,
+                    "draft_text",
+                )),
+            )
+        )
+        mocks["random_pause"] = stack.enter_context(
+            patch.object(sender_mod, "random_pause", AsyncMock())
+        )
+        return stack, mocks
+
+    async def test_routes_to_sales_navigator_when_composer_detected(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from sender import process_followup_one, SURFACE_SALES_NAVIGATOR
+
+        page = self._build_mock_page()
+        sales_page = self._build_mock_page()
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        client = MagicMock()
+        followup = self._build_followup()
+
+        stack, mocks = self._patches(
+            surface_result=(sales_page, SURFACE_SALES_NAVIGATOR),
+        )
+        with stack:
+            result = await process_followup_one(context, client, followup)
+
+        self.assertEqual(result, "sent")
+        mocks["send_sales_navigator_message"].assert_awaited_once()
+        mocks["send_message"].assert_not_awaited()
+        mocks["mark_followup_sent"].assert_called_once()
+        mocks["mark_followup_failed"].assert_not_called()
+
+        call_args = mocks["send_sales_navigator_message"].await_args
+        sent_page, subject, body = call_args.args
+        self.assertIs(sent_page, sales_page)
+        self.assertEqual(subject, "Kurze Frage zu deiner bAV")
+        # The Sales Navigator body must not duplicate the signature name.
+        self.assertNotIn("\nKatharina", body)
+        self.assertIn("Hi Marina", body)
+
+    async def test_routes_to_direct_message_when_dm_surface_returned(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from sender import process_followup_one, SURFACE_MESSAGE
+
+        page = self._build_mock_page()
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        client = MagicMock()
+        followup = self._build_followup()
+
+        stack, mocks = self._patches(
+            surface_result=(page, SURFACE_MESSAGE),
+        )
+        with stack:
+            result = await process_followup_one(context, client, followup)
+
+        self.assertEqual(result, "sent")
+        mocks["send_message"].assert_awaited_once()
+        mocks["send_sales_navigator_message"].assert_not_awaited()
+        mocks["mark_followup_sent"].assert_called_once()
+
+    async def test_fails_permanently_when_no_surface(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from sender import process_followup_one
+
+        page = self._build_mock_page()
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        client = MagicMock()
+        followup = self._build_followup()
+
+        stack, mocks = self._patches(
+            surface_result=RuntimeError("No messaging surface found."),
+        )
+        with stack:
+            result = await process_followup_one(context, client, followup)
+
+        self.assertEqual(result, "failed")
+        mocks["send_sales_navigator_message"].assert_not_awaited()
+        mocks["send_message"].assert_not_awaited()
+        mocks["mark_followup_failed"].assert_called_once()
+        kwargs = mocks["mark_followup_failed"].call_args.kwargs
+        self.assertTrue(kwargs.get("permanent"))
+
+    async def test_retries_on_transient_failure(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from sender import process_followup_one
+
+        page = self._build_mock_page()
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        client = MagicMock()
+        followup = self._build_followup()
+
+        stack, mocks = self._patches(
+            surface_result=RuntimeError("Timeout 5000ms exceeded"),
+        )
+        with stack:
+            result = await process_followup_one(context, client, followup)
+
+        self.assertEqual(result, "retry")
+        mocks["mark_followup_failed"].assert_called_once()
+        kwargs = mocks["mark_followup_failed"].call_args.kwargs
+        self.assertFalse(kwargs.get("permanent"))
+
+
 if __name__ == "__main__":
     unittest.main()
