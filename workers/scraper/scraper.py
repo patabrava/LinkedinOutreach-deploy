@@ -38,6 +38,7 @@ from auth import (
 # Import shared logger
 from credential_crypto import decrypt_password
 from shared_logger import get_logger
+from thread_reader import classify_last_sender
 
 # Load .env from scraper directory explicitly
 env_path = Path(__file__).parent / ".env"
@@ -2299,34 +2300,20 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
                 {"sender": sender, "text": text[:60] if text else "", "is_outbound": is_outbound, "leadId": lead_id}
             )
             
-            # Additional check: if sender name matches lead name, it's their reply
-            sender_lower = sender.lower().strip()
-            is_their_reply = False
-            
-            if is_outbound:
-                # Last message is from us
-                is_their_reply = False
-            elif sender_lower in ["sie", "you", "ich", ""]:
-                # Ambiguous sender that looks like us
-                is_their_reply = False
-                is_outbound = True
-            elif (
-                sender_lower == lead_full_name.lower() or
-                sender_lower == first_name.lower() or
-                first_name.lower() in sender_lower or
-                sender_lower in lead_full_name.lower()
-            ):
-                # Sender matches lead name - this is their reply
-                is_their_reply = True
-            else:
-                # Sender doesn't match lead name and isn't a standard "you" indicator.
-                # Since we opened this conversation from the lead's profile, if the sender
-                # is NOT the lead, it must be US (the logged-in user, e.g. "Simon Vestner").
-                # This means the last message is outbound; the sender worker owns nudge scheduling.
+            # Classify the latest bubble via the shared helper.
+            verdict = classify_last_sender(
+                {"sender": sender, "text": text, "is_outbound": is_outbound},
+                lead_full_name,
+                first_name,
+            )
+            is_their_reply = verdict == "lead"
+            if verdict == "unknown":
                 logger.debug(
                     f"Sender '{sender}' doesn't match lead '{lead_full_name}' - treating as our outbound message",
                     {"leadId": lead_id, "sender": sender, "leadName": lead_full_name}
                 )
+                is_outbound = True
+            elif verdict == "us":
                 is_outbound = True
             
             reply_ts = datetime.datetime.utcnow().isoformat()
