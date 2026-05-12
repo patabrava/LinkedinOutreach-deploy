@@ -969,10 +969,11 @@ async def click_and_resolve_active_page(page: Page, locator, timeout_ms: int = 8
 
 async def open_message_surface(page: Page) -> str:
     """Open a messaging surface on a LinkedIn profile page.
-    
+
     CRITICAL: All selectors must be scoped to lazy-column test ID to avoid
     clicking buttons in the messaging inbox or other parts of the page.
     """
+    await close_existing_chat_overlays(page)
     await wiggle_mouse(page)
 
     logger.info("Starting open_message_surface")
@@ -1185,6 +1186,50 @@ async def open_sales_navigator_message_surface(page: Page) -> Optional[Page]:
     return None
 
 
+async def close_existing_chat_overlays(page: Page) -> int:
+    """Close any open LinkedIn chat-overlay bubbles before opening a new one.
+
+    Why: LinkedIn persists open chat overlays across tabs via session/local
+    storage. Between two send loops the previous lead's overlay still renders
+    on the new lead's profile page, so find_direct_message_editor returns the
+    leftover editor and the message gets typed into (and sent to) the wrong
+    recipient. Closing every bubble first guarantees the only composer left
+    after we click 'Nachricht' belongs to the current lead.
+
+    Best-effort: never raises. Returns the count of overlays successfully closed.
+    """
+    closed = 0
+    try:
+        await page.wait_for_timeout(300)
+        for _ in range(8):
+            overlay = page.locator("div.msg-overlay-conversation-bubble").first
+            if await overlay.count() == 0:
+                break
+            close_btn = overlay.locator(
+                "button[aria-label*='Close conversation'], "
+                "button[aria-label*='Konversation schließen'], "
+                "button[data-control-name*='close'], "
+                "button[aria-label*='Close'], "
+                "button[aria-label*='Schließen']"
+            ).first
+            if await close_btn.count() == 0:
+                break
+            try:
+                await close_btn.click(timeout=2_000)
+                closed += 1
+                await page.wait_for_timeout(150)
+            except Exception:
+                break
+        if closed > 0:
+            logger.info(
+                f"Closed {closed} stale chat overlay(s) before opening composer",
+                data={"closed": closed},
+            )
+    except Exception as exc:
+        logger.warn("Failed during chat overlay cleanup", error=exc)
+    return closed
+
+
 async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
     """Open a messaging surface for a follow-up send.
 
@@ -1196,6 +1241,7 @@ async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
     Returns (target_page, surface) where surface is SURFACE_MESSAGE or
     SURFACE_SALES_NAVIGATOR. Raises RuntimeError on failure.
     """
+    await close_existing_chat_overlays(page)
     await wiggle_mouse(page)
 
     profile_container = None
@@ -3059,7 +3105,8 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
         await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
         await page.wait_for_timeout(1_500)
         await random_pause()
-        
+        await close_existing_chat_overlays(page)
+
         # Check for pending connection indicator (Ausstehend)
         pending_indicators = [
             page.locator("button:has-text('Ausstehend')"),
