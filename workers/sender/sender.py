@@ -2228,6 +2228,26 @@ def _followup_is_due(row: Dict[str, Any], now_utc: datetime) -> bool:
     return next_send_at <= now_utc
 
 
+def _nudge_lead_state_valid(lead: Dict[str, Any]) -> Tuple[bool, str]:
+    """Return (is_valid, reason) for whether a lead is in a state that can receive a NUDGE.
+
+    Catches orphan NUDGE rows where the prerequisite outreach never completed
+    (lead never invited, never sent, or connect_only invite never went out).
+    Without this check, stale APPROVED NUDGE rows fire regardless of lead state.
+    """
+    status = (lead.get("status") or "").upper()
+    if status != "SENT":
+        return False, f"lead_status_{status or 'unknown'}"
+    if not lead.get("sent_at"):
+        return False, "lead_sent_at_null"
+    if (lead.get("outreach_mode") or "").lower() == "connect_only":
+        if not lead.get("connection_sent_at"):
+            return False, "connect_only_invite_not_sent"
+        if not lead.get("connection_accepted_at"):
+            return False, "connect_only_not_accepted"
+    return True, ""
+
+
 def fetch_approved_followups(
     client: Client,
     limit: int = 10,
@@ -2242,7 +2262,7 @@ def fetch_approved_followups(
             .select(
                 "id, lead_id, status, followup_type, attempt, draft_text, sent_text, next_send_at, "
                 "last_message_text, last_message_from, updated_at, "
-                "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step)"
+                "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
             )
             .eq("status", "APPROVED")
             .order("updated_at", desc=True)
@@ -2257,7 +2277,7 @@ def fetch_approved_followups(
                 .select(
                     "id, lead_id, status, followup_type, draft_text, sent_text, next_send_at, "
                     "last_message_text, last_message_from, updated_at, "
-                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step)"
+                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
                 )
                 .eq("status", "APPROVED")
                 .order("updated_at", desc=True)
@@ -2271,7 +2291,7 @@ def fetch_approved_followups(
                 .select(
                     "id, lead_id, status, draft_text, sent_text, next_send_at, "
                     "last_message_text, last_message_from, updated_at, "
-                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step)"
+                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
                 )
                 .eq("status", "APPROVED")
                 .order("updated_at", desc=True)
@@ -2292,6 +2312,18 @@ def fetch_approved_followups(
         if (row.get("followup_type") or "").upper() == "NUDGE" and lead.get("last_reply_at"):
             mark_followup_skipped(client, row["id"], "Lead replied before scheduled nudge.")
             continue
+
+        if (row.get("followup_type") or "").upper() == "NUDGE":
+            ok, reason = _nudge_lead_state_valid(lead)
+            if not ok:
+                mark_followup_skipped(client, row["id"], f"lead_state_invalid_for_nudge:{reason}")
+                logger.warn(
+                    "Skipping NUDGE: lead not in valid state",
+                    {"followupId": row["id"], "leadId": lead.get("id"), "reason": reason,
+                     "leadStatus": lead.get("status"), "leadSentAt": lead.get("sent_at"),
+                     "outreachMode": lead.get("outreach_mode")},
+                )
+                continue
 
         selected.append(row)
         if len(selected) >= limit:
@@ -2318,7 +2350,7 @@ def fetch_followup_by_id(client: Client, followup_id: str) -> Optional[Dict[str,
     select_cols = (
         "id, lead_id, status, followup_type, draft_text, sent_text, next_send_at, "
         "last_message_text, last_message_from, updated_at, "
-        "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step)"
+        "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
     )
     resp = client.table("followups").select(select_cols).eq("id", followup_id).limit(1).execute()
     rows = resp.data or []
@@ -3702,7 +3734,7 @@ async def main() -> None:
                     .select(
                         "id, lead_id, status, followup_type, draft_text, sent_text, next_send_at, "
                         "last_message_text, last_message_from, updated_at, "
-                        "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step)"
+                        "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
                     )
                     .eq("lead_id", args.lead_id)
                     .eq("status", "APPROVED")
