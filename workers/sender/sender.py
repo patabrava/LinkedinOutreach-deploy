@@ -19,6 +19,7 @@ from supabase import Client, create_client
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from credential_crypto import decrypt_password
 from shared_logger import get_logger
+from thread_reader import extract_last_bubble, classify_last_sender
 
 # Reuse scraper helpers for invite-send (no-note path + weekly-limit detection)
 sys.path.insert(0, str(Path(__file__).parent.parent / "scraper"))
@@ -2532,6 +2533,41 @@ def revert_followup_to_approved(client: Client, followup_id: str) -> None:
     }).eq("id", followup_id).execute()
     logger.db_result("update", "followups", {"followupId": followup_id}, 1)
     logger.info(f"Followup reverted to APPROVED for retry", {"followupId": followup_id})
+
+
+def _record_reply_at_send_time(
+    client: Client,
+    lead_id: Optional[str],
+    followup_id: str,
+    bubble_text: str,
+) -> None:
+    """Persist the reply detected at send-time on the lead row.
+
+    Sets `leads.last_reply_at` so that fetch_approved_followups short-circuits
+    on subsequent polls. The followup itself is moved to SKIPPED by the caller;
+    this helper only writes the lead-level state.
+    """
+    if not lead_id:
+        return
+    now_iso = _utc_now().isoformat()
+    try:
+        client.table("leads").update({
+            "last_reply_at": now_iso,
+            "updated_at": now_iso,
+        }).eq("id", lead_id).execute()
+        logger.info(
+            "Recorded last_reply_at from send-time reply check",
+            {"leadId": lead_id, "followupId": followup_id, "preview": (bubble_text or "")[:80]},
+        )
+    except Exception as exc:
+        # Non-fatal: the followup is already going to be marked SKIPPED. The
+        # worst case is the next inbox-scan re-detects the reply and writes
+        # last_reply_at then.
+        logger.warn(
+            "Failed to write last_reply_at after send-time reply detection",
+            {"leadId": lead_id, "followupId": followup_id},
+            error=exc,
+        )
 
 
 def schedule_nudge_followup(
