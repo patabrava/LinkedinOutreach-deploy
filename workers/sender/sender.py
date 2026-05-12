@@ -1398,6 +1398,64 @@ async def fill_text_field(page: Page, selector_name: str, locator, value: str) -
     logger.element_type(selector_name, len(value), text_preview=value[:40])
 
 
+async def dismiss_keyboard_preference_popover(page: Page) -> bool:
+    """Dismiss LinkedIn's "Press Enter to send / Click Send" picker.
+
+    Why: while this coachmark is open the composer's Send button stays disabled,
+    which made one Matthias-Lusch followup time out for 30s with no diagnostic.
+    """
+    try:
+        result = await page.evaluate(
+            """() => {
+                const phrases = [
+                    'Mit Enter senden',
+                    "Auf 'Senden' klicken",
+                    'Auf \\u201eSenden\\u201c klicken',
+                    'Send with Enter',
+                    'Press Enter to send',
+                    "Click 'Send'",
+                    'Click Send to send',
+                    'Click Send',
+                ];
+                const isVisible = (el) => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                const matches = Array.from(document.querySelectorAll('div, section, aside, ul, li, fieldset, form'))
+                    .filter((el) => {
+                        if (!isVisible(el)) return false;
+                        if (el.scrollHeight > 600) return false;
+                        const t = el.textContent || '';
+                        return phrases.some((p) => t.includes(p));
+                    });
+                if (!matches.length) return { found: false };
+                matches.sort((a, b) => (a.offsetWidth * a.offsetHeight) - (b.offsetWidth * b.offsetHeight));
+                const container = matches[0];
+                const clickables = Array.from(container.querySelectorAll('button:not([disabled]), [role="button"]:not([aria-disabled="true"]), [role="radio"], input[type="radio"], label')).filter(isVisible);
+                if (!clickables.length) return { found: true, clicked: false };
+                const selected = clickables.find((c) => c.getAttribute && (c.getAttribute('aria-checked') === 'true' || (c.matches && c.matches('input:checked'))));
+                const target = selected || clickables[0];
+                target.click();
+                return {
+                    found: true,
+                    clicked: true,
+                    tag: target.tagName,
+                    label: ((target.innerText || target.getAttribute('aria-label') || '').slice(0, 80)),
+                };
+            }"""
+        )
+        if isinstance(result, dict) and result.get("found"):
+            if result.get("clicked"):
+                logger.info("Dismissed keyboard-preference popover", data=result)
+                await page.wait_for_timeout(400)
+            else:
+                logger.warn(
+                    "Keyboard-preference popover detected but no clickable found",
+                    data=result,
+                )
+            return True
+    except Exception as exc:
+        logger.warn("Keyboard-preference popover probe failed", error=exc)
+    return False
+
+
 async def wait_for_composer_cleared(editor, timeout_ms: int = 5_000) -> bool:
     deadline = asyncio.get_event_loop().time() + (timeout_ms / 1000)
     while asyncio.get_event_loop().time() < deadline:
@@ -1756,6 +1814,34 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
         # Additional safety pause before clicking to ensure typing is truly complete
         await page.wait_for_timeout(800)
 
+        # LinkedIn occasionally surfaces a "Press Enter / Click Send" picker
+        # that keeps the Send button disabled until dismissed. Probe + clear it,
+        # then poll is_enabled() so we fail fast instead of waiting 30s.
+        await dismiss_keyboard_preference_popover(page)
+        deadline = asyncio.get_event_loop().time() + 6
+        enabled = False
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                enabled = await send_btn.is_enabled()
+            except Exception:
+                enabled = False
+            if enabled:
+                break
+            if await dismiss_keyboard_preference_popover(page):
+                continue
+            await page.wait_for_timeout(250)
+        if not enabled:
+            try:
+                screenshot_path = f"/tmp/send_disabled_{int(asyncio.get_event_loop().time())}.png"
+                await page.screenshot(path=screenshot_path)
+                logger.warn(
+                    "Send button still disabled after popover handling",
+                    data={"screenshot": screenshot_path},
+                )
+            except Exception:
+                pass
+            raise RuntimeError("Direct message Send button stayed disabled.")
+
         await send_btn.click()
         logger.element_click("Send button (message)", success=True)
         if not await wait_for_composer_cleared(editor):
@@ -1764,6 +1850,7 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
     except Exception as e:
         logger.element_click("Send button (message)", success=False)
         logger.warn("Send button unavailable or ineffective; trying Enter key fallback", error=e)
+        await dismiss_keyboard_preference_popover(page)
         if await click_editor_scoped_send_button(editor):
             if await wait_for_composer_cleared(editor):
                 logger.element_click("Send button (message scoped fallback)", success=True)
@@ -2177,6 +2264,27 @@ def fetch_approved_followups(
             data={"followupTypeFilter": followup_type_filter},
         )
     return selected
+
+
+def fetch_followup_by_id(client: Client, followup_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a specific followup by id and mark it PROCESSING. Used for --followup-id testing."""
+    select_cols = (
+        "id, lead_id, status, followup_type, draft_text, sent_text, next_send_at, "
+        "last_message_text, last_message_from, updated_at, "
+        "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step)"
+    )
+    resp = client.table("followups").select(select_cols).eq("id", followup_id).limit(1).execute()
+    rows = resp.data or []
+    if not rows:
+        logger.warn("Requested followup id not found", data={"followupId": followup_id})
+        return None
+    row = rows[0]
+    client.table("followups").update({
+        "status": "PROCESSING",
+        "processing_started_at": datetime.utcnow().isoformat(),
+    }).eq("id", followup_id).execute()
+    logger.info("Targeted followup marked PROCESSING", data={"followupId": followup_id, "leadId": row.get("lead_id")})
+    return row
 
 
 def recover_stale_processing_followups(
@@ -3415,6 +3523,7 @@ async def main() -> None:
     parser.add_argument("--lead-id", help="Send only this lead id (bypass queue).")
     parser.add_argument("--batch-id", type=int, help="Process only leads from this batch id.")
     parser.add_argument("--followup", action="store_true", help="Process APPROVED followups instead of initial outreach.")
+    parser.add_argument("--followup-id", dest="followup_id", help="Send only this followup id (skips queue scanning).")
     parser.add_argument("--message-only", action="store_true", help="Process CONNECT_ONLY_SENT leads to send messages to accepted connections.")
     parser.add_argument(
         "--send-invites",
@@ -3447,9 +3556,13 @@ async def main() -> None:
 
         if args.followup:
             # Process a batch of approved followups with proper status tracking
-            recover_stale_processing_followups(client)
-            if args.lead_id:
-                # Targeted single-followup run: pick the APPROVED row for this lead.
+            if args.followup_id:
+                row = fetch_followup_by_id(client, args.followup_id)
+                items = [row] if row else []
+                batch_limit = 1
+            elif args.lead_id:
+                # Targeted run by lead id: pick the APPROVED row for this lead.
+                recover_stale_processing_followups(client)
                 resp = (
                     client.table("followups")
                     .select(
@@ -3471,9 +3584,10 @@ async def main() -> None:
                     }).eq("id", items[0]["id"]).execute()
                 batch_limit = 1
             else:
+                recover_stale_processing_followups(client)
                 batch_limit = min(20, max(1, daily_limit - already_sent))
                 items = fetch_approved_followups(client, batch_limit)
-            
+
             if not items:
                 logger.info("No APPROVED followups to send")
                 return
