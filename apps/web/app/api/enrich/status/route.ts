@@ -4,19 +4,17 @@ import { requireOperatorAccess } from "../../../../lib/apiGuard";
 import { logger } from "../../../../lib/logger";
 import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 import { listActiveWorkers } from "../../../../lib/workerControl";
-import { detectConnectOnlyLimitPause } from "./pause";
-import { getConnectOnlyLimitWindowStart } from "./window";
 
 // Force dynamic rendering - disable all caching
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-const DEFAULT_DAILY_ENRICHMENT_CAP = 20;
+const DEFAULT_DAILY_SEND_LIMIT = 50;
 
 const getDailyEnrichmentCap = () => {
-  const parsedCap = parseInt(process.env.DAILY_ENRICHMENT_CAP || "", 10);
+  const parsedCap = parseInt(process.env.DAILY_SEND_LIMIT || process.env.DAILY_ENRICHMENT_CAP || "", 10);
   if (Number.isFinite(parsedCap) && parsedCap > 0) return parsedCap;
-  return DEFAULT_DAILY_ENRICHMENT_CAP;
+  return DEFAULT_DAILY_SEND_LIMIT;
 };
 
 const STATUSES = [
@@ -123,8 +121,6 @@ export async function GET(request: Request) {
     let completedTodayError: any = null;
     let limitReached = false;
     let limitMessage: string | null = null;
-    const connectOnlyWindowStart = getConnectOnlyLimitWindowStart();
-
     if (isConnectOnly) {
       logger.dbQuery(
         "select-count",
@@ -164,45 +160,9 @@ export async function GET(request: Request) {
 
       // Queue for connect_only means unsent leads that still can be processed.
       remaining = (counts.NEW || 0) + (counts.PROCESSING || 0) + (counts.ENRICHED || 0);
-
-      const { data: recentFailed, error: recentFailedError } = await client
-        .from("leads")
-        .select("id, error_message, profile_data, updated_at")
-        .eq("outreach_mode", modeConfig.outreachMode)
-        .eq("status", "FAILED")
-        .gte("updated_at", connectOnlyWindowStart)
-        .order("updated_at", { ascending: false })
-        .limit(10);
-
-      if (recentFailedError) {
-        logger.error("Failed to inspect recent connect-only failures", { correlationId }, recentFailedError);
-        throw recentFailedError;
-      }
-
-      if (detectConnectOnlyLimitPause(recentFailed)) {
-        limitReached = true;
-        limitMessage = "LinkedIn weekly invite limit reached. Stop until next week.";
-      }
-
-      if (!limitReached) {
-        const { data: pausedLeads, error: pausedLeadsError } = await client
-          .from("leads")
-          .select("id, profile_data, updated_at")
-          .eq("outreach_mode", modeConfig.outreachMode)
-          .eq("status", "NEW")
-          .contains("profile_data", { meta: { connect_only_limit_reached: true } })
-          .gte("updated_at", connectOnlyWindowStart)
-          .limit(1);
-
-        if (pausedLeadsError) {
-          logger.error("Failed to inspect requeued connect-only leads", { correlationId }, pausedLeadsError);
-          throw pausedLeadsError;
-        }
-
-        if ((pausedLeads || []).length > 0) {
-          limitReached = true;
-          limitMessage = "LinkedIn weekly invite limit reached. Some leads were requeued into NEW for later retry.";
-        }
+      limitReached = completedToday >= dailyCap;
+      if (limitReached) {
+        limitMessage = `Daily invite cap reached (${completedToday}/${dailyCap}). More invites can be sent tomorrow.`;
       }
     } else {
       logger.dbQuery(

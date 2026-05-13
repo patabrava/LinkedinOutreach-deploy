@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
 import type { LeadListRow } from "../app/actions";
 import { isSupabaseBrowserConfigured, supabaseBrowserClient } from "../lib/supabaseClient";
@@ -239,6 +240,7 @@ export function LeadList({
   const [sort, setSort] = useState<{ key: SortKey; direction: "asc" | "desc" } | null>(null);
   const [sequenceById, setSequenceById] = useState<Record<string, SequenceDefinition>>({});
   const [assignmentByBatch, setAssignmentByBatch] = useState<Record<string, string>>({});
+  const router = useRouter();
 
   useEffect(() => {
     setFilters((prev) => {
@@ -446,6 +448,7 @@ export function LeadList({
             // Keep newest first by createdAt if available
             return next.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
           });
+          router.refresh();
         }
       )
       .subscribe();
@@ -453,7 +456,17 @@ export function LeadList({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [maxRows, showPagination]);
+  }, [maxRows, router, showPagination]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const interval = window.setInterval(() => {
+      router.refresh();
+    }, 5_000);
+
+    return () => window.clearInterval(interval);
+  }, [router]);
 
   const displayRows = useMemo(() => {
     const working = [...filteredRows];

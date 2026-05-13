@@ -53,6 +53,7 @@ DEFAULT_DAILY_ENRICHMENT_CAP = 20
 DAILY_INBOX_SCAN_LIMIT = 60
 INBOX_SCAN_COOLDOWN_HOURS = 24  # skip re-opening profiles scanned within this window
 PENDING_INVITE_BACKOFF_DAYS = 7  # skip pending invites for this many days
+INBOX_REPLY_CANDIDATE_STATUSES = ["SENT", "FAILED"]
 CONNECT_DIALOG_TIMEOUT_MS = 15_000
 
 
@@ -546,6 +547,44 @@ async def wait_for_connection_dialog(page: Page) -> None:
 
 def safe_text(value: Optional[str]) -> str:
     return value.strip() if value else ""
+
+
+def normalize_person_name(value: Optional[str]) -> str:
+    """Normalize a LinkedIn display name for exact-ish matching."""
+    text = safe_text(value).lower()
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[^a-z0-9äöüßáàâãåéèêëíìîïóòôõúùûüñç -]", "", text)
+    return text.strip()
+
+
+def lead_display_name(lead: Dict[str, Any]) -> str:
+    return " ".join(
+        part for part in [
+            safe_text(lead.get("first_name")),
+            safe_text(lead.get("last_name")),
+        ]
+        if part
+    ).strip()
+
+
+def is_last_message_from_lead(convo_info: Dict[str, Any], lead: Dict[str, Any]) -> bool:
+    """Return True when the extracted conversation tail is an inbound lead reply."""
+    if convo_info.get("is_outbound"):
+        return False
+
+    sender = normalize_person_name(convo_info.get("sender"))
+    if sender in {"", "sie", "you", "ich"}:
+        return False
+
+    full_name = normalize_person_name(lead_display_name(lead))
+    first_name = normalize_person_name(lead.get("first_name"))
+    last_name = normalize_person_name(lead.get("last_name"))
+    return (
+        sender == full_name
+        or bool(first_name and sender == first_name)
+        or bool(full_name and sender in full_name)
+        or bool(first_name and last_name and first_name in sender and last_name in sender)
+    )
 
 
 async def safe_text_content(page: Page, selector: str, timeout: int = 6_000) -> str:
@@ -1579,6 +1618,12 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of leads to process in a single run; 0 means no limit (process all).",
     )
     parser.add_argument(
+        "--lead-id",
+        action="append",
+        default=[],
+        help="Only process the given lead id in inbox mode. May be passed multiple times.",
+    )
+    parser.add_argument(
         "--sequence-id",
         type=int,
         default=None,
@@ -1815,40 +1860,53 @@ async def search_conversation_by_name(page: Page, lead_name: str) -> Optional[Di
     Returns conversation info if found, None otherwise.
     """
     try:
-        # Find the search box - German UI: "Nachrichten durchsuchen", English: "Search messages"
-        searchbox = page.get_by_role("searchbox", name="Nachrichten durchsuchen")
+        # Find the conversation-list search input. The global top-nav search has
+        # a similar German label, so prefer LinkedIn's inbox-specific id first.
+        searchbox = page.locator("input#search-conversations").first
         if not await searchbox.count():
-            searchbox = page.get_by_role("searchbox", name="Search messages")
-        if not await searchbox.count():
-            # Fallback to placeholder text
-            searchbox = page.locator("input[placeholder*='durchsuchen'], input[placeholder*='Search']").first
+            searchbox = page.locator("input[name='searchTerm'][placeholder*='Nachrichten'], input[name='searchTerm'][placeholder*='Search']").first
         
         if not await searchbox.count():
             logger.warn("search_conversation_by_name: could not find search box")
             return None
         
+        lead_name_norm = normalize_person_name(lead_name)
+
         # Clear any existing search and type the lead name
         await searchbox.click()
         await page.wait_for_timeout(300)
         await searchbox.fill("")
         await page.wait_for_timeout(200)
-        await searchbox.fill(lead_name)
+        await page.keyboard.type(lead_name, delay=60)
+        await page.keyboard.press("Enter")
         await page.wait_for_timeout(1500)  # Wait for search results to load
         
-        # Look for the conversation in search results
-        # Try multiple selectors for conversation items
+        # Look for the conversation in search results. Prefer an item whose
+        # visible text includes the exact lead name, otherwise the first result
+        # can open a different thread with a similar name.
         result_selectors = [
             "li.msg-conversation-listitem",
+            "ul.msg-conversations-container__conversations-list li",
             "div.msg-conversation-card",
             "li[data-control-name='conversation']",
             "div.msg-search-result",
+            "li.artdeco-list__item",
         ]
         
         result_item = None
         for selector in result_selectors:
             items = page.locator(selector)
-            if await items.count() > 0:
-                result_item = items.first
+            count = await items.count()
+            for idx in range(min(count, 8)):
+                item = items.nth(idx)
+                try:
+                    item_text = normalize_person_name(await item.inner_text(timeout=2_000))
+                except Exception:
+                    item_text = ""
+                if lead_name_norm and lead_name_norm in item_text:
+                    result_item = item
+                    break
+            if result_item:
                 break
         
         if not result_item:
@@ -2155,7 +2213,19 @@ def upsert_followup_for_reply(
         raise RuntimeError(f"Lead update failed for lead {lead_id}: {update_resp.error}")
 
 
-async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> None:
+def cancel_active_nudges_for_reply(client: Client, lead_id: str) -> None:
+    """Prevent stale nudge rows from being sent after a lead has replied."""
+    execute_with_retry(
+        client.table("followups")
+        .update({"status": "SKIPPED", "last_error": "Superseded by detected reply"})
+        .eq("lead_id", lead_id)
+        .eq("followup_type", "NUDGE")
+        .in_("status", ["PENDING_REVIEW", "APPROVED", "PROCESSING", "RETRY_LATER"]),
+        desc=f"Cancel active nudges for replied lead {lead_id}",
+    )
+
+
+async def inbox_scan(context: BrowserContext, client: Client, limit: int, lead_ids: Optional[List[str]] = None) -> None:
     """Scan LinkedIn inbox for conversations with SENT leads using search.
     
     NEW APPROACH: Instead of scraping the inbox list (unreliable DOM selectors),
@@ -2168,25 +2238,34 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
     """
     page = await context.new_page()
     try:
-        # Fetch leads with SENT status from database - these are contacts we've messaged
+        # Fetch leads likely to have received outreach. FAILED is included because
+        # the browser can fail after sending or after LinkedIn state changes, while
+        # the inbox remains the authoritative source of replies.
         # Include throttling columns to skip recently scanned or pending invite leads
-        logger.info("Fetching SENT leads from database...", {"limit": limit})
+        logger.info(
+            "Fetching inbox reply candidates from database...",
+            {"limit": limit, "statuses": INBOX_REPLY_CANDIDATE_STATUSES, "lead_ids": lead_ids or []},
+        )
         leads_query = (
             client.table("leads")
             .select("id, first_name, last_name, linkedin_url, status, last_inbox_scan_at, pending_invite, pending_checked_at")
-            .eq("status", "SENT")
+            .in_("status", INBOX_REPLY_CANDIDATE_STATUSES)
         )
+        if lead_ids:
+            leads_query = leads_query.in_("id", lead_ids)
         if limit and limit > 0:
             leads_query = leads_query.limit(limit)
-        leads_resp = execute_with_retry(leads_query, desc="Fetch SENT leads for inbox scan")
+        leads_resp = execute_with_retry(leads_query, desc="Fetch inbox reply candidates")
         sent_leads = leads_resp.data or []
-        logger.info(f"Found {len(sent_leads)} leads with SENT status to check")
+        logger.info(f"Found {len(sent_leads)} inbox reply candidates to check")
         
         if not sent_leads:
-            print("No SENT leads found in database. Nothing to scan.")
+            print("No inbox reply candidates found in database. Nothing to scan.")
             return
         
         replies_detected = 0
+        inbox_hits = 0
+        profile_fallbacks = 0
         skipped_existing = 0
         skipped_no_conversation = 0
         skipped_ambiguous = 0
@@ -2194,30 +2273,24 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
         skipped_pending_invite = 0
         
         now_utc = datetime.datetime.now(datetime.timezone.utc)
+        await navigate_to_inbox(page)
         
         for lead in sent_leads:
             lead_id = lead["id"]
-            first_name = (lead.get("first_name") or "").strip()
-            last_name = (lead.get("last_name") or "").strip()
-            lead_full_name = " ".join([p for p in [first_name, last_name] if p]).strip()
+            lead_full_name = lead_display_name(lead)
             
             if not lead_full_name:
                 logger.debug(f"Skipping lead with no name", {"leadId": lead_id})
                 continue
             
-            # --- THROTTLING: Skip if recently scanned ---
+            recently_scanned = False
             last_scan = lead.get("last_inbox_scan_at")
             if last_scan:
                 try:
                     scan_dt = datetime.datetime.fromisoformat(last_scan.replace("Z", "+00:00"))
                     hours_since_scan = (now_utc - scan_dt).total_seconds() / 3600
                     if hours_since_scan < INBOX_SCAN_COOLDOWN_HOURS:
-                        logger.debug(
-                            f"Skipping {lead_full_name}, scanned {round(hours_since_scan, 1)}h ago (cooldown={INBOX_SCAN_COOLDOWN_HOURS}h)",
-                            {"leadId": lead_id}
-                        )
-                        skipped_recently_scanned += 1
-                        continue
+                        recently_scanned = True
                 except Exception:
                     pass
             
@@ -2238,26 +2311,45 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
                     except Exception:
                         pass
             
-            logger.info(f"Opening profile for SENT lead followup check: {lead_full_name}", {"leadId": lead_id})
+            logger.info(f"Checking inbox for reply candidate: {lead_full_name}", {"leadId": lead_id, "status": lead.get("status")})
             
-            # Check if we already have a pending followup for this lead
+            # Existing REPLY rows are authoritative. Existing NUDGE rows should
+            # not block reply detection, because a later inbound reply supersedes them.
             existing = execute_with_retry(
                 client.table("followups")
                 .select("id")
                 .eq("lead_id", lead_id)
+                .eq("followup_type", "REPLY")
                 .in_("status", ["PENDING_REVIEW", "APPROVED", "PROCESSING"])
                 .limit(1),
                 desc=f"Check existing followup for lead {lead_id}",
             )
             if existing.data:
-                logger.debug(f"Lead already has pending followup, skipping", {"leadId": lead_id})
+                logger.debug(f"Lead already has pending reply followup, skipping", {"leadId": lead_id})
                 skipped_existing += 1
                 continue
             
-            # Visit the profile and try to open the message thread via Nachricht / Message button
-            linkedin_url = (lead.get("linkedin_url") or "").strip()
-            convo_info = await open_profile_and_get_last_message(page, lead_full_name, linkedin_url)
-            
+            # Prefer LinkedIn Messaging itself. Profile message buttons are
+            # layout-dependent and can be absent even when the inbox has replies.
+            if "linkedin.com/messaging" not in page.url:
+                await navigate_to_inbox(page)
+            convo_info = await search_conversation_by_name(page, lead_full_name)
+            if convo_info:
+                inbox_hits += 1
+                logger.info("Inbox search found conversation", {"leadId": lead_id, "lead": lead_full_name})
+            elif recently_scanned:
+                logger.debug(
+                    f"Skipping profile fallback for {lead_full_name}, scanned {round(hours_since_scan, 1)}h ago (cooldown={INBOX_SCAN_COOLDOWN_HOURS}h)",
+                    {"leadId": lead_id},
+                )
+                skipped_recently_scanned += 1
+                continue
+            else:
+                profile_fallbacks += 1
+                logger.info("Inbox search found no conversation, falling back to profile", {"leadId": lead_id, "lead": lead_full_name})
+                linkedin_url = (lead.get("linkedin_url") or "").strip()
+                convo_info = await open_profile_and_get_last_message(page, lead_full_name, linkedin_url)
+
             # Always update last_inbox_scan_at after visiting the profile
             scan_ts = now_iso_utc()
             
@@ -2299,26 +2391,9 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
                 {"sender": sender, "text": text[:60] if text else "", "is_outbound": is_outbound, "leadId": lead_id}
             )
             
-            # Additional check: if sender name matches lead name, it's their reply
-            sender_lower = sender.lower().strip()
-            is_their_reply = False
-            
-            if is_outbound:
-                # Last message is from us
-                is_their_reply = False
-            elif sender_lower in ["sie", "you", "ich", ""]:
-                # Ambiguous sender that looks like us
-                is_their_reply = False
-                is_outbound = True
-            elif (
-                sender_lower == lead_full_name.lower() or
-                sender_lower == first_name.lower() or
-                first_name.lower() in sender_lower or
-                sender_lower in lead_full_name.lower()
-            ):
-                # Sender matches lead name - this is their reply
-                is_their_reply = True
-            else:
+            is_their_reply = is_last_message_from_lead(convo_info, lead)
+
+            if not is_their_reply and not is_outbound:
                 # Sender doesn't match lead name and isn't a standard "you" indicator.
                 # Since we opened this conversation from the lead's profile, if the sender
                 # is NOT the lead, it must be US (the logged-in user, e.g. "Simon Vestner").
@@ -2333,6 +2408,7 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
             
             if is_their_reply:
                 # This is a REPLY - they responded to our message
+                cancel_active_nudges_for_reply(client, lead_id)
                 upsert_followup_for_reply(
                     client,
                     lead_id=lead_id,
@@ -2364,6 +2440,8 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
             f"Inbox scan complete",
             data={
                 "replies": replies_detected,
+                "inbox_hits": inbox_hits,
+                "profile_fallbacks": profile_fallbacks,
                 "skipped_existing": skipped_existing,
                 "skipped_no_conversation": skipped_no_conversation,
                 "skipped_ambiguous": skipped_ambiguous,
@@ -2377,6 +2455,8 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
         print(f"{'='*50}")
         print(f"  Leads checked: {len(sent_leads)}")
         print(f"  Replies detected: {replies_detected}")
+        print(f"  Inbox conversations found: {inbox_hits}")
+        print(f"  Profile fallbacks: {profile_fallbacks}")
         print(f"  Already pending: {skipped_existing}")
         print(f"  No conversation: {skipped_no_conversation}")
         print(f"  Recently scanned ({INBOX_SCAN_COOLDOWN_HOURS}h): {skipped_recently_scanned}")
@@ -2386,7 +2466,7 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int) -> Non
         await page.close()
 
 
-async def inbox_mode(limit: int = 0) -> None:
+async def inbox_mode(limit: int = 0, lead_ids: Optional[List[str]] = None) -> None:
     """Entry point for inbox scanning.
 
     Opens a visible browser (headless=False), ensures LinkedIn auth, and then
@@ -2397,8 +2477,8 @@ async def inbox_mode(limit: int = 0) -> None:
     try:
         creds = fetch_linkedin_credentials(client)
         await ensure_linkedin_auth(context, creds)
-        # If limit <= 0, process all SENT leads; otherwise respect the explicit cap.
-        await inbox_scan(context, client, limit)
+        # If limit <= 0, process all reply candidates; otherwise respect the explicit cap.
+        await inbox_scan(context, client, limit, lead_ids=lead_ids)
     finally:
         await shutdown(playwright, browser)
 
@@ -2498,9 +2578,9 @@ if __name__ == "__main__":
 
     # Dispatch based on inbox flag
     if getattr(args, "inbox", False):
-        # For inbox scans, limit=0 means "no limit" (all SENT leads)
+        # For inbox scans, limit=0 means "no limit" (all reply candidates)
         limit = args.limit if isinstance(args.limit, int) and args.limit >= 0 else 0
-        asyncio.run(inbox_mode(limit=limit))
+        asyncio.run(inbox_mode(limit=limit, lead_ids=args.lead_id or None))
     else:
         limit = args.limit if isinstance(args.limit, int) and args.limit >= 0 else 0
         sequence_id = args.sequence_id if isinstance(args.sequence_id, int) and args.sequence_id > 0 else None

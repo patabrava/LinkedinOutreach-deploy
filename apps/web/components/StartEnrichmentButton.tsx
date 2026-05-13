@@ -329,6 +329,21 @@ export function StartEnrichmentButton({ mode = "message", variant = "details", s
       {error ? (
         <div style={{ marginTop: 12, fontSize: 12, color: "var(--accent)" }}>{error}</div>
       ) : null}
+      {status?.limitReached ? (
+        <div
+          style={{
+            marginTop: 10,
+            padding: "10px 12px",
+            border: "2px solid var(--accent)",
+            background: "rgba(255, 0, 0, 0.04)",
+            fontSize: 12,
+            color: "var(--accent)",
+            fontWeight: 700,
+          }}
+        >
+          {status.limitMessage || "LinkedIn weekly invite limit reached. Stop until next week."}
+        </div>
+      ) : null}
 
       {showDetails ? (
         <div style={{ marginTop: 20 }}>
@@ -365,21 +380,6 @@ export function StartEnrichmentButton({ mode = "message", variant = "details", s
             {progress.backlogRemaining
               ? ` • IN QUEUE: ${progress.backlogRemaining}`
               : ""}
-          </div>
-        ) : null}
-        {status?.limitReached ? (
-          <div
-            style={{
-              marginTop: 10,
-              padding: "10px 12px",
-              border: "2px solid var(--accent)",
-              background: "rgba(255, 0, 0, 0.04)",
-              fontSize: 12,
-              color: "var(--accent)",
-              fontWeight: 700,
-            }}
-          >
-            {status.limitMessage || "LinkedIn weekly invite limit reached. Stop until next week."}
           </div>
         ) : null}
         {nextLeadLabel ? (

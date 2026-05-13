@@ -2,6 +2,7 @@
 """Focused tests for sequence-owned sender message resolution."""
 
 import sys
+import os
 import unittest
 from pathlib import Path
 
@@ -78,6 +79,9 @@ class SelectFallbackClient:
 
 
 class LoadSequenceMessagesTest(unittest.TestCase):
+    def tearDown(self):
+        os.environ.pop("OUTREACH_SEQUENCE_ID", None)
+
     def test_connect_note_is_hydrated_from_sequence_row(self):
         client = FakeClient(
             {
@@ -101,6 +105,31 @@ class LoadSequenceMessagesTest(unittest.TestCase):
         result = load_sequence_messages(client, lead)
 
         self.assertEqual(result["connect_note"], "Hi Mia")
+
+    def test_launch_sequence_id_override_wins_over_missing_lead_sequence(self):
+        os.environ["OUTREACH_SEQUENCE_ID"] = "9"
+        client = FakeClient(
+            {
+                "outreach_sequences": [
+                    {
+                        "id": 9,
+                        "connect_note": "SEQUENZ b ohne Vertrag",
+                        "first_message": "Launch note",
+                        "second_message": "",
+                        "third_message": "",
+                        "followup_interval_days": 3,
+                        "is_active": False,
+                        "created_at": "2026-04-24T00:00:00Z",
+                    }
+                ],
+                "settings": [],
+            }
+        )
+        lead = {"first_name": "Mia", "last_name": "Lopez", "company_name": "ACME"}
+
+        result = load_sequence_messages(client, lead)
+
+        self.assertEqual(result["connect_note"], "SEQUENZ b ohne Vertrag")
 
     def test_fetch_lead_by_id_fallback_preserves_sequence_fields(self):
         client = SelectFallbackClient(
