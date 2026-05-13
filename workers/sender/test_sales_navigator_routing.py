@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from sender import (
     INVITE_RETRY_STATUSES,
     DIRECT_MESSAGE_COMPOSER_SELECTOR,
+    DIRECT_MESSAGE_SCOPED_SEND_ROOT_SELECTORS,
     DIRECT_MESSAGE_SEND_BUTTON_SELECTOR,
     MESSAGE_ONLY_PROCESSING_STATUSES,
     _pick_send_button_candidate,
@@ -21,6 +22,7 @@ from sender import (
     build_sales_navigator_body,
     build_sales_navigator_subject,
     clear_message_only_retry_profile_data,
+    linkedin_absolute_url,
     _is_invite_candidate,
     _is_message_only_candidate,
     mark_connect_only_limit_reached,
@@ -357,6 +359,40 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         result = _pick_send_button_candidate(candidates)
 
         self.assertEqual(result["domIndex"], 5)
+
+    def test_scoped_send_roots_include_msg_form_ancestor(self):
+        roots = " ".join(DIRECT_MESSAGE_SCOPED_SEND_ROOT_SELECTORS)
+
+        self.assertIn("msg-form", roots)
+
+    def test_linkedin_absolute_url_normalizes_relative_compose_href(self):
+        result = linkedin_absolute_url("/messaging/compose/?recipient=abc")
+
+        self.assertEqual(result, "https://www.linkedin.com/messaging/compose/?recipient=abc")
+
+    def test_pick_send_button_candidate_prefers_msg_form_button_over_global_send(self):
+        candidates = [
+            {
+                "domIndex": 1,
+                "text": "Senden",
+                "visible": True,
+                "enabled": True,
+                "withinEditorRoot": False,
+                "className": "artdeco-button",
+            },
+            {
+                "domIndex": 3,
+                "text": "",
+                "visible": True,
+                "enabled": True,
+                "withinEditorRoot": True,
+                "className": "msg-form__send-button artdeco-button",
+            },
+        ]
+
+        result = _pick_send_button_candidate(candidates)
+
+        self.assertEqual(result["domIndex"], 3)
 
     def test_typed_text_matches_accepts_small_extraction_gap_when_words_match(self):
         expected = "Hi Sabrina, freut mich, dass wir uns vernetzen. Viele Gruesse, Katharina"

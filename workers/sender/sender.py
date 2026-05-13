@@ -84,6 +84,12 @@ DIRECT_MESSAGE_SEND_BUTTON_SELECTOR = (
     "button[aria-label*='Send']:visible, "
     "button[aria-label*='Senden']:visible"
 )
+DIRECT_MESSAGE_SCOPED_SEND_ROOT_SELECTORS = (
+    "xpath=ancestor::form[1]",
+    "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' msg-form ')][1]",
+    "xpath=ancestor::*[contains(@class,'msg-overlay-conversation-bubble')][1]",
+    "xpath=ancestor::*[@role='dialog'][1]",
+)
 SEQUENCE_DEFAULT_MESSAGES = {
     "first_message": (
         "Hi {first_name},\n\n"
@@ -808,6 +814,17 @@ def _render_template_message(template: str, lead: Dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+def linkedin_absolute_url(href: str) -> str:
+    clean_href = (href or "").strip()
+    if not clean_href:
+        return ""
+    if clean_href.startswith("http://") or clean_href.startswith("https://"):
+        return clean_href
+    if clean_href.startswith("/"):
+        return f"https://www.linkedin.com{clean_href}"
+    return clean_href
+
+
 def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, Any]:
     """Resolve sequence messages for a lead, preferring DB templates over defaults."""
     result: Dict[str, Any] = {
@@ -946,9 +963,30 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
 async def click_and_resolve_active_page(page: Page, locator, timeout_ms: int = 8_000) -> Page:
     context = page.context
     before_pages = set(context.pages)
+    href = ""
+    try:
+        href = (await locator.get_attribute("href")) or ""
+    except Exception:
+        href = ""
     popup_task = asyncio.create_task(page.wait_for_event("popup", timeout=timeout_ms))
     try:
-        await locator.click(timeout=timeout_ms)
+        try:
+            await locator.click(timeout=timeout_ms)
+        except Exception as click_error:
+            logger.warn("Message surface normal click failed; trying force click", error=click_error)
+            try:
+                await locator.click(timeout=timeout_ms, force=True)
+            except Exception as force_error:
+                target_url = linkedin_absolute_url(href)
+                if not target_url:
+                    raise force_error
+                logger.warn(
+                    "Message surface force click failed; opening href directly",
+                    error=force_error,
+                    data={"url": target_url},
+                )
+                await page.goto(target_url, wait_until="domcontentloaded", timeout=60_000)
+                return page
         try:
             popup = await popup_task
             await popup.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
@@ -966,6 +1004,11 @@ async def click_and_resolve_active_page(page: Page, locator, timeout_ms: int = 8
     finally:
         if not popup_task.done():
             popup_task.cancel()
+        else:
+            try:
+                popup_task.exception()
+            except Exception:
+                pass
 
 
 async def open_message_surface(page: Page) -> str:
@@ -1490,46 +1533,123 @@ async def dismiss_keyboard_preference_popover(page: Page) -> bool:
     Why: while this coachmark is open the composer's Send button stays disabled,
     which made one Matthias-Lusch followup time out for 30s with no diagnostic.
     """
+    text_patterns = [
+        re.compile(r"Auf\s*[„\"']?Senden[“\"']?\s*klicken", re.I),
+        re.compile(r"Click\s*[„\"']?Send[“\"']?", re.I),
+    ]
+
+    async def preference_text_visible() -> bool:
+        for visible_pattern in text_patterns:
+            try:
+                locator = page.get_by_text(visible_pattern)
+                count = await locator.count()
+                for index in range(min(count, 5)):
+                    try:
+                        if await locator.nth(index).is_visible(timeout=300):
+                            return True
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        return False
+
+    async def close_preference_panel() -> None:
+        try:
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(200)
+        except Exception:
+            pass
+        if not await preference_text_visible():
+            return
+        try:
+            toggle = page.locator("button.msg-form__send-toggle").last
+            if await toggle.count() > 0 and await toggle.is_visible(timeout=500):
+                await toggle.click(timeout=1_500, force=True)
+                await page.wait_for_timeout(300)
+        except Exception:
+            pass
+        if not await preference_text_visible():
+            return
+        try:
+            editor = page.locator("div.msg-form__contenteditable[contenteditable='true']").last
+            if await editor.count() > 0 and await editor.is_visible(timeout=500):
+                await editor.click(timeout=1_500, force=True)
+                await page.wait_for_timeout(300)
+        except Exception:
+            pass
+
+    for pattern in text_patterns:
+        try:
+            locator = page.get_by_text(pattern)
+            count = await locator.count()
+            for index in range(min(count, 5)):
+                option = locator.nth(index)
+                try:
+                    if not await option.is_visible(timeout=500):
+                        continue
+                    await option.click(timeout=2_000, force=True)
+                    await close_preference_panel()
+                    logger.info(
+                        "Dismissed keyboard-preference popover via text locator",
+                        data={
+                            "pattern": pattern.pattern,
+                            "index": index,
+                            "stillVisible": await preference_text_visible(),
+                        },
+                    )
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
     try:
         result = await page.evaluate(
             """() => {
-                const phrases = [
-                    'Mit Enter senden',
-                    "Auf 'Senden' klicken",
-                    'Auf \\u201eSenden\\u201c klicken',
-                    'Send with Enter',
-                    'Press Enter to send',
-                    "Click 'Send'",
-                    'Click Send to send',
-                    'Click Send',
-                ];
                 const isVisible = (el) => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
                 const matches = Array.from(document.querySelectorAll('div, section, aside, ul, li, fieldset, form'))
                     .filter((el) => {
                         if (!isVisible(el)) return false;
-                        if (el.scrollHeight > 600) return false;
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 520 || rect.height > 420) return false;
                         const t = el.textContent || '';
-                        return phrases.some((p) => t.includes(p));
+                        return /Mit\\s+Enter\\s+senden/i.test(t) ||
+                            /Auf\\s*[„"']?Senden[“"']?\\s*klicken/i.test(t) ||
+                            /Press\\s+Enter\\s+to\\s+send/i.test(t) ||
+                            /Click\\s*[„"']?Send[“"']?/i.test(t);
                     });
                 if (!matches.length) return { found: false };
                 matches.sort((a, b) => (a.offsetWidth * a.offsetHeight) - (b.offsetWidth * b.offsetHeight));
                 const container = matches[0];
                 const clickables = Array.from(container.querySelectorAll('button:not([disabled]), [role="button"]:not([aria-disabled="true"]), [role="radio"], input[type="radio"], label')).filter(isVisible);
                 if (!clickables.length) return { found: true, clicked: false };
+                const getLabel = (c) => (
+                    c.innerText ||
+                    c.textContent ||
+                    c.getAttribute('aria-label') ||
+                    (c.closest('label') && c.closest('label').innerText) ||
+                    ''
+                );
+                const prefersClickSend = (c) => {
+                    const label = getLabel(c);
+                    return /Auf\\s*[„"']?Senden[“"']?\\s*klicken/i.test(label) ||
+                        /Click\\s*[„"']?Send[“"']?/i.test(label);
+                };
                 const selected = clickables.find((c) => c.getAttribute && (c.getAttribute('aria-checked') === 'true' || (c.matches && c.matches('input:checked'))));
-                const target = selected || clickables[0];
+                const target = clickables.find(prefersClickSend) || selected || clickables[0];
                 target.click();
                 return {
                     found: true,
                     clicked: true,
                     tag: target.tagName,
-                    label: ((target.innerText || target.getAttribute('aria-label') || '').slice(0, 80)),
+                    label: getLabel(target).slice(0, 120),
                 };
             }"""
         )
         if isinstance(result, dict) and result.get("found"):
             if result.get("clicked"):
                 logger.info("Dismissed keyboard-preference popover", data=result)
+                await close_preference_panel()
                 await page.wait_for_timeout(400)
             else:
                 logger.warn(
@@ -1570,13 +1690,8 @@ async def click_editor_scoped_send_button(editor) -> bool:
         "button:has-text('Send'), "
         "button:has-text('Senden')"
     )
-    root_selectors = [
-        "xpath=ancestor::form[1]",
-        "xpath=ancestor::*[contains(@class,'msg-overlay-conversation-bubble')][1]",
-        "xpath=ancestor::*[@role='dialog'][1]",
-    ]
 
-    for root_selector in root_selectors:
+    for root_selector in DIRECT_MESSAGE_SCOPED_SEND_ROOT_SELECTORS:
         try:
             root = editor.locator(root_selector)
             if await root.count() == 0:
@@ -1651,6 +1766,54 @@ async def click_editor_scoped_send_button(editor) -> bool:
         return bool(isinstance(result, dict) and result.get("clicked"))
     except Exception:
         return False
+
+
+async def capture_direct_message_send_diagnostics(
+    page: Page,
+    editor,
+    reason: str,
+    surface: str,
+) -> Dict[str, Any]:
+    diagnostics: Dict[str, Any] = {"reason": reason, "surface": surface}
+    try:
+        screenshot_path = f"/tmp/direct_message_send_{reason}_{int(asyncio.get_event_loop().time())}.png"
+        await page.screenshot(path=screenshot_path, full_page=True)
+        diagnostics["screenshot"] = screenshot_path
+    except Exception as exc:
+        diagnostics["screenshotError"] = str(exc)
+
+    try:
+        diagnostics["candidates"] = await inspect_send_button_candidates(page, editor)
+        diagnostics["picked"] = _pick_send_button_candidate(diagnostics["candidates"])
+    except Exception as exc:
+        diagnostics["candidateError"] = str(exc)
+
+    try:
+        current = await editor.evaluate("el => el.value || el.textContent || el.innerText || ''") or ""
+        diagnostics["composerTextLength"] = len(normalize_typed_text(current))
+        diagnostics["composerPreview"] = normalize_typed_text(current)[:120]
+    except Exception as exc:
+        diagnostics["composerError"] = str(exc)
+
+    return diagnostics
+
+
+async def try_direct_message_keyboard_send(page: Page, editor, surface: str) -> bool:
+    for shortcut in ("Meta+Enter", "Control+Enter"):
+        try:
+            await focus_text_field(page, editor, "direct message editor")
+            await page.keyboard.press(shortcut)
+            logger.element_click(f"Send button (message {shortcut} fallback)", success=True)
+            if await wait_for_composer_cleared(editor, page=page):
+                await random_pause()
+                return True
+        except Exception as exc:
+            logger.warn(
+                "Direct message keyboard send fallback failed",
+                error=exc,
+                data={"shortcut": shortcut, "surface": surface},
+            )
+    return False
 
 
 async def inspect_send_button_candidates(page: Page, editor=None) -> Any:
@@ -2075,10 +2238,17 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
 
         logger.element_click("Send button (message scoped)", success=True)
         if not await wait_for_composer_cleared(editor, page=page):
-            logger.warn(
-                "Direct message composer still appeared populated after scoped send click; treating click as success",
-                data={"surface": surface},
+            diagnostics = await capture_direct_message_send_diagnostics(
+                page,
+                editor,
+                "composer_still_populated",
+                surface,
             )
+            logger.warn(
+                "Direct message composer still appeared populated after scoped send click",
+                data=diagnostics,
+            )
+            raise RuntimeError("Direct message composer did not clear after scoped send click.")
         await random_pause()
     except Exception as e:
         logger.element_click("Send button (message scoped)", success=False)
@@ -2089,10 +2259,34 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
                 logger.element_click("Send button (message scoped fallback)", success=True)
                 await random_pause()
                 return
+            if await try_direct_message_keyboard_send(page, editor, surface):
+                return
+            diagnostics = await capture_direct_message_send_diagnostics(
+                page,
+                editor,
+                "composer_still_populated_after_scoped_fallback",
+                surface,
+            )
+            logger.warn(
+                "Direct message composer still appeared populated after scoped send fallback",
+                data=diagnostics,
+            )
             raise RuntimeError("Direct message composer did not clear after scoped send fallback.")
+        if await try_direct_message_keyboard_send(page, editor, surface):
+            return
         await editor.click()
         await page.keyboard.press("Enter")
         if not await wait_for_composer_cleared(editor, page=page):
+            diagnostics = await capture_direct_message_send_diagnostics(
+                page,
+                editor,
+                "composer_still_populated_after_enter",
+                surface,
+            )
+            logger.warn(
+                "Direct message composer still appeared populated after Enter fallback",
+                data=diagnostics,
+            )
             raise RuntimeError("Direct message composer did not clear after Enter send fallback.")
         logger.element_click("Send button (message enter fallback)", success=True)
         await random_pause()
@@ -2808,6 +3002,11 @@ def schedule_nudge_followup(
         logger.warn("Skipping nudge scheduling due to empty sequence message", {"leadId": lead_id, "attempt": attempt})
         return
 
+    interval_days = _safe_int(sequence_messages.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS)
+    if interval_days < 1:
+        interval_days = SEQUENCE_INTERVAL_DEFAULT_DAYS
+    next_send_at = (base_time + timedelta(days=interval_days)).isoformat()
+
     try:
         existing = (
             client.table("followups")
@@ -2823,7 +3022,7 @@ def schedule_nudge_followup(
         try:
             existing = (
                 client.table("followups")
-                .select("id, status")
+                .select("id, status, followup_type")
                 .eq("lead_id", lead_id)
                 .limit(1)
                 .execute()
@@ -2832,13 +3031,32 @@ def schedule_nudge_followup(
             logger.warn("Skipping nudge scheduling: followups table unavailable", {"leadId": lead_id, "attempt": attempt}, error=e)
             return
     if existing:
-        logger.debug("Nudge followup already exists", {"leadId": lead_id, "attempt": attempt, "followupId": existing[0]["id"]})
+        existing_row = existing[0]
+        existing_status = str(existing_row.get("status") or "").upper()
+        if existing_status in {"SKIPPED", "FAILED", "RETRY_LATER"}:
+            update_payload = {
+                "status": "APPROVED",
+                "draft_text": draft_text,
+                "next_send_at": next_send_at,
+                "last_message_text": _hard_cap_text(previous_message or "", 2000),
+                "last_message_from": "us",
+                "processing_started_at": None,
+                "last_error": None,
+            }
+            try:
+                client.table("followups").update(update_payload).eq("id", existing_row["id"]).execute()
+            except Exception:
+                fallback_update = dict(update_payload)
+                fallback_update.pop("last_error", None)
+                client.table("followups").update(fallback_update).eq("id", existing_row["id"]).execute()
+            logger.info(
+                "Reactivated existing nudge followup",
+                {"leadId": lead_id, "attempt": attempt, "followupId": existing_row["id"]},
+                {"next_send_at": next_send_at},
+            )
+            return
+        logger.debug("Nudge followup already exists", {"leadId": lead_id, "attempt": attempt, "followupId": existing_row["id"]})
         return
-
-    interval_days = _safe_int(sequence_messages.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS)
-    if interval_days < 1:
-        interval_days = SEQUENCE_INTERVAL_DEFAULT_DAYS
-    next_send_at = (base_time + timedelta(days=interval_days)).isoformat()
 
     payload = {
         "lead_id": lead_id,
