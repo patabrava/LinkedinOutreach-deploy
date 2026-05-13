@@ -97,6 +97,76 @@ class ReplyDraftingTest(unittest.TestCase):
 
         self.assertIn("eigene Leistung anbietet", prompt)
         self.assertIn("Verkaufsgespräch", prompt)
+        self.assertIn("bestens aufgestellt", prompt)
+        self.assertIn("Niemals mit dem Vornamen", prompt)
+        self.assertIn("Nicht paraphrasieren", prompt)
+
+    def test_negative_reply_rewrites_vendor_counter_pitch_without_name_or_paraphrase(self):
+        payload = json.dumps({
+            "intent": "negative",
+            "draft_text": (
+                "Danke für die Nachfrage zu unserem IT-Ticketsystem, Daniel. "
+                f"Wenn das Thema Altersvorsorge später interessant wird, findest du hier einen Überblick: {agent.NEGATIVE_REPLY_LINK}"
+            ),
+            "confidence": 0.82,
+        })
+        result = agent.parse_reply_generation_response(payload, {
+            "first_name": "Daniel",
+            "last_message_text": (
+                "Hi Katharina, wir sind bei ServiceNow sehr gut abgesichert, was Altersvorsorge angeht. "
+                "Wie sieht es denn anders herum bei Degura mit eurem IT-Ticketsystem aus?"
+            ),
+        })
+
+        self.assertIn("bestens aufgestellt", result["message"])
+        self.assertIn("lieb von dir zu fragen", result["message"])
+        self.assertIn("schicke ich dir", result["message"])
+        self.assertNotIn("Daniel", result["message"])
+        self.assertNotIn("Danke für die Nachfrage zu", result["message"])
+        self.assertIn(agent.NEGATIVE_REPLY_LINK, result["message"])
+
+    def test_negative_reply_rewrites_relocation_paraphrase_to_natural_close(self):
+        payload = json.dumps({
+            "intent": "negative",
+            "draft_text": (
+                "Schade, dass es durch deinen Umzug nach Bulgarien nicht passt. "
+                f"Wenn es später interessant wird, findest du hier einen Überblick: {agent.NEGATIVE_REPLY_LINK}"
+            ),
+            "confidence": 0.79,
+        })
+        result = agent.parse_reply_generation_response(payload, {
+            "first_name": "Atanas",
+            "last_message_text": (
+                "Hi Katharina, Danke für die Nachricht! Das wird bei mir wahrscheinlich nicht zutreffen, "
+                "da ich nach Bulgarien gezogen bin."
+            ),
+        })
+
+        self.assertIn("macht das aktuell keinen Sinn", result["message"])
+        self.assertIn("schicke ich dir", result["message"])
+        self.assertNotIn("Atanas", result["message"])
+        self.assertNotIn("Bulgarien", result["message"])
+        self.assertNotIn("Schade, dass", result["message"])
+        self.assertIn(agent.NEGATIVE_REPLY_LINK, result["message"])
+
+    def test_negative_reply_warms_old_link_phrase_even_when_model_avoids_echo(self):
+        payload = json.dumps({
+            "intent": "negative",
+            "draft_text": (
+                "Alles gut, danke dir. Beim IT-Ticketsystem sind wir bestens aufgestellt. "
+                f"Wenn es später interessant wird, findest du hier einen Überblick: {agent.NEGATIVE_REPLY_LINK}"
+            ),
+            "confidence": 0.91,
+        })
+        result = agent.parse_reply_generation_response(payload, {
+            "first_name": "Daniel",
+            "last_message_text": "Wie sieht es denn bei Degura mit eurem IT-Ticketsystem aus?",
+        })
+
+        self.assertIn("lieb von dir zu fragen", result["message"])
+        self.assertIn("schicke ich dir", result["message"])
+        self.assertNotIn("findest du hier einen Überblick", result["message"])
+        self.assertIn(agent.NEGATIVE_REPLY_LINK, result["message"])
 
 
 if __name__ == "__main__":
