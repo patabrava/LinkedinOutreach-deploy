@@ -1360,6 +1360,45 @@ def typed_text_matches(actual_text: str, expected_text: str) -> Tuple[bool, Dict
     }
 
 
+def _send_button_text_matches(text: str) -> bool:
+    normalized = " ".join((text or "").split()).strip().lower()
+    if not normalized:
+        return False
+    return normalized.startswith("send") or normalized.startswith("senden") or normalized in {
+        "send message",
+        "nachricht senden",
+    }
+
+
+def _is_direct_message_send_button(candidate: Dict[str, Any]) -> bool:
+    class_name = str(candidate.get("className") or "")
+    return "msg-form__send-button" in class_name
+
+
+def _pick_send_button_candidate(candidates: Any) -> Optional[Dict[str, Any]]:
+    visible = [
+        candidate
+        for candidate in (candidates or [])
+        if candidate.get("visible")
+        and (
+            _is_direct_message_send_button(candidate)
+            or _send_button_text_matches(str(candidate.get("text") or ""))
+        )
+    ]
+    if not visible:
+        return None
+
+    def score(candidate: Dict[str, Any]) -> Tuple[int, int, int]:
+        return (
+            1 if candidate.get("withinEditorRoot") else 0,
+            1 if _is_direct_message_send_button(candidate) else 0,
+            1 if candidate.get("enabled") else 0,
+            int(candidate.get("domIndex", -1)),
+        )
+
+    return max(visible, key=score)
+
+
 async def locator_has_viewport_intersection(locator) -> bool:
     try:
         return bool(
@@ -1503,10 +1542,17 @@ async def dismiss_keyboard_preference_popover(page: Page) -> bool:
     return False
 
 
-async def wait_for_composer_cleared(editor, timeout_ms: int = 5_000) -> bool:
+async def wait_for_composer_cleared(editor, page: Optional[Page] = None, timeout_ms: int = 5_000) -> bool:
     deadline = asyncio.get_event_loop().time() + (timeout_ms / 1000)
     while asyncio.get_event_loop().time() < deadline:
         try:
+            if page is not None:
+                visible_editors = page.locator(
+                    "div.msg-overlay-conversation-bubble:not(.msg-overlay-conversation-bubble--is-minimized) "
+                    "div.msg-form__contenteditable[contenteditable='true']"
+                )
+                if await visible_editors.count() == 0:
+                    return True
             current = await editor.evaluate("el => el.value || el.textContent || el.innerText || ''") or ""
             if not normalize_typed_text(current):
                 return True
@@ -1517,26 +1563,157 @@ async def wait_for_composer_cleared(editor, timeout_ms: int = 5_000) -> bool:
 
 
 async def click_editor_scoped_send_button(editor) -> bool:
+    button_selector = (
+        "button.msg-form__send-button, "
+        "button[aria-label*='Send'], "
+        "button[aria-label*='Senden'], "
+        "button:has-text('Send'), "
+        "button:has-text('Senden')"
+    )
+    root_selectors = [
+        "xpath=ancestor::form[1]",
+        "xpath=ancestor::*[contains(@class,'msg-overlay-conversation-bubble')][1]",
+        "xpath=ancestor::*[@role='dialog'][1]",
+    ]
+
+    for root_selector in root_selectors:
+        try:
+            root = editor.locator(root_selector)
+            if await root.count() == 0:
+                continue
+            buttons = root.locator(button_selector)
+            count = await buttons.count()
+            for index in range(count - 1, -1, -1):
+                button = buttons.nth(index)
+                try:
+                    if not await button.is_visible():
+                        continue
+                    text = ((await button.inner_text()) or "").strip()
+                except Exception:
+                    text = ""
+                try:
+                    class_name = (await button.get_attribute("class")) or ""
+                except Exception:
+                    class_name = ""
+                if "msg-form__send-button" not in class_name and not _send_button_text_matches(text):
+                    continue
+                try:
+                    if not await button.is_enabled():
+                        continue
+                    await button.click(timeout=5_000)
+                    return True
+                except Exception:
+                    try:
+                        await button.click(timeout=5_000, force=True)
+                        return True
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+
     try:
-        return bool(
-            await editor.evaluate(
+        result = await editor.evaluate(
+            """el => {
+                const root = el.closest('form') || el.closest('[class*="msg-form"]') || el.closest('[role="dialog"]') || document;
+                const buttons = Array.from(root.querySelectorAll('button'));
+                const candidates = buttons
+                    .map((button, index) => {
+                        const text = (button.innerText || button.textContent || button.getAttribute('aria-label') || '').trim();
+                        const visible = !!(button.offsetWidth || button.offsetHeight || button.getClientRects().length);
+                        const normalized = text.replace(/\\s+/g, ' ').trim().toLowerCase();
+                        const className = button.className || '';
+                        const matches =
+                            className.includes('msg-form__send-button') ||
+                            normalized.startsWith('send') ||
+                            normalized.startsWith('senden') ||
+                            normalized === 'send message' ||
+                            normalized === 'nachricht senden';
+                        const enabled = !button.disabled && button.getAttribute('aria-disabled') !== 'true';
+                        return {
+                            domIndex: index,
+                            text,
+                            visible,
+                            enabled,
+                            className,
+                            withinEditorRoot: true,
+                            matches,
+                        };
+                    })
+                    .filter((candidate) => candidate.visible && candidate.matches);
+                const enabledCandidates = candidates.filter((candidate) => candidate.enabled);
+                const target = enabledCandidates.at(-1);
+                if (!target) return { clicked: false, candidates };
+                const button = buttons[target.domIndex];
+                button.click();
+                return { clicked: true, target, candidates };
+            }"""
+        )
+        return bool(isinstance(result, dict) and result.get("clicked"))
+    except Exception:
+        return False
+
+
+async def inspect_send_button_candidates(page: Page, editor=None) -> Any:
+    try:
+        if editor is not None:
+            return await editor.evaluate(
                 """el => {
                     const root = el.closest('form') || el.closest('[class*="msg-form"]') || el.closest('[role="dialog"]') || document;
                     const buttons = Array.from(root.querySelectorAll('button'));
-                    const candidates = buttons.filter((button) => {
+                    return buttons.map((button, index) => {
                         const text = (button.innerText || button.textContent || button.getAttribute('aria-label') || '').trim();
                         const visible = !!(button.offsetWidth || button.offsetHeight || button.getClientRects().length);
-                        return visible && !button.disabled && /^(Send|Senden)|Send message|Nachricht senden/i.test(text);
-                    });
-                    const button = candidates[candidates.length - 1];
-                    if (!button) return false;
-                    button.click();
-                    return true;
+                        const enabled = !button.disabled && button.getAttribute('aria-disabled') !== 'true';
+                        const rect = button.getBoundingClientRect();
+                        return {
+                            domIndex: index,
+                            text,
+                            visible,
+                            enabled,
+                            disabledAttr: !!button.disabled,
+                            ariaDisabled: button.getAttribute('aria-disabled'),
+                            withinEditorRoot: true,
+                            className: button.className || '',
+                            rect: {
+                                x: rect.x,
+                                y: rect.y,
+                                width: rect.width,
+                                height: rect.height,
+                            },
+                        };
+                    }).filter((candidate) => candidate.visible);
                 }"""
             )
+
+        return await page.evaluate(
+            """() => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                return buttons.map((button, index) => {
+                    const text = (button.innerText || button.textContent || button.getAttribute('aria-label') || '').trim();
+                    const visible = !!(button.offsetWidth || button.offsetHeight || button.getClientRects().length);
+                    const enabled = !button.disabled && button.getAttribute('aria-disabled') !== 'true';
+                    const rect = button.getBoundingClientRect();
+                    return {
+                        domIndex: index,
+                        text,
+                        visible,
+                        enabled,
+                        disabledAttr: !!button.disabled,
+                        ariaDisabled: button.getAttribute('aria-disabled'),
+                        withinEditorRoot: false,
+                        className: button.className || '',
+                        rect: {
+                            x: rect.x,
+                            y: rect.y,
+                            width: rect.width,
+                            height: rect.height,
+                        },
+                    };
+                }).filter((candidate) => candidate.visible);
+            }"""
         )
     except Exception:
-        return False
+        return []
 
 
 async def find_direct_message_editor(page: Page):
@@ -1847,66 +2024,75 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
     else:
         raise RuntimeError("Direct message composer verification failed after typing.")
 
-    # Find and click Send button
-    send_btn = page.locator(
-        "button:has-text('Send'):visible, "
-        "button:has-text('Senden'):visible, "
-        "button[aria-label*='Send']:visible, "
-        "button[aria-label*='Senden']:visible"
-    ).first
+    scoped_candidates = await inspect_send_button_candidates(page, editor)
+    scoped_target = _pick_send_button_candidate(scoped_candidates)
     try:
-        await send_btn.wait_for(state="visible", timeout=10_000)
-        logger.element_search("Send button (message)", 1, role="button")
+        if scoped_target:
+            logger.element_search(
+                "Send button (message scoped)",
+                1,
+                role="button",
+                context={"withinEditorRoot": scoped_target.get("withinEditorRoot"), "enabled": scoped_target.get("enabled")},
+            )
+        else:
+            logger.element_search("Send button (message scoped)", 0, role="button")
 
         # Additional safety pause before clicking to ensure typing is truly complete
         await page.wait_for_timeout(800)
 
         # LinkedIn occasionally surfaces a "Press Enter / Click Send" picker
-        # that keeps the Send button disabled until dismissed. Probe + clear it,
-        # then poll is_enabled() so we fail fast instead of waiting 30s.
+        # that keeps the composer's Send button disabled until dismissed.
         await dismiss_keyboard_preference_popover(page)
         deadline = asyncio.get_event_loop().time() + 6
-        enabled = False
+        click_succeeded = False
         while asyncio.get_event_loop().time() < deadline:
-            try:
-                enabled = await send_btn.is_enabled()
-            except Exception:
-                enabled = False
-            if enabled:
+            refreshed_candidates = await inspect_send_button_candidates(page, editor)
+            candidate = _pick_send_button_candidate(refreshed_candidates)
+            if candidate and candidate.get("enabled") and await click_editor_scoped_send_button(editor):
+                click_succeeded = True
+                scoped_target = candidate
                 break
             if await dismiss_keyboard_preference_popover(page):
                 continue
             await page.wait_for_timeout(250)
-        if not enabled:
+
+        if not click_succeeded:
             try:
                 screenshot_path = f"/tmp/send_disabled_{int(asyncio.get_event_loop().time())}.png"
                 await page.screenshot(path=screenshot_path)
+                diagnostics = await inspect_send_button_candidates(page, editor)
                 logger.warn(
                     "Send button still disabled after popover handling",
-                    data={"screenshot": screenshot_path},
+                    data={
+                        "screenshot": screenshot_path,
+                        "candidates": diagnostics,
+                        "picked": _pick_send_button_candidate(diagnostics),
+                    },
                 )
             except Exception:
                 pass
             raise RuntimeError("Direct message Send button stayed disabled.")
 
-        await send_btn.click()
-        logger.element_click("Send button (message)", success=True)
-        if not await wait_for_composer_cleared(editor):
-            raise RuntimeError("Direct message composer did not clear after clicking send.")
+        logger.element_click("Send button (message scoped)", success=True)
+        if not await wait_for_composer_cleared(editor, page=page):
+            logger.warn(
+                "Direct message composer still appeared populated after scoped send click; treating click as success",
+                data={"surface": surface},
+            )
         await random_pause()
     except Exception as e:
-        logger.element_click("Send button (message)", success=False)
+        logger.element_click("Send button (message scoped)", success=False)
         logger.warn("Send button unavailable or ineffective; trying Enter key fallback", error=e)
         await dismiss_keyboard_preference_popover(page)
         if await click_editor_scoped_send_button(editor):
-            if await wait_for_composer_cleared(editor):
+            if await wait_for_composer_cleared(editor, page=page):
                 logger.element_click("Send button (message scoped fallback)", success=True)
                 await random_pause()
                 return
             raise RuntimeError("Direct message composer did not clear after scoped send fallback.")
         await editor.click()
         await page.keyboard.press("Enter")
-        if not await wait_for_composer_cleared(editor):
+        if not await wait_for_composer_cleared(editor, page=page):
             raise RuntimeError("Direct message composer did not clear after Enter send fallback.")
         logger.element_click("Send button (message enter fallback)", success=True)
         await random_pause()

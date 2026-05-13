@@ -12,6 +12,7 @@ from sender import (
     DIRECT_MESSAGE_COMPOSER_SELECTOR,
     DIRECT_MESSAGE_SEND_BUTTON_SELECTOR,
     MESSAGE_ONLY_PROCESSING_STATUSES,
+    _pick_send_button_candidate,
     classify_connect_only_surface,
     classify_connect_only_probe_surface,
     connect_only_sent_today_count,
@@ -336,6 +337,26 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         self.assertIn("msg-form__send-button", DIRECT_MESSAGE_SEND_BUTTON_SELECTOR)
         self.assertIn("Nachricht senden", DIRECT_MESSAGE_SEND_BUTTON_SELECTOR)
         self.assertIn("type='submit'", DIRECT_MESSAGE_SEND_BUTTON_SELECTOR)
+
+    def test_pick_send_button_candidate_prefers_editor_root_enabled_button(self):
+        candidates = [
+            {"domIndex": 1, "text": "Senden", "visible": True, "enabled": False, "withinEditorRoot": False},
+            {"domIndex": 4, "text": "Senden", "visible": True, "enabled": True, "withinEditorRoot": True},
+        ]
+
+        result = _pick_send_button_candidate(candidates)
+
+        self.assertEqual(result["domIndex"], 4)
+
+    def test_pick_send_button_candidate_falls_back_to_last_visible_match(self):
+        candidates = [
+            {"domIndex": 2, "text": "Senden", "visible": True, "enabled": False, "withinEditorRoot": True},
+            {"domIndex": 5, "text": "Senden", "visible": True, "enabled": False, "withinEditorRoot": True},
+        ]
+
+        result = _pick_send_button_candidate(candidates)
+
+        self.assertEqual(result["domIndex"], 5)
 
     def test_typed_text_matches_accepts_small_extraction_gap_when_words_match(self):
         expected = "Hi Sabrina, freut mich, dass wir uns vernetzen. Viele Gruesse, Katharina"
