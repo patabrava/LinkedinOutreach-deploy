@@ -512,6 +512,22 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         self.assertEqual(client.lead["status"], "PROCESSING")
         self.assertEqual(client.calls, [])
 
+    def test_mark_message_only_processing_allows_targeted_probe_without_invite_timestamp(self):
+        lead = {
+            "id": "lead-1",
+            "status": "FAILED",
+            "sent_at": None,
+            "outreach_mode": "connect_only",
+            "sequence_id": 4,
+        }
+        client = FakeClient(lead)
+
+        result = mark_message_only_processing(client, lead, allow_missing_invite_evidence=True)
+
+        self.assertTrue(result)
+        self.assertEqual(client.lead["status"], "PROCESSING")
+        self.assertEqual(client.calls[0]["filters"][1], ("is", "sent_at", "null"))
+
     def test_mark_message_only_processing_locks_invite_sent_lead_even_if_status_is_new(self):
         lead = {
             "id": "lead-1",

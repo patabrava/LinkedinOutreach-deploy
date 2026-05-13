@@ -4,7 +4,7 @@ FastMCP server that exposes tools for the outreach agent.
 
 ## Setup
 - `pip install -e .`
-- Copy `../workers/.env.example` to `.env` and set Supabase + OpenAI keys.
+- Copy `.env.example` to `.env` and set Supabase + Gemini keys.
 - Run the server: `python server.py`
 - Trigger the agent loop: `python run_agent.py`
 

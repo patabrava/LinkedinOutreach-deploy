@@ -788,7 +788,7 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
     // Fetch followup with lead data
     const { data: followup, error: fetchError } = await client
       .from("followups")
-      .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, profile_data)")
+      .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, profile_data, sequence_id, batch_id, sequence:outreach_sequences(id, name, connect_note, first_message, second_message, third_message), batch:lead_batches(id, sequence_id, sequence:outreach_sequences(id, name, connect_note, first_message, second_message, third_message)))")
       .eq("id", followupId)
       .single();
 
@@ -815,6 +815,11 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
       .limit(1)
       .single();
 
+    const leadSequence = Array.isArray(followup.lead?.sequence) ? followup.lead.sequence[0] : followup.lead?.sequence;
+    const batch = Array.isArray(followup.lead?.batch) ? followup.lead.batch[0] : followup.lead?.batch;
+    const batchSequence = Array.isArray(batch?.sequence) ? batch.sequence[0] : batch?.sequence;
+    const sequence = leadSequence || batchSequence || null;
+
     // Spawn the followup agent
     const repoRoot = path.resolve(process.cwd(), "..", "..");
     const agentDir = path.resolve(repoRoot, "mcp-server");
@@ -836,6 +841,15 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
       profile_data: followup.lead?.profile_data || {},
       previous_messages: previousFollowups?.map(f => f.sent_text).filter(Boolean) || [],
       original_message: originalDraft?.final_message || "",
+      sequence_messages: sequence
+        ? {
+            name: sequence.name || "",
+            connect_note: sequence.connect_note || "",
+            first_message: sequence.first_message || "",
+            second_message: sequence.second_message || "",
+            third_message: sequence.third_message || "",
+          }
+        : {},
       // New: last message tracking for proper sender attribution
       last_message_text: followup.last_message_text || null,
       last_message_from: followup.last_message_from || null,
@@ -1813,6 +1827,8 @@ export type FunnelStats = {
   stages: FunnelStage[];
 };
 
+type DailyMetricKey = "connectionsSent" | "connectionsAccepted" | "messagesSent" | "replies";
+
 const LEAD_STATUSES = [
   "NEW",
   "ENRICHED",
@@ -1828,6 +1844,7 @@ const LEAD_STATUSES = [
   "REPLIED",
   "REJECTED",
   "FAILED",
+  "QUEUED_CONNECT",
 ] as const;
 
 /**
@@ -1939,66 +1956,85 @@ export async function fetchDailyMetrics(days: number = 7): Promise<DailyMetrics[
 
   try {
     const client = supabaseAdmin();
-    const results: DailyMetrics[] = [];
-
-    // Generate array of dates from today back to N days ago
     const now = new Date();
+    const startDate = new Date(now);
+    startDate.setDate(startDate.getDate() - (days - 1));
+    startDate.setUTCHours(0, 0, 0, 0);
+
+    const endDate = new Date(startDate);
+    endDate.setDate(endDate.getDate() + days);
+
+    const startIso = startDate.toISOString();
+    const endIso = endDate.toISOString();
+    const results: DailyMetrics[] = [];
+    const byDate = new Map<string, DailyMetrics>();
+
+    const incrementMetric = (timestamp: string | null | undefined, metric: DailyMetricKey) => {
+      if (!timestamp) return;
+      const value = new Date(timestamp);
+      if (value < startDate || value >= endDate) return;
+      const key = value.toISOString().split("T")[0];
+      const row = byDate.get(key);
+      if (row) row[metric] += 1;
+    };
+
     for (let i = days - 1; i >= 0; i--) {
       const date = new Date(now);
       date.setDate(date.getDate() - i);
       date.setUTCHours(0, 0, 0, 0);
-      const nextDate = new Date(date);
-      nextDate.setDate(nextDate.getDate() + 1);
-
-      const startIso = date.toISOString();
-      const endIso = nextDate.toISOString();
       const dateStr = date.toISOString().split("T")[0];
-
-      // Connections sent
-      const { count: connectionsSent } = await client
-        .from("leads")
-        .select("id", { count: "exact", head: true })
-        .gte("connection_sent_at", startIso)
-        .lt("connection_sent_at", endIso);
-
-      // Connections accepted
-      const { count: connectionsAccepted } = await client
-        .from("leads")
-        .select("id", { count: "exact", head: true })
-        .gte("connection_accepted_at", startIso)
-        .lt("connection_accepted_at", endIso);
-
-      // Messages sent
-      const { count: messagesSent } = await client
-        .from("leads")
-        .select("id", { count: "exact", head: true })
-        .gte("sent_at", startIso)
-        .lt("sent_at", endIso);
-
-      // Replies (leads that became REPLIED on this date)
-      const { count: replies } = await client
-        .from("leads")
-        .select("id", { count: "exact", head: true })
-        .eq("status", "REPLIED")
-        .gte("updated_at", startIso)
-        .lt("updated_at", endIso);
-
-      // Follow-ups sent
-      const { count: followupsSent } = await client
-        .from("followups")
-        .select("id", { count: "exact", head: true })
-        .eq("status", "SENT")
-        .gte("sent_at", startIso)
-        .lt("sent_at", endIso);
-
-      results.push({
+      const row = {
         date: dateStr,
-        connectionsSent: connectionsSent ?? 0,
-        connectionsAccepted: connectionsAccepted ?? 0,
-        messagesSent: messagesSent ?? 0,
-        replies: replies ?? 0,
-        followupsSent: followupsSent ?? 0,
-      });
+        connectionsSent: 0,
+        connectionsAccepted: 0,
+        messagesSent: 0,
+        replies: 0,
+        followupsSent: 0,
+      };
+      byDate.set(dateStr, row);
+      results.push(row);
+    }
+
+    const { data: leadMetrics, error: leadMetricsError } = await client
+      .from("leads")
+      .select("connection_sent_at, connection_accepted_at, sent_at, last_reply_at")
+      .or(
+        [
+          `connection_sent_at.gte.${startIso}`,
+          `connection_accepted_at.gte.${startIso}`,
+          `sent_at.gte.${startIso}`,
+          `last_reply_at.gte.${startIso}`,
+        ].join(",")
+      );
+
+    if (leadMetricsError) {
+      logger.error("Failed to fetch lead daily metrics", { correlationId }, leadMetricsError);
+    }
+
+    for (const lead of leadMetrics ?? []) {
+      incrementMetric(lead.connection_sent_at, "connectionsSent");
+      incrementMetric(lead.connection_accepted_at, "connectionsAccepted");
+      incrementMetric(lead.sent_at, "messagesSent");
+      incrementMetric(lead.last_reply_at, "replies");
+    }
+
+    const { data: followupMetrics, error: followupMetricsError } = await client
+      .from("followups")
+      .select("sent_at")
+      .eq("status", "SENT")
+      .gte("sent_at", startIso)
+      .lt("sent_at", endIso);
+
+    if (followupMetricsError) {
+      logger.error("Failed to fetch followup daily metrics", { correlationId }, followupMetricsError);
+    }
+
+    for (const followup of followupMetrics ?? []) {
+      const sentAt = followup.sent_at;
+      if (!sentAt) continue;
+      const key = new Date(sentAt).toISOString().split("T")[0];
+      const row = byDate.get(key);
+      if (row) row.followupsSent += 1;
     }
 
     logger.actionComplete("fetchDailyMetrics", { correlationId }, { count: results.length });
@@ -2040,12 +2076,6 @@ export async function fetchConversionFunnel(): Promise<FunnelStats> {
       .from("leads")
       .select("id", { count: "exact", head: true })
       .not("sent_at", "is", null);
-
-    // Replies
-    const { count: replies } = await client
-      .from("leads")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "REPLIED");
 
     const total = totalLeads ?? 0;
     const connSent = connectionsSent ?? 0;

@@ -96,7 +96,7 @@ class ReplyDraftingTest(unittest.TestCase):
         })
 
         self.assertIn("eigene Leistung anbietet", prompt)
-        self.assertIn("Verkaufsgespraech", prompt)
+        self.assertIn("Verkaufsgespräch", prompt)
 
 
 if __name__ == "__main__":

@@ -2238,6 +2238,11 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
 
         logger.element_click("Send button (message scoped)", success=True)
         if not await wait_for_composer_cleared(editor, page=page):
+            if await dismiss_keyboard_preference_popover(page):
+                if await click_editor_scoped_send_button(editor) and await wait_for_composer_cleared(editor, page=page):
+                    logger.element_click("Send button (message scoped after popover)", success=True)
+                    await random_pause()
+                    return
             diagnostics = await capture_direct_message_send_diagnostics(
                 page,
                 editor,
@@ -2300,14 +2305,23 @@ def mark_processing(client: Client, lead_id: str) -> None:
     logger.debug(f"Lead marked as PROCESSING", {"leadId": lead_id})
 
 
-def mark_message_only_processing(client: Client, lead: Dict[str, Any]) -> bool:
+def mark_message_only_processing(
+    client: Client,
+    lead: Dict[str, Any],
+    *,
+    allow_missing_invite_evidence: bool = False,
+) -> bool:
     lead_id = str(lead.get("id") or "")
     if not lead_id:
         return False
 
     has_invite_timestamp = bool(lead.get("connection_sent_at") or lead.get("connection_accepted_at"))
     status = str(lead.get("status") or "").upper()
-    if not has_invite_timestamp and status not in MESSAGE_ONLY_PROCESSING_STATUSES:
+    if (
+        not has_invite_timestamp
+        and status not in MESSAGE_ONLY_PROCESSING_STATUSES
+        and not allow_missing_invite_evidence
+    ):
         logger.info(
             "Skipping message-only lead without invite evidence",
             data={"leadId": lead_id, "status": status},
@@ -2329,6 +2343,8 @@ def mark_message_only_processing(client: Client, lead: Dict[str, Any]) -> bool:
         if has_invite_timestamp:
             # Invite-sent leads are selected by timestamp, so status can be stale here.
             # Claim them by ID + sent_at guard instead of requiring status promotion first.
+            query = query.is_("sent_at", "null")
+        elif allow_missing_invite_evidence:
             query = query.is_("sent_at", "null")
         else:
             query = query.in_("status", list(MESSAGE_ONLY_PROCESSING_STATUSES))
@@ -4209,13 +4225,20 @@ async def main() -> None:
         if args.message_only:
             # Process message-only pipeline (pending connections or approved drafts)
             leads_to_process: list[Dict[str, Any]] = []
+            allow_missing_invite_evidence = False
 
             if args.lead_id:
                 lead = fetch_lead_by_id(client, args.lead_id)
                 if not lead:
                     logger.warn("Requested lead id not found for message-only send", {"leadId": args.lead_id})
                     return
-                if not _is_message_only_candidate(lead):
+                targeted_connect_only_probe = (
+                    not lead.get("sent_at")
+                    and str(lead.get("outreach_mode") or "").lower() == "connect_only"
+                    and isinstance(lead.get("sequence_id"), int)
+                    and lead.get("sequence_id", 0) > 0
+                )
+                if not _is_message_only_candidate(lead) and not targeted_connect_only_probe:
                     logger.warn(
                         "Requested lead is not eligible for message-only send",
                         {
@@ -4227,6 +4250,7 @@ async def main() -> None:
                         },
                     )
                     return
+                allow_missing_invite_evidence = targeted_connect_only_probe and not _is_message_only_candidate(lead)
                 leads_to_process = [lead]
             else:
                 leads_to_process = fetch_message_only_leads(client, remaining, args.batch_id)
@@ -4253,7 +4277,11 @@ async def main() -> None:
 
                 for lead in leads_to_process:
                     try:
-                        if not mark_message_only_processing(client, lead):
+                        if not mark_message_only_processing(
+                            client,
+                            lead,
+                            allow_missing_invite_evidence=allow_missing_invite_evidence and str(lead.get("id")) == str(args.lead_id or ""),
+                        ):
                             continue
                         result = await process_message_only_one(context, client, lead)
                         if result == "sent":
