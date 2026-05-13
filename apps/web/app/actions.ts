@@ -669,6 +669,8 @@ export type FollowupRow = {
   sent_at?: string | null;
   attempt: number;
   last_error?: string | null;
+  reply_intent?: "positive" | "negative" | null;
+  reply_intent_confidence?: number | null;
   next_send_at?: string | null;
   processing_started_at?: string | null;
   created_at?: string | null;
@@ -829,6 +831,7 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
       last_name: followup.lead?.last_name || "",
       company_name: followup.lead?.company_name || "",
       reply_snippet: followup.reply_snippet || null,
+      followup_type: followup.followup_type || "REPLY",
       attempt: followup.attempt || 1,
       profile_data: followup.lead?.profile_data || {},
       previous_messages: previousFollowups?.map(f => f.sent_text).filter(Boolean) || [],
@@ -846,29 +849,52 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
 
     logger.workerSpawn("followup-agent", [agentPath, "--context", contextPath], { correlationId, followupId });
 
-    const { execSync } = await import("child_process");
+    const { execFileSync } = await import("child_process");
 
     try {
       // Run synchronously to get the result
-      const result = execSync(`${pythonExec} ${agentPath} --context "${contextPath}"`, {
+      const result = execFileSync(pythonExec, [agentPath, "--context", contextPath], {
         cwd: repoRoot,
         encoding: "utf-8",
         timeout: 60000, // 60 second timeout
         env: { ...process.env, CORRELATION_ID: correlationId },
       });
 
-      // Parse the result (expected JSON with "message" field)
+      // Parse the result (expected JSON with "message" or "draft_text" field)
       const parsed = JSON.parse(result.trim());
-      const draft = parsed.message || "";
+      const draft = parsed.message || parsed.draft_text || "";
+      const replyIntent = parsed.intent === "positive" || parsed.intent === "negative"
+        ? parsed.intent
+        : null;
+      const replyIntentConfidence = typeof parsed.confidence === "number"
+        ? Math.max(0, Math.min(1, parsed.confidence))
+        : null;
 
       if (draft) {
-        // Update the followup with the generated draft
-        await client
+        const updatePayload: Record<string, any> = {
+          draft_text: draft,
+          last_error: null,
+        };
+        if ((followup.followup_type || "REPLY") === "REPLY") {
+          updatePayload.reply_intent = replyIntent;
+          updatePayload.reply_intent_confidence = replyIntentConfidence;
+        }
+
+        const { error: updateError } = await client
           .from("followups")
-          .update({ draft_text: draft })
+          .update(updatePayload)
           .eq("id", followupId);
 
-        logger.actionComplete("generateFollowupDraft", { correlationId, followupId }, { draftLength: draft.length });
+        if (updateError) {
+          logger.error("Failed to update followup draft", { correlationId, followupId }, updateError);
+          return { success: false, error: updateError.message || "Draft update failed" };
+        }
+
+        logger.actionComplete("generateFollowupDraft", { correlationId, followupId }, {
+          draftLength: draft.length,
+          replyIntent,
+          replyIntentConfidence,
+        });
         revalidatePath("/followups");
         return { success: true, draft };
       }
@@ -876,7 +902,13 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
       return { success: false, error: "No draft generated" };
     } catch (execError: any) {
       logger.error("Followup agent execution failed", { correlationId, followupId }, execError);
-      return { success: false, error: execError.message || "Agent execution failed" };
+      const errorMessage = execError.message || "Agent execution failed";
+      await client
+        .from("followups")
+        .update({ last_error: errorMessage.slice(0, 500) })
+        .eq("id", followupId);
+      revalidatePath("/followups");
+      return { success: false, error: errorMessage };
     } finally {
       // Clean up temp file
       try {

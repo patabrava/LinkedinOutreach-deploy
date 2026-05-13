@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { isSupabaseBrowserConfigured, supabaseBrowserClient } from "../lib/supabaseClient";
+import { hasFirstMessageBeenSent, isVisibleFollowup } from "../lib/followupVisibility";
+import { getReplyIntentView } from "../lib/followupReplyIntent";
 import type { FollowupRow } from "../app/actions";
 import { approveFollowup, skipFollowup, generateFollowupDraft, generateAllFollowupDrafts, approveAndSendAllFollowups, triggerFollowupSender, stopFollowups, retryFollowup } from "../app/actions";
 
@@ -61,7 +63,7 @@ export default function FollowupsList({ initial }: Props) {
         if (!supabase) return;
         const { data, error } = await supabase
           .from("followups")
-          .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, last_reply_at, followup_count, profile_data)")
+          .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, status, sent_at, connection_accepted_at, sequence_step, sequence_last_sent_at, last_reply_at, followup_count, profile_data)")
           .in("status", ["PENDING_REVIEW", "APPROVED"])
           .order("updated_at", { ascending: false })
           .limit(100);
@@ -71,7 +73,7 @@ export default function FollowupsList({ initial }: Props) {
           return;
         }
         if (data && data.length) {
-          setRows(data as any);
+          setRows((data as any).filter((row: FollowupRow) => isVisibleFollowup(row)));
         }
       } catch (err) {
         console.warn("Followups client fetch failed", err);
@@ -117,17 +119,19 @@ export default function FollowupsList({ initial }: Props) {
 
   const sortedRows = useMemo(
     () =>
-      [...rows].sort((a, b) => {
+      [...rows].filter((row) => isVisibleFollowup(row)).sort((a, b) => {
         const at = new Date(a.reply_timestamp || a.created_at || "").getTime();
         const bt = new Date(b.reply_timestamp || b.created_at || "").getTime();
         return bt - at;
       }),
     [rows]
   );
-  const pending = useMemo(() => rows.filter((r) => r.status === "PENDING_REVIEW"), [rows]);
-  const approved = useMemo(() => rows.filter((r) => r.status === "APPROVED"), [rows]);
-  const replies = useMemo(() => rows.filter((r) => r.followup_type === "REPLY" || !r.followup_type), [rows]);
-  const nudges = useMemo(() => rows.filter((r) => r.followup_type === "NUDGE"), [rows]);
+  const visibleRows = useMemo(() => rows.filter((row) => isVisibleFollowup(row)), [rows]);
+  const hiddenRows = useMemo(() => rows.filter((row) => !isVisibleFollowup(row)), [rows]);
+  const pending = useMemo(() => visibleRows.filter((r) => r.status === "PENDING_REVIEW"), [visibleRows]);
+  const approved = useMemo(() => visibleRows.filter((r) => r.status === "APPROVED"), [visibleRows]);
+  const replies = useMemo(() => visibleRows.filter((r) => r.followup_type === "REPLY" || !r.followup_type), [visibleRows]);
+  const nudges = useMemo(() => visibleRows.filter((r) => r.followup_type === "NUDGE"), [visibleRows]);
 
   const onApprove = async (row: FollowupRow) => {
     const id = row.id;
@@ -249,6 +253,11 @@ export default function FollowupsList({ initial }: Props) {
           <div className="pill">Follow-ups</div>
           <h3 className="section-title-tight">FOLLOW-UPS NEEDING REVIEW</h3>
           <div className="muted">Review replies and nudge opportunities, then draft and send your response.</div>
+          {hiddenRows.length > 0 ? (
+            <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
+              Hidden {hiddenRows.length} stale nudge{hiddenRows.length === 1 ? "" : "s"} whose leads have not reached first-message state yet.
+            </div>
+          ) : null}
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "flex-end" }}>
           <div className="muted" style={{ textAlign: "right" }}>
@@ -330,9 +339,16 @@ export default function FollowupsList({ initial }: Props) {
                 const statusClass = statusClasses[statusKey] || "status-new";
                 const followupTypeKey = (row.followup_type || "REPLY").toUpperCase();
                 const typeInfo = typeClasses[followupTypeKey] || typeClasses.REPLY;
+                const intentView = getReplyIntentView(followupTypeKey, row.reply_intent);
+                const isReplyRow = followupTypeKey === "REPLY";
+                const leadStatus = (lead.status || "").toUpperCase();
+                const firstMessageSent = hasFirstMessageBeenSent(lead);
 
                 return (
-                  <tr key={row.id}>
+                  <tr
+                    key={row.id}
+                    style={isReplyRow ? { boxShadow: "inset 3px 0 0 rgba(20, 184, 166, 0.55)" } : undefined}
+                  >
                     <td>
                       <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 180 }}>
                         <strong>{name}</strong>
@@ -348,6 +364,17 @@ export default function FollowupsList({ initial }: Props) {
                       <span className={`status-chip ${typeInfo.className}`} style={{ minWidth: 60, textAlign: "center" }}>
                         {typeInfo.label}
                       </span>
+                      {intentView ? (
+                        <div style={{ marginTop: 6 }}>
+                          <span
+                            className={`status-chip ${intentView.className}`}
+                            title={intentView.title}
+                            style={{ minWidth: 72, textAlign: "center", fontSize: 10 }}
+                          >
+                            {intentView.label}
+                          </span>
+                        </div>
+                      ) : null}
                     </td>
                     <td>
                       <div style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: 320 }}>
@@ -380,9 +407,19 @@ export default function FollowupsList({ initial }: Props) {
                       <span className={`status-chip ${statusClass}`} style={{ minWidth: 110, textAlign: "center" }}>
                         {row.status.replace(/_/g, " ")}
                       </span>
+                      {leadStatus ? (
+                        <div className="muted" style={{ marginTop: 6, fontSize: 11 }}>
+                          LEAD: {leadStatus.replace(/_/g, " ")}
+                        </div>
+                      ) : null}
                       <div className="muted" style={{ marginTop: 6, fontSize: 11 }}>
                         ATTEMPT {row.attempt || 1}
                       </div>
+                      {followupTypeKey === "NUDGE" && !firstMessageSent ? (
+                        <div className="muted" style={{ marginTop: 4, fontSize: 10, color: "var(--accent)", maxWidth: 140 }}>
+                          Lead has not reached first-message state yet.
+                        </div>
+                      ) : null}
                       {row.last_error && (
                         <div className="muted" style={{ marginTop: 4, fontSize: 10, color: "var(--accent)", maxWidth: 140 }}>
                           {row.last_error.length > 60 ? `${row.last_error.slice(0, 60)}...` : row.last_error}
@@ -400,7 +437,7 @@ export default function FollowupsList({ initial }: Props) {
                           className="textarea"
                           value={draft}
                           onChange={(e) => setDraftEdits((m) => ({ ...m, [row.id]: e.target.value }))}
-                          placeholder="Enter follow-up message..."
+                          placeholder={followupTypeKey === "REPLY" ? "Generate or enter reply message..." : "Enter follow-up message..."}
                           rows={4}
                           style={{ width: 320, minHeight: 80 }}
                         />

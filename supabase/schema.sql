@@ -111,6 +111,8 @@ create index if not exists idx_leads_batch_id on leads (batch_id);
 create index if not exists idx_leads_sequence_id on leads (sequence_id);
 create index if not exists idx_lead_batches_sequence_id on lead_batches (sequence_id);
 create index if not exists idx_lead_batches_batch_intent on lead_batches (batch_intent);
+-- Followup reply-intent metadata is added by
+-- supabase/migrations/018_add_reply_intent_to_followups.sql.
 
 -- Row Level Security
 alter table outreach_sequences enable row level security;

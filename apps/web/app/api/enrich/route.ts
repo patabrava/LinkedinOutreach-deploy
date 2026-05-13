@@ -40,17 +40,22 @@ export async function POST(request: Request) {
       );
     }
 
-    const { batchId } = (await request.json().catch(() => ({}))) as { batchId?: number };
+    const { batchId, sequenceId } = (await request.json().catch(() => ({}))) as { batchId?: number; sequenceId?: number };
     const batchArg = typeof batchId === "number" && batchId > 0 ? ["--batch-id", String(batchId)] : [];
+    const launchSequenceId = typeof sequenceId === "number" && sequenceId > 0 ? sequenceId : null;
 
     const senderDir = path.join(repoRoot, "workers", "sender");
     const args = ["sender.py", "--send-invites", ...batchArg];
-    logger.workerSpawn("sender", args, { correlationId, batchId });
+    logger.workerSpawn("sender", args, { correlationId, batchId, sequenceId: launchSequenceId });
 
     const logPath = path.join(repoRoot, ".logs", "sender-spawn.log");
     const child = spawn(pythonCmd, args, {
       cwd: senderDir,
-      env: { ...process.env, CORRELATION_ID: correlationId },
+      env: {
+        ...process.env,
+        CORRELATION_ID: correlationId,
+        ...(launchSequenceId ? { OUTREACH_SEQUENCE_ID: String(launchSequenceId) } : {}),
+      },
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });

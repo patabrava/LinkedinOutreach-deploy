@@ -7,6 +7,8 @@ import json
 import os
 import re
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict
 
@@ -23,7 +25,19 @@ load_dotenv()
 logger = get_logger("followup-agent")
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_ENDPOINT_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 PROMPT_FILE = "prompt_followup.txt"
+POSITIVE_REPLY_LINK = "https://api.degura.de/2.0/consultants/my-scheduling-link"
+NEGATIVE_REPLY_LINK = "https://www.degura.de/arbeitnehmer"
+POSITIVE_REPLY_ANCHOR = (
+    "Freut mich zu hoeren, kannst dir gerne hier einen Termin mit einem unserer "
+    f"bAV Experten buchen {POSITIVE_REPLY_LINK}"
+)
+NEGATIVE_REPLY_ANCHOR = (
+    "Wenn es spaeter interessant wird, findest du hier einen Ueberblick: "
+    f"{NEGATIVE_REPLY_LINK}"
+)
 
 
 def load_followup_prompt() -> str:
@@ -54,6 +68,154 @@ def sanitize_message(text: str) -> str:
         sanitized = f"{candidate}..."
     
     return sanitized
+
+
+def _sanitize_reply_message(text: str) -> str:
+    """Normalize reply drafts without damaging approved URLs."""
+    if not text:
+        return ""
+    sanitized = text.replace("\n", " ").replace("\r", " ")
+    sanitized = re.sub(r" {2,}", " ", sanitized).strip()
+    if len(sanitized) <= 300:
+        return sanitized
+
+    urls = [POSITIVE_REPLY_LINK, NEGATIVE_REPLY_LINK]
+    preserved_url = next((url for url in urls if url in sanitized), "")
+    if preserved_url and len(preserved_url) < 290:
+        prefix_limit = max(0, 296 - len(preserved_url))
+        prefix = sanitized.split(preserved_url, 1)[0][:prefix_limit].rstrip()
+        prefix = prefix.rstrip(" ,.;:-")
+        return f"{prefix}... {preserved_url}".strip()
+
+    candidate = sanitized[:297].rstrip()
+    space_idx = candidate.rfind(" ")
+    if space_idx >= 150:
+        candidate = candidate[:space_idx]
+    candidate = candidate.rstrip(" ,.;:-")
+    return f"{candidate}..."
+
+
+def _is_reply_context(context: Dict[str, Any]) -> bool:
+    followup_type = str(context.get("followup_type") or "").upper()
+    last_message_from = str(context.get("last_message_from") or "").lower()
+    return followup_type == "REPLY" or last_message_from == "lead" or bool(context.get("reply_snippet"))
+
+
+def _clamp_confidence(value: Any) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, numeric))
+
+
+def _extract_json_object(raw_content: str) -> Dict[str, Any]:
+    raw = (raw_content or "").strip()
+    if not raw:
+        raise ValueError("Gemini returned empty content instead of valid JSON")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            raise ValueError("Gemini did not return valid JSON")
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError as exc:
+            raise ValueError("Gemini did not return valid JSON") from exc
+
+
+def parse_reply_generation_response(raw_content: str) -> Dict[str, Any]:
+    payload = _extract_json_object(raw_content)
+    intent = str(payload.get("intent") or "").strip().lower()
+    if intent not in {"positive", "negative"}:
+        intent = "negative"
+
+    draft_text = _sanitize_reply_message(str(payload.get("draft_text") or payload.get("message") or ""))
+    if not draft_text:
+        raise ValueError("Gemini reply draft is empty")
+
+    required_link = POSITIVE_REPLY_LINK if intent == "positive" else NEGATIVE_REPLY_LINK
+    if required_link not in draft_text:
+        raise ValueError(f"Gemini reply draft did not preserve approved link: {required_link}")
+
+    return {
+        "message": draft_text,
+        "intent": intent,
+        "confidence": _clamp_confidence(payload.get("confidence")),
+        "message_type": f"reply_{intent}",
+        "tone": "friendly",
+    }
+
+
+def build_reply_generation_prompt(context: Dict[str, Any]) -> str:
+    reply_text = context.get("last_message_text") or context.get("reply_snippet") or ""
+    first_name = context.get("first_name") or ""
+    company_name = context.get("company_name") or ""
+    original_message = context.get("original_message") or ""
+
+    return "\n".join([
+        "Du klassifizierst eine LinkedIn Antwort und formulierst eine sehr kurze Antwort.",
+        "Erlaubte intents: positive, negative.",
+        "Wenn die Antwort unklar, ablehnend, vertroestend oder ohne klares Interesse ist, waehle negative.",
+        "Wenn die Person Interesse zeigt, ein Gespraech will oder mehr wissen moechte, waehle positive.",
+        "Wenn die Person stattdessen ihre eigene Leistung anbietet, eine Gegenfrage zu Degura als Kunde stellt oder ein Verkaufsgespraech fuer ihr Produkt startet, waehle negative.",
+        "Nutze nur eine leichte Umformulierung der passenden genehmigten Vorlage.",
+        "Keine neuen Links, keine neuen Angebote, kein langer Chatbot-Text.",
+        "",
+        f"Positive Vorlage: {POSITIVE_REPLY_ANCHOR}",
+        f"Negative Vorlage: {NEGATIVE_REPLY_ANCHOR}",
+        "",
+        "Antworte ausschliesslich als JSON:",
+        '{"intent":"positive|negative","draft_text":"string","confidence":0.0}',
+        "",
+        f"Kontakt Vorname: {first_name}",
+        f"Firma: {company_name}",
+        f"Unsere vorherige Nachricht: {original_message[:500]}",
+        f"Antwort des Kontakts: {reply_text[:1000]}",
+    ])
+
+
+def call_gemini_reply_model(context: Dict[str, Any]) -> str:
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY not set")
+
+    endpoint = GEMINI_ENDPOINT_TEMPLATE.format(model=GEMINI_MODEL, api_key=api_key)
+    body = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": build_reply_generation_prompt(context)}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.25,
+            "maxOutputTokens": 1024,
+            "responseMimeType": "application/json",
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Gemini HTTP {exc.code}: {detail[:500]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Gemini request failed: {exc}") from exc
+
+    try:
+        return payload["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ValueError(f"Gemini response missing text content: {json.dumps(payload)[:500]}") from exc
 
 
 def build_followup_prompt(context: Dict[str, Any], prompt_text: str) -> str:
@@ -168,7 +330,7 @@ def build_followup_prompt(context: Dict[str, Any], prompt_text: str) -> str:
 
 
 def generate_followup(context: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate a followup message using OpenAI.
+    """Generate a followup message using Gemini for replies and OpenAI for legacy nudges.
     
     Args:
         context: Dictionary with lead info, reply_snippet, attempt, etc.
@@ -176,6 +338,14 @@ def generate_followup(context: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Dictionary with message, message_type, tone
     """
+    if _is_reply_context(context):
+        logger.debug("Generating Gemini reply draft", data={
+            "followup_id": context.get("followup_id"),
+            "has_reply": bool(context.get("reply_snippet") or context.get("last_message_text")),
+        })
+        raw_content = call_gemini_reply_model(context)
+        return parse_reply_generation_response(raw_content)
+
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
@@ -275,6 +445,8 @@ def main():
         logger.operation_complete("followup-generation", result={
             "message_length": len(result.get("message", "")),
             "message_type": result.get("message_type"),
+            "intent": result.get("intent"),
+            "confidence": result.get("confidence"),
         })
         
         # Output as JSON for the calling process
