@@ -786,7 +786,7 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
     // Fetch followup with lead data
     const { data: followup, error: fetchError } = await client
       .from("followups")
-      .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, profile_data)")
+      .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, profile_data, sequence_id, batch_id, sequence:outreach_sequences(id, name, connect_note, first_message, second_message, third_message), batch:lead_batches(id, sequence_id, sequence:outreach_sequences(id, name, connect_note, first_message, second_message, third_message)))")
       .eq("id", followupId)
       .single();
 
@@ -813,6 +813,11 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
       .limit(1)
       .single();
 
+    const leadSequence = Array.isArray(followup.lead?.sequence) ? followup.lead.sequence[0] : followup.lead?.sequence;
+    const batch = Array.isArray(followup.lead?.batch) ? followup.lead.batch[0] : followup.lead?.batch;
+    const batchSequence = Array.isArray(batch?.sequence) ? batch.sequence[0] : batch?.sequence;
+    const sequence = leadSequence || batchSequence || null;
+
     // Spawn the followup agent
     const repoRoot = path.resolve(process.cwd(), "..", "..");
     const agentDir = path.resolve(repoRoot, "mcp-server");
@@ -833,6 +838,15 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
       profile_data: followup.lead?.profile_data || {},
       previous_messages: previousFollowups?.map(f => f.sent_text).filter(Boolean) || [],
       original_message: originalDraft?.final_message || "",
+      sequence_messages: sequence
+        ? {
+            name: sequence.name || "",
+            connect_note: sequence.connect_note || "",
+            first_message: sequence.first_message || "",
+            second_message: sequence.second_message || "",
+            third_message: sequence.third_message || "",
+          }
+        : {},
       // New: last message tracking for proper sender attribution
       last_message_text: followup.last_message_text || null,
       last_message_from: followup.last_message_from || null,

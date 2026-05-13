@@ -1,6 +1,8 @@
 README.md
+ai_client.py
 pyproject.toml
 run_agent.py
+run_followup_agent.py
 server.py
 tools.py
 linkedin_mcp_server.egg-info/PKG-INFO

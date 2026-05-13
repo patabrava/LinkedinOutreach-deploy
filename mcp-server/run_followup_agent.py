@@ -11,19 +11,50 @@ from pathlib import Path
 from typing import Any, Dict
 
 from dotenv import load_dotenv
-from openai import OpenAI
+
+from ai_client import create_json_client, get_gemini_model, load_ai_env
 
 # Import shared logger
 sys.path.insert(0, str(Path(__file__).parent.parent / "workers"))
 from shared_logger import get_logger
 
+load_ai_env()
 load_dotenv()
 
 # Initialize logger
 logger = get_logger("followup-agent")
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+GEMINI_MODEL = get_gemini_model()
 PROMPT_FILE = "prompt_followup.txt"
+
+ASCII_UMLAUT_WORDS = {
+    "aehnlich": "ähnlich",
+    "aendern": "ändern",
+    "fuer": "für",
+    "haette": "hätte",
+    "haetten": "hätten",
+    "koennen": "können",
+    "koennte": "könnte",
+    "koennten": "könnten",
+    "laeuft": "läuft",
+    "loesung": "lösung",
+    "loesungen": "lösungen",
+    "moechte": "möchte",
+    "moechten": "möchten",
+    "muesste": "müsste",
+    "muessten": "müssten",
+    "pruefen": "prüfen",
+    "schoen": "schön",
+    "schoene": "schöne",
+    "schoener": "schöner",
+    "ueber": "über",
+    "ueberhaupt": "überhaupt",
+    "ueberlegen": "überlegen",
+    "uebersehe": "übersehe",
+    "uebersehen": "übersehen",
+    "waere": "wäre",
+    "waeren": "wären",
+}
 
 
 def load_followup_prompt() -> str:
@@ -32,6 +63,28 @@ def load_followup_prompt() -> str:
     if not prompt_path.exists():
         raise FileNotFoundError(f"Followup prompt not found: {prompt_path}")
     return prompt_path.read_text()
+
+
+def _preserve_case(source: str, replacement: str) -> str:
+    if source.isupper():
+        return replacement.upper()
+    if source[:1].isupper():
+        return replacement[:1].upper() + replacement[1:]
+    return replacement
+
+
+def normalize_ascii_umlauts(text: str) -> str:
+    """Convert common ASCII umlaut spellings to native German forms."""
+    if not text:
+        return ""
+
+    def replace_match(match: re.Match[str]) -> str:
+        source = match.group(0)
+        replacement = ASCII_UMLAUT_WORDS.get(source.lower())
+        return _preserve_case(source, replacement) if replacement else source
+
+    pattern = r"\b(" + "|".join(re.escape(word) for word in ASCII_UMLAUT_WORDS) + r")\b"
+    return re.sub(pattern, replace_match, text, flags=re.IGNORECASE)
 
 
 def sanitize_message(text: str) -> str:
@@ -43,6 +96,7 @@ def sanitize_message(text: str) -> str:
     sanitized = re.sub(r"['`\u2018\u2019]+", " ", sanitized)
     sanitized = sanitized.replace("\n", " ").replace("\r", " ")
     sanitized = re.sub(r" {2,}", " ", sanitized).strip()
+    sanitized = normalize_ascii_umlauts(sanitized)
     
     # Hard cap at 300 characters
     if len(sanitized) > 300:
@@ -54,6 +108,36 @@ def sanitize_message(text: str) -> str:
         sanitized = f"{candidate}..."
     
     return sanitized
+
+
+def _sequence_style_lines(sequence_messages: Dict[str, Any]) -> list[str]:
+    if not sequence_messages:
+        return []
+
+    labels = [
+        ("name", "Name"),
+        ("connect_note", "Kontaktanfrage"),
+        ("first_message", "Nachricht 1"),
+        ("second_message", "Nachricht 2 / positiver Follow-up-Inhalt"),
+        ("third_message", "Nachricht 3 / negativer Abschluss-Inhalt"),
+    ]
+    lines = ["", "SEQUENZ-STIL ALS SCHREIBVORBILD:"]
+    for key, label in labels:
+        value = str(sequence_messages.get(key) or "").strip()
+        if value:
+            lines.append(f"- {label}: {value}")
+    lines.extend(
+        [
+            "",
+            "Nutze diese Sequenz nicht als Copy-Paste-Vorlage, sondern als Stilquelle:",
+            "- gleiche Tonalität, Kürze, Direktheit und thematische Stoßrichtung",
+            "- bei positiver Antwort: den positiven Follow-up-Inhalt als Zielrichtung nutzen",
+            "- bei negativer oder skeptischer Antwort: den negativen Abschluss-Inhalt als Zielrichtung nutzen",
+            "- Beziehe dich konkret auf die letzte Nachricht des Kontakts, damit die Antwort nicht standardisiert wirkt",
+            "- Native deutsche Umlaute verwenden: ä, ö, ü, ß. Niemals ae, oe oder ue als Umlaut-Ersatz schreiben",
+        ]
+    )
+    return lines
 
 
 def build_followup_prompt(context: Dict[str, Any], prompt_text: str) -> str:
@@ -71,6 +155,7 @@ def build_followup_prompt(context: Dict[str, Any], prompt_text: str) -> str:
     original_message = context.get("original_message", "")
     previous_messages = context.get("previous_messages", [])
     profile_data = context.get("profile_data", {})
+    sequence_messages = context.get("sequence_messages") or {}
     
     # New: last message tracking for proper sender attribution
     last_message_text = context.get("last_message_text") or ""
@@ -154,6 +239,8 @@ def build_followup_prompt(context: Dict[str, Any], prompt_text: str) -> str:
                 f"",
                 f"PROFIL HEADLINE: {headline}",
             ])
+
+    context_parts.extend(_sequence_style_lines(sequence_messages))
     
     context_section = "\n".join(context_parts)
     
@@ -163,12 +250,13 @@ def build_followup_prompt(context: Dict[str, Any], prompt_text: str) -> str:
         f"{context_section}\n"
         f"===== ENDE KONTEXT =====\n\n"
         f"Generiere jetzt eine passende Follow-up Nachricht basierend auf dem Szenario und Kontext. "
-        f"Du schreibst IMMER als wir/uns (der Absender), niemals als der Kontakt."
+        f"Du schreibst IMMER als wir/uns (der Absender), niemals als der Kontakt. "
+        f"Beziehe dich konkret auf die letzte Nachricht und halte die Sequenz als Stilanker ein."
     )
 
 
 def generate_followup(context: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate a followup message using OpenAI.
+    """Generate a followup message using Gemini.
     
     Args:
         context: Dictionary with lead info, reply_snippet, attempt, etc.
@@ -176,12 +264,6 @@ def generate_followup(context: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Dictionary with message, message_type, tone
     """
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY not set")
-    
-    client = OpenAI(api_key=api_key)
-    
     # Load prompt and build full prompt
     prompt_text = load_followup_prompt()
     full_prompt = build_followup_prompt(context, prompt_text)
@@ -194,9 +276,10 @@ def generate_followup(context: Dict[str, Any]) -> Dict[str, Any]:
     })
     
     try:
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
+        client = create_json_client()
+        logger.ai_request(GEMINI_MODEL, {"followupId": context.get("followup_id")}, full_prompt[:200])
+        response = client.generate_json(
+            [
                 {
                     "role": "system",
                     "content": "Du bist ein LinkedIn Follow-up Agent. Antworte NUR mit validen JSON. Keine Erklärungen."
@@ -204,20 +287,12 @@ def generate_followup(context: Dict[str, Any]) -> Dict[str, Any]:
                 {"role": "user", "content": full_prompt},
             ],
             temperature=0.7,
-            max_tokens=500,
+            max_output_tokens=2000,
         )
-        
-        raw_content = response.choices[0].message.content or ""
-        logger.debug("OpenAI response received", data={"length": len(raw_content)})
-        
-        # Parse JSON response
-        # Try to extract JSON from the response
-        json_match = re.search(r'\{[^{}]*\}', raw_content, re.DOTALL)
-        if json_match:
-            result = json.loads(json_match.group())
-        else:
-            # If no JSON found, try parsing the whole response
-            result = json.loads(raw_content.strip())
+        logger.ai_response(GEMINI_MODEL, {"followupId": context.get("followup_id")}, response.total_tokens)
+        raw_content = response.raw_text
+        result = response.data
+        logger.debug("Gemini response received", data={"length": len(raw_content)})
         
         # Sanitize the message
         message = sanitize_message(result.get("message", ""))
@@ -232,7 +307,7 @@ def generate_followup(context: Dict[str, Any]) -> Dict[str, Any]:
         }
         
     except json.JSONDecodeError as e:
-        logger.error("Failed to parse OpenAI response as JSON", error=e)
+        logger.error("Failed to parse Gemini response as JSON", error=e)
         # Fallback: try to extract any reasonable text
         lines = raw_content.strip().split("\n")
         for line in lines:
@@ -244,7 +319,7 @@ def generate_followup(context: Dict[str, Any]) -> Dict[str, Any]:
                 }
         raise ValueError(f"Could not parse response: {raw_content[:200]}")
     except Exception as e:
-        logger.error("OpenAI API call failed", error=e)
+        logger.error("Gemini API call failed", error=e)
         raise
 
 

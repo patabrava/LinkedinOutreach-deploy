@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 from dotenv import load_dotenv
-from openai import OpenAI
+
+from ai_client import create_json_client, get_gemini_model, load_ai_env
 
 from tools import (
     classify_lead,
@@ -29,6 +30,7 @@ from example_pool import get_example_pool
 sys.path.insert(0, str(Path(__file__).parent.parent / "workers"))
 from shared_logger import get_logger
 
+load_ai_env()
 load_dotenv()
 
 # Initialize logger
@@ -47,7 +49,7 @@ PROMPT_NAMES = {
     3: "Process Optimization",
 }
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+GEMINI_MODEL = get_gemini_model()
 
 
 def load_prompt(prompt_type: int = 1) -> str:
@@ -261,7 +263,7 @@ def _process_lead_for_generation(
     lead: Dict[str, Any],
     *,
     client: Any,
-    openai_client: OpenAI,
+    ai_client: Any,
     example_pool: Any,
     prompt_text: str,
     next_status: str,
@@ -290,12 +292,10 @@ def _process_lead_for_generation(
     update_rotation_state(client, new_category_index)
 
     prompt = build_prompt(lead, case_study, company_type, example_text, category_name, prompt_text)
-    logger.ai_request(OPENAI_MODEL, {"leadId": lead_id}, prompt[:200])
+    logger.ai_request(GEMINI_MODEL, {"leadId": lead_id}, prompt[:200])
 
-    completion = openai_client.chat.completions.create(
-        model=OPENAI_MODEL,
-        response_format={"type": "json_object"},
-        messages=[
+    completion = ai_client.generate_json(
+        [
             {
                 "role": "system",
                 "content": (
@@ -314,14 +314,15 @@ def _process_lead_for_generation(
             {"role": "system", "content": prompt_text},
             {"role": "user", "content": prompt},
         ],
+        temperature=0.7,
+        max_output_tokens=2000,
     )
 
-    tokens = completion.usage.total_tokens if completion.usage else None
-    logger.ai_response(OPENAI_MODEL, {"leadId": lead_id}, tokens)
+    logger.ai_response(GEMINI_MODEL, {"leadId": lead_id}, completion.total_tokens)
 
-    content = completion.choices[0].message.content or "{}"
+    content = completion.raw_text
     try:
-        data = json.loads(content)
+        data = completion.data
     except json.JSONDecodeError:
         logger.error("Bad JSON from AI model", {"leadId": lead_id}, data={"content": content[:200]})
         return
@@ -425,13 +426,8 @@ def main() -> None:
         # watch always drafts custom-outreach (ENRICHED + outreach_mode='message')
         watch_mode = "message"
 
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            logger.error("Missing OPENAI_API_KEY")
-            raise RuntimeError("Missing OPENAI_API_KEY.")
-
         client = supabase_client()
-        openai_client = OpenAI(api_key=api_key)
+        ai_client = create_json_client()
         example_pool = get_example_pool()
 
         logger.operation_start("agent-watch", input_data={"promptType": prompt_type, "promptName": prompt_name})
@@ -464,7 +460,7 @@ def main() -> None:
                         _process_lead_for_generation(
                             lead,
                             client=client,
-                            openai_client=openai_client,
+                            ai_client=ai_client,
                             example_pool=example_pool,
                             prompt_text=prompt_text,
                             next_status="DRAFT_READY",
@@ -489,13 +485,8 @@ def main() -> None:
     )
 
     try:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            logger.error("Missing OPENAI_API_KEY")
-            raise RuntimeError("Missing OPENAI_API_KEY.")
-
         client = supabase_client()
-        openai = OpenAI(api_key=api_key)
+        ai_client = create_json_client()
 
         leads = get_leads_for_generation(client, mode=mode, batch_id=args.batch_id)
         if not leads:
@@ -515,7 +506,7 @@ def main() -> None:
             _process_lead_for_generation(
                 lead,
                 client=client,
-                openai_client=openai,
+                ai_client=ai_client,
                 example_pool=example_pool,
                 prompt_text=prompt_text,
                 next_status=next_status,
