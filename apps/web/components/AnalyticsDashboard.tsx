@@ -133,7 +133,7 @@ function DailyChart({
             const endDate = new Date(week[week.length - 1].date);
 
             const weekLabel = startDate.toLocaleDateString("en", { month: "short", day: "numeric" });
-            const tooltip = `${startDate.toLocaleDateString()} - ${endDate.toLocaleDateString()}: ${weekSum}`;
+            const tooltip = `${startDate.toLocaleDateString("en-US")} - ${endDate.toLocaleDateString("en-US")}: ${weekSum}`;
 
             weeklyData.push({
                 label: weekLabel,
