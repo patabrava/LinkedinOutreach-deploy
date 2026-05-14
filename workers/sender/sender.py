@@ -375,16 +375,20 @@ def classify_connect_only_probe_surface(
     more_button_count: int,
     has_visible_connect_or_pending_state: bool,
     has_more_menu_pending_state: bool = False,
+    has_more_menu_connected_state: bool = False,
+    has_more_menu_invite_state: bool = False,
 ) -> str:
     if has_more_menu_pending_state:
         return "pending_invite"
+    if has_more_menu_connected_state:
+        return "already_connected"
     if explicit_message_button_count > 0 or explicit_message_link_count > 0:
         return "already_connected"
     if invite_link_count > 0 or connect_button_count > 0:
         return "invite_available"
-    if generic_message_link_count > 0 and has_visible_connect_or_pending_state:
+    if has_more_menu_invite_state:
         return "invite_available"
-    if generic_message_link_count > 0 and more_button_count > 0:
+    if generic_message_link_count > 0 and has_visible_connect_or_pending_state:
         return "invite_available"
     if generic_message_link_count > 0:
         return "already_connected"
@@ -512,14 +516,15 @@ async def _has_visible_connect_or_pending_state(profile_container, lead_name: st
     return False
 
 
-async def _more_menu_has_pending_invite(page: Page, profile_container) -> bool:
-    """Open profile More/Mehr actions and detect pending invitation state."""
+async def _inspect_more_menu_connection_state(page: Page, profile_container) -> str:
+    """Open profile More/Mehr actions and classify connection state from menu text."""
     try:
         more_button = profile_container.get_by_role("button", name=re.compile(r"(More|Mehr)", re.I))
         if await more_button.count() == 0:
-            return False
+            return "unknown"
         await more_button.first.click(timeout=5_000)
         await page.wait_for_timeout(700)
+        body_text = await page.locator("body").inner_text(timeout=2_000)
         pending_items = [
             page.get_by_role("menuitem", name=re.compile(r"(Ausstehend|Pending)", re.I)),
             page.get_by_role("button", name=re.compile(r"(Ausstehend|Pending)", re.I)),
@@ -528,18 +533,35 @@ async def _more_menu_has_pending_invite(page: Page, profile_container) -> bool:
         for item in pending_items:
             try:
                 if await item.count() > 0:
-                    return True
+                    return "pending_invite"
             except Exception:
                 continue
-        return False
+        if re.search(r"(Kontakt\s+entfernen|Remove\s+connection)", body_text, re.I):
+            return "already_connected"
+        invite_items = [
+            page.get_by_role("menuitem", name=re.compile(r"(Invite|Einladen|Connect|Vernetzen|Kontaktanfrage)", re.I)),
+            page.get_by_role("button", name=re.compile(r"(Invite|Einladen|Connect|Vernetzen|Kontaktanfrage)", re.I)),
+        ]
+        for item in invite_items:
+            try:
+                if await item.count() > 0:
+                    return "invite_available"
+            except Exception:
+                continue
+        return "unknown"
     except Exception as exc:
-        logger.warn("Failed to inspect More menu for pending invite state", error=exc)
-        return False
+        logger.warn("Failed to inspect More menu for connection state", error=exc)
+        return "unknown"
     finally:
         try:
             await page.keyboard.press("Escape")
         except Exception:
             pass
+
+
+async def _more_menu_has_pending_invite(page: Page, profile_container) -> bool:
+    """Open profile More/Mehr actions and detect pending invitation state."""
+    return await _inspect_more_menu_connection_state(page, profile_container) == "pending_invite"
 
 
 def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int] = None) -> list[Dict[str, Any]]:
@@ -3487,9 +3509,14 @@ async def probe_connect_only_surface(page: Page, lead: ScraperLead) -> str:
         lead_name,
     )
     has_more_menu_pending_state = False
+    has_more_menu_connected_state = False
+    has_more_menu_invite_state = False
     if generic_message_link_count > 0 and more_button_count > 0 and not has_visible_connect_or_pending_state:
-        has_more_menu_pending_state = await _more_menu_has_pending_invite(page, profile_container)
-        has_visible_connect_or_pending_state = has_more_menu_pending_state
+        more_menu_state = await _inspect_more_menu_connection_state(page, profile_container)
+        has_more_menu_pending_state = more_menu_state == "pending_invite"
+        has_more_menu_connected_state = more_menu_state == "already_connected"
+        has_more_menu_invite_state = more_menu_state == "invite_available"
+        has_visible_connect_or_pending_state = has_more_menu_pending_state or has_more_menu_invite_state
     surface = classify_connect_only_probe_surface(
         explicit_message_button_count=explicit_message_button_count,
         explicit_message_link_count=explicit_message_link_count,
@@ -3499,6 +3526,8 @@ async def probe_connect_only_surface(page: Page, lead: ScraperLead) -> str:
         more_button_count=more_button_count,
         has_visible_connect_or_pending_state=has_visible_connect_or_pending_state,
         has_more_menu_pending_state=has_more_menu_pending_state,
+        has_more_menu_connected_state=has_more_menu_connected_state,
+        has_more_menu_invite_state=has_more_menu_invite_state,
     )
     logger.info(
         "Connect-only surface probe complete",
@@ -3513,6 +3542,8 @@ async def probe_connect_only_surface(page: Page, lead: ScraperLead) -> str:
             "moreButtonCount": more_button_count,
             "hasVisibleConnectOrPendingState": has_visible_connect_or_pending_state,
             "hasMoreMenuPendingState": has_more_menu_pending_state,
+            "hasMoreMenuConnectedState": has_more_menu_connected_state,
+            "hasMoreMenuInviteState": has_more_menu_invite_state,
         },
     )
     return surface

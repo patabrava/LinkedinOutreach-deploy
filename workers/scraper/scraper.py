@@ -64,6 +64,14 @@ INBOX_REPLY_CANDIDATE_STATUSES = [
 INBOX_RECENT_CONVERSATION_LIMIT = 60
 INBOX_CARD_FIELD_TIMEOUT_MS = 500
 CONNECT_DIALOG_TIMEOUT_MS = 15_000
+CONNECTION_DIALOG_CSS = (
+    "section[role='dialog'], div[role='dialog'], [role='alertdialog'], "
+    ".artdeco-modal, .send-invite"
+)
+CONNECTION_DIALOG_TEXT_PATTERNS = [
+    re.compile(r"Eine Nachricht zu Ihrer Einladung hinzufügen", re.I),
+    re.compile(r"Add a note to your invitation", re.I),
+]
 
 
 def get_daily_enrichment_cap() -> int:
@@ -550,8 +558,37 @@ async def open_invite_dialog_from_anchor(page: Page, anchor, base_url: str) -> b
 
 async def wait_for_connection_dialog(page: Page) -> None:
     """Wait for the LinkedIn connect/invite dialog to become usable."""
-    await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=CONNECT_DIALOG_TIMEOUT_MS)
-    await page.wait_for_timeout(500)
+    try:
+        await page.locator(CONNECTION_DIALOG_CSS).first.wait_for(state="visible", timeout=CONNECT_DIALOG_TIMEOUT_MS)
+        await page.wait_for_timeout(500)
+        return
+    except Exception:
+        pass
+    for pattern in CONNECTION_DIALOG_TEXT_PATTERNS:
+        try:
+            await page.get_by_text(pattern).first.wait_for(state="visible", timeout=3_000)
+            await page.wait_for_timeout(500)
+            return
+        except Exception:
+            continue
+    await page.locator(CONNECTION_DIALOG_CSS).first.wait_for(state="visible", timeout=1_000)
+
+
+async def connection_dialog_is_visible(page: Page) -> bool:
+    """Return true when LinkedIn opened the invite dialog despite a prior click timeout."""
+    try:
+        await page.locator(CONNECTION_DIALOG_CSS).first.wait_for(state="visible", timeout=5_000)
+        await page.wait_for_timeout(500)
+        return True
+    except Exception:
+        for pattern in CONNECTION_DIALOG_TEXT_PATTERNS:
+            try:
+                await page.get_by_text(pattern).first.wait_for(state="visible", timeout=1_500)
+                await page.wait_for_timeout(500)
+                return True
+            except Exception:
+                continue
+    return False
 
 
 def safe_text(value: Optional[str]) -> str:
@@ -561,8 +598,9 @@ def safe_text(value: Optional[str]) -> str:
 def normalize_person_name(value: Optional[str]) -> str:
     """Normalize a LinkedIn display name for exact-ish matching."""
     text = safe_text(value).lower()
+    text = text.replace("-", " ")
     text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"[^a-z0-9äöüßáàâãåéèêëíìîïóòôõúùûüñç -]", "", text)
+    text = re.sub(r"[^a-z0-9äöüßáàâãåéèêëíìîïóòôõúùûüñç ]", "", text)
     return text.strip()
 
 
@@ -574,6 +612,35 @@ def lead_display_name(lead: Dict[str, Any]) -> str:
         ]
         if part
     ).strip()
+
+
+def lead_search_terms(lead: Dict[str, Any]) -> List[str]:
+    """Return conservative LinkedIn inbox search variants for a lead."""
+    terms: List[str] = []
+    full_name = lead_display_name(lead)
+    if full_name:
+        terms.append(full_name)
+
+    first_name = safe_text(lead.get("first_name"))
+    last_name = safe_text(lead.get("last_name"))
+    if first_name and " " in last_name:
+        terms.append(f"{first_name} {last_name.replace(' ', '-')}")
+
+    slug = linkedin_profile_slug(lead.get("linkedin_url"))
+    if slug:
+        slug_words = re.sub(r"-[0-9a-f]{4,}$", "", slug)
+        slug_words = re.sub(r"\s+", " ", slug_words.replace("-", " ")).strip()
+        if slug_words:
+            terms.append(slug_words)
+
+    unique_terms: List[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        key = safe_text(term).lower()
+        if key and key not in seen:
+            seen.add(key)
+            unique_terms.append(term)
+    return unique_terms
 
 
 def is_last_message_from_lead(convo_info: Dict[str, Any], lead: Dict[str, Any]) -> bool:
@@ -708,6 +775,20 @@ def is_inbound_reply_from_conversation(
     return is_exact_profile_summary_match(summary, lead) and not snippet_looks_outbound(
         summary.get("snippet") if summary else None
     )
+
+
+def conversation_tail_belongs_to_lead(convo_info: Optional[Dict[str, Any]], lead: Dict[str, Any]) -> bool:
+    """Return false when extraction is clearly from a different open thread."""
+    if not convo_info:
+        return False
+    if is_last_message_from_lead(convo_info, lead):
+        return True
+    if convo_info.get("is_outbound"):
+        return True
+    sender = normalize_person_name(convo_info.get("sender"))
+    # Blank senders happen on some inbound bubbles; the caller should use the
+    # clicked result identity to decide whether that is acceptable.
+    return not sender
 
 
 async def safe_text_content(page: Page, selector: str, timeout: int = 6_000) -> str:
@@ -1167,13 +1248,13 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
             # Look for Invite/Connect menuitem
             invite_menuitem = page.get_by_role(
                 "menuitem",
-                name=re.compile(r"(Invite|Einladen|Connect|Vernetzen|Kontakt|Kontaktanfrage|Anfrage)", re.I),
+                name=re.compile(r"(Invite|Einladen|Connect|Vernetzen|Kontaktanfrage)", re.I),
             )
             invite_count = await invite_menuitem.count()
             if invite_count == 0:
                 invite_menuitem = page.get_by_role(
                     "button",
-                    name=re.compile(r"(Invite|Einladen|Connect|Vernetzen|Kontakt|Kontaktanfrage|Anfrage)", re.I),
+                    name=re.compile(r"(Invite|Einladen|Connect|Vernetzen|Kontaktanfrage)", re.I),
                 )
                 invite_count = await invite_menuitem.count()
             logger.element_search("Invite/Connect menuitem", invite_count, role="menuitem", context={"path": 3})
@@ -1193,6 +1274,10 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
         except WeeklyInviteLimitReached:
             raise
         except Exception as e:
+            if await connection_dialog_is_visible(page):
+                logger.dialog_detected("connection_more_menu_late", context={"path": 3})
+                logger.path_attempt("More -> Invite", 3, success=True)
+                return await _click_send_without_note(page, normalized, lead.id)
             logger.element_click("More button flow", success=False)
             logger.path_attempt("More -> Invite", 3, success=False)
     
@@ -1977,7 +2062,7 @@ async def open_profile_and_get_last_message(
         return None
 
 
-async def search_conversation_by_name(page: Page, lead_name: str) -> Optional[Dict[str, Any]]:
+async def search_conversation_by_name(page: Page, lead: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Search for a conversation by lead name using LinkedIn's messaging search box.
     
     Returns conversation info if found, None otherwise.
@@ -1993,20 +2078,6 @@ async def search_conversation_by_name(page: Page, lead_name: str) -> Optional[Di
             logger.warn("search_conversation_by_name: could not find search box")
             return None
         
-        lead_name_norm = normalize_person_name(lead_name)
-
-        # Clear any existing search and type the lead name
-        await searchbox.click()
-        await page.wait_for_timeout(300)
-        await searchbox.fill("")
-        await page.wait_for_timeout(200)
-        await page.keyboard.type(lead_name, delay=60)
-        await page.keyboard.press("Enter")
-        await page.wait_for_timeout(1500)  # Wait for search results to load
-        
-        # Look for the conversation in search results. Prefer an item whose
-        # visible text includes the exact lead name, otherwise the first result
-        # can open a different thread with a similar name.
         result_selectors = [
             "li.msg-conversation-listitem",
             "ul.msg-conversations-container__conversations-list li",
@@ -2015,47 +2086,75 @@ async def search_conversation_by_name(page: Page, lead_name: str) -> Optional[Di
             "div.msg-search-result",
             "li.artdeco-list__item",
         ]
-        
-        result_item = None
-        for selector in result_selectors:
-            items = page.locator(selector)
-            count = await items.count()
-            for idx in range(min(count, 8)):
-                item = items.nth(idx)
-                try:
-                    item_text = normalize_person_name(await item.inner_text(timeout=2_000))
-                except Exception:
-                    item_text = ""
-                if lead_name_norm and lead_name_norm in item_text:
-                    result_item = item
-                    break
-            if result_item:
-                break
-        
-        if not result_item:
-            logger.debug(f"search_conversation_by_name: no results for '{lead_name}'")
-            # Clear search before returning
-            await searchbox.fill("")
+
+        for search_term in lead_search_terms(lead):
+            lead_name_norm = normalize_person_name(search_term)
+
+            # Clear any existing search and type the lead name
+            await searchbox.click()
             await page.wait_for_timeout(300)
-            return None
-        
-        # Click to open the conversation
-        await result_item.click()
-        await page.wait_for_timeout(1000)  # Wait for conversation to load
-        
-        # Extract the last message from the opened conversation
-        last_message_info = await extract_last_message_from_conversation(page)
-        
-        # Clear the search box for next search
+            await searchbox.fill("")
+            await page.wait_for_timeout(200)
+            await page.keyboard.type(search_term, delay=60)
+            await page.keyboard.press("Enter")
+            await page.wait_for_timeout(1500)  # Wait for search results to load
+
+            # Look for the conversation in search results. Prefer an item whose
+            # visible text includes the exact lead name, otherwise the first result
+            # can open a different thread with a similar name.
+            result_item = None
+            for selector in result_selectors:
+                items = page.locator(selector)
+                count = await items.count()
+                for idx in range(min(count, 8)):
+                    item = items.nth(idx)
+                    try:
+                        item_text = normalize_person_name(await item.inner_text(timeout=2_000))
+                    except Exception:
+                        item_text = ""
+                    if lead_name_norm and lead_name_norm in item_text:
+                        result_item = item
+                        break
+                if result_item:
+                    break
+
+            if not result_item:
+                logger.debug("search_conversation_by_name: no results for search term", {"searchTerm": search_term})
+                continue
+
+            # Click to open the conversation
+            await result_item.click()
+            await page.wait_for_timeout(1000)  # Wait for conversation to load
+
+            # Extract the last message from the opened conversation
+            last_message_info = await extract_last_message_from_conversation(page)
+            if conversation_tail_belongs_to_lead(last_message_info, lead):
+                try:
+                    await searchbox.fill("")
+                except Exception:
+                    pass
+                return last_message_info
+
+            logger.warn(
+                "search_conversation_by_name: opened thread did not match searched lead",
+                {
+                    "leadId": lead.get("id"),
+                    "lead": lead_display_name(lead),
+                    "searchTerm": search_term,
+                    "sender": (last_message_info or {}).get("sender"),
+                    "text": ((last_message_info or {}).get("text") or "")[:80],
+                },
+            )
+
         try:
             await searchbox.fill("")
         except Exception:
             pass
-        
-        return last_message_info
+        await page.wait_for_timeout(300)
+        return None
         
     except Exception as exc:
-        logger.warn(f"search_conversation_by_name: error searching for '{lead_name}'", error=exc)
+        logger.warn(f"search_conversation_by_name: error searching for '{lead_display_name(lead)}'", error=exc)
         return None
 
 
@@ -2731,7 +2830,7 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int, lead_i
             # layout-dependent and can be absent even when the inbox has replies.
             if "linkedin.com/messaging" not in page.url:
                 await navigate_to_inbox(page)
-            convo_info = await search_conversation_by_name(page, lead_full_name)
+            convo_info = await search_conversation_by_name(page, lead)
             if convo_info:
                 inbox_hits += 1
                 logger.info("Inbox search found conversation", {"leadId": lead_id, "lead": lead_full_name})

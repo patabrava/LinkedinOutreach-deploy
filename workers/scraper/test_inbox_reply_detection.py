@@ -7,12 +7,41 @@ class InboxReplyDetectionTests(unittest.TestCase):
     def test_normalizes_linkedin_display_names(self):
         self.assertEqual(scraper.normalize_person_name("  Daniel   Herm  "), "daniel herm")
         self.assertEqual(scraper.normalize_person_name("Cindy Krüger ✅"), "cindy krüger")
+        self.assertEqual(
+            scraper.normalize_person_name("Iasonas Kouveliotis-Lysikatos"),
+            "iasonas kouveliotis lysikatos",
+        )
 
     def test_detects_last_message_from_lead_full_name(self):
         lead = {"first_name": "Daniel", "last_name": "Herm"}
         convo = {"sender": "Daniel Herm", "text": "Hi Katharina", "is_outbound": False}
 
         self.assertTrue(scraper.is_last_message_from_lead(convo, lead))
+
+    def test_detects_last_message_from_lead_hyphenated_linkedin_name(self):
+        lead = {"first_name": "Iasonas", "last_name": "Kouveliotis Lysikatos"}
+        convo = {"sender": "Iasonas Kouveliotis-Lysikatos", "text": "Hi Katharina", "is_outbound": False}
+
+        self.assertTrue(scraper.is_last_message_from_lead(convo, lead))
+
+    def test_builds_hyphenated_search_term_from_multiword_last_name(self):
+        lead = {
+            "first_name": "Iasonas",
+            "last_name": "Kouveliotis Lysikatos",
+            "linkedin_url": "https://www.linkedin.com/in/iasonas-kouveliotis-lysikatos-56984457",
+        }
+
+        self.assertIn("Iasonas Kouveliotis-Lysikatos", scraper.lead_search_terms(lead))
+
+    def test_rejects_stale_open_thread_from_different_sender(self):
+        lead = {"first_name": "Dominika", "last_name": "Piksa"}
+        convo = {
+            "sender": "Iasonas Kouveliotis-Lysikatos",
+            "text": "Hi Katharina, Danke für die Kontaktaufnahme.",
+            "is_outbound": False,
+        }
+
+        self.assertFalse(scraper.conversation_tail_belongs_to_lead(convo, lead))
 
     def test_does_not_treat_us_or_blank_sender_as_reply(self):
         lead = {"first_name": "Markus", "last_name": "Tipold"}

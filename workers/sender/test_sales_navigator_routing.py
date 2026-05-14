@@ -743,7 +743,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
             "pending_invite",
         )
 
-    def test_classify_connect_only_probe_surface_keeps_more_menu_before_generic_message(self):
+    def test_classify_connect_only_probe_surface_treats_remove_contact_menu_as_connected(self):
         self.assertEqual(
             classify_connect_only_probe_surface(
                 explicit_message_button_count=0,
@@ -753,6 +753,22 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
                 connect_button_count=0,
                 more_button_count=1,
                 has_visible_connect_or_pending_state=False,
+                has_more_menu_connected_state=True,
+            ),
+            "already_connected",
+        )
+
+    def test_classify_connect_only_probe_surface_keeps_verified_more_menu_invite_before_generic_message(self):
+        self.assertEqual(
+            classify_connect_only_probe_surface(
+                explicit_message_button_count=0,
+                explicit_message_link_count=0,
+                generic_message_link_count=1,
+                invite_link_count=0,
+                connect_button_count=0,
+                more_button_count=1,
+                has_visible_connect_or_pending_state=False,
+                has_more_menu_invite_state=True,
             ),
             "invite_available",
         )
@@ -799,7 +815,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
             "invite_available",
         )
 
-    def test_classify_connect_only_probe_surface_requires_more_menu_verification_before_generic_message(self):
+    def test_classify_connect_only_probe_surface_requires_more_menu_invite_verification_before_generic_message(self):
         self.assertEqual(
             classify_connect_only_probe_surface(
                 explicit_message_button_count=0,
@@ -810,7 +826,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
                 more_button_count=1,
                 has_visible_connect_or_pending_state=False,
             ),
-            "invite_available",
+            "already_connected",
         )
 
     def test_promote_connect_only_to_connected_updates_lead_status(self):
