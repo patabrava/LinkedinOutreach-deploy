@@ -141,10 +141,66 @@ async def capture_connect_failure_screenshot(page: Page, reason: str, lead_id: O
         return None
 
 
+def _detect_weekly_invite_limit_text(text: str) -> Optional[str]:
+    """Detect LinkedIn invite-limit copy without matching normal invite dialogs."""
+    normalized_text = " ".join((text or "").split()).lower()
+    if not normalized_text:
+        return None
+
+    strong_patterns = [
+        "weekly limit",
+        "weekly invitation limit",
+        "weekly invitation sending limit",
+        "invite limit reached",
+        "invitation limit reached",
+        "contact request limit",
+        "contact request limits",
+        "too many invitations",
+        "too many contact requests",
+        "reached a limit",
+        "you've reached",
+        "you have reached",
+        "next week",
+        "wöchentliches limit",
+        "wöchentliche limit",
+        "wöchentlichen limit",
+        "wöchentliche kontaktanfragen erreicht",
+        "limit für kontaktanfragen",
+        "limit für einladungen",
+        "zu viele einladungen",
+        "zu viele kontaktanfragen",
+        "nächste woche",
+    ]
+    if any(pattern in normalized_text for pattern in strong_patterns):
+        return "LinkedIn weekly invite limit reached. Please retry next week."
+
+    limit_words = ("limit", "limits", "begrenzt", "begrenzung", "beschränkung", "erreicht")
+    invite_words = (
+        "invite",
+        "invitation",
+        "invitations",
+        "contact request",
+        "contact requests",
+        "einladung",
+        "einladungen",
+        "kontaktanfrage",
+        "kontaktanfragen",
+    )
+    retry_words = ("next week", "später", "woche", "week")
+    if (
+        any(word in normalized_text for word in limit_words)
+        and any(word in normalized_text for word in invite_words)
+        and any(word in normalized_text for word in retry_words)
+    ):
+        return "LinkedIn weekly invite limit reached. Please retry next week."
+
+    return None
+
+
 async def detect_weekly_invite_limit(page: Page) -> Optional[str]:
     """Best-effort detection for LinkedIn's weekly invite cap dialog."""
     text_candidates: List[str] = []
-    for selector in ["section[role='dialog']", "div[role='dialog']", "body"]:
+    for selector in ["section[role='dialog']", "div[role='dialog']", "[role='alertdialog']"]:
         try:
             text = await page.locator(selector).first.inner_text(timeout=2_000)
             if text:
@@ -152,37 +208,7 @@ async def detect_weekly_invite_limit(page: Page) -> Optional[str]:
         except Exception:
             continue
 
-    normalized_text = " ".join(text_candidates).lower()
-    if not normalized_text:
-        return None
-
-    patterns = [
-        "weekly limit",
-        "weekly invitation limit",
-        "weekly invitation sending limit",
-        "invitation limit",
-        "contact requests",
-        "contact request limit",
-        "contact request limits",
-        "invite limit",
-        "invite limit reached",
-        "too many invitations",
-        "too many contact requests",
-        "reached a limit",
-        "wöchentliche limit",
-        "wöchentliche kontaktanfragen",
-        "wöchentliche kontaktanfrage",
-        "kontaktanfragen",
-        "kontaktanfrage",
-        "kontaktanfragen erreicht",
-        "nächste woche",
-        "next week",
-    ]
-
-    if any(pattern in normalized_text for pattern in patterns):
-        return "LinkedIn weekly invite limit reached. Please retry next week."
-
-    return None
+    return _detect_weekly_invite_limit_text("\n".join(text_candidates))
 
 
 def _has_connection_request_confirmation(text: str) -> bool:
