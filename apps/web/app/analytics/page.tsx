@@ -2,8 +2,8 @@ import { AnalyticsDashboard } from "../../components/AnalyticsDashboard";
 import {
     fetchOutreachAnalytics,
     fetchDailyMetrics,
-    fetchConversionFunnel,
 } from "../actions";
+import { buildConversionFunnel } from "../../lib/analyticsFunnel";
 import { requireServerSession } from "../../lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -21,11 +21,11 @@ export default async function AnalyticsPage({ searchParams }: PageProps) {
     const days = daysParam ? parseInt(daysParam, 10) : 7;
     const validDays = [7, 30, 90].includes(days) ? days : 7;
 
-    const [analytics, dailyMetrics, funnel] = await Promise.all([
-        fetchOutreachAnalytics(),
+    const [analytics, dailyMetrics] = await Promise.all([
+        fetchOutreachAnalytics(validDays),
         fetchDailyMetrics(validDays),
-        fetchConversionFunnel(),
     ]);
+    const funnel = buildConversionFunnel(analytics);
 
     return (
         <div className="page">

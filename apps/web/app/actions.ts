@@ -1828,6 +1828,12 @@ export type FunnelStats = {
 };
 
 type DailyMetricKey = "connectionsSent" | "connectionsAccepted" | "messagesSent" | "replies";
+type AnalyticsWindow = {
+  startDate: Date;
+  endDate: Date;
+  startIso: string;
+  endIso: string;
+};
 
 const LEAD_STATUSES = [
   "NEW",
@@ -1847,77 +1853,137 @@ const LEAD_STATUSES = [
   "QUEUED_CONNECT",
 ] as const;
 
+function getAnalyticsWindow(days: number): AnalyticsWindow {
+  const now = new Date();
+  const startDate = new Date(now);
+  startDate.setDate(startDate.getDate() - (days - 1));
+  startDate.setUTCHours(0, 0, 0, 0);
+
+  const endDate = new Date(startDate);
+  endDate.setDate(endDate.getDate() + days);
+
+  return {
+    startDate,
+    endDate,
+    startIso: startDate.toISOString(),
+    endIso: endDate.toISOString(),
+  };
+}
+
+function isInAnalyticsWindow(
+  timestamp: string | null | undefined,
+  window: AnalyticsWindow,
+): boolean {
+  if (!timestamp) return false;
+  const value = new Date(timestamp);
+  return value >= window.startDate && value < window.endDate;
+}
+
+async function fetchPagedAnalyticsRows<Row>(
+  makeQuery: () => any,
+  correlationId: string,
+  label: string,
+): Promise<Row[]> {
+  const pageSize = 1000;
+  const rows: Row[] = [];
+
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await makeQuery().range(offset, offset + pageSize - 1);
+    if (error) {
+      logger.error(label, { correlationId, offset }, error);
+      break;
+    }
+
+    const page = (data ?? []) as Row[];
+    rows.push(...page);
+    if (page.length < pageSize) break;
+  }
+
+  return rows;
+}
+
 /**
  * Fetch aggregate outreach analytics.
  */
-export async function fetchOutreachAnalytics(): Promise<OutreachAnalytics> {
-  const correlationId = logger.actionStart("fetchOutreachAnalytics", {});
+export async function fetchOutreachAnalytics(days: number = 7): Promise<OutreachAnalytics> {
+  const window = getAnalyticsWindow(days);
+  const correlationId = logger.actionStart("fetchOutreachAnalytics", {}, { days });
 
   try {
     const client = supabaseAdmin();
 
-    // Get status counts
     const statusCounts: Record<string, number> = {};
-    await Promise.all(
-      LEAD_STATUSES.map(async (status) => {
-        const { count, error } = await client
+    for (const status of LEAD_STATUSES) {
+      statusCounts[status] = 0;
+    }
+
+    const leadsCreated = await fetchPagedAnalyticsRows<{ status?: string | null }>(
+      () =>
+        client
           .from("leads")
-          .select("id", { count: "exact", head: true })
-          .eq("status", status);
-        if (error) {
-          logger.error(`Failed to count status ${status}`, { correlationId }, error);
-        }
-        statusCounts[status] = count ?? 0;
-      })
+          .select("status")
+          .gte("created_at", window.startIso)
+          .lt("created_at", window.endIso)
+          .order("created_at", { ascending: true }),
+      correlationId,
+      "Failed to fetch analytics lead status counts",
     );
 
+    for (const lead of leadsCreated ?? []) {
+      const status = lead.status || "UNKNOWN";
+      statusCounts[status] = (statusCounts[status] || 0) + 1;
+    }
     const totalLeads = Object.values(statusCounts).reduce((sum, c) => sum + c, 0);
 
-    // Connection requests sent (anyone who has connection_sent_at set)
-    const { count: connectionRequestsSent } = await client
-      .from("leads")
-      .select("id", { count: "exact", head: true })
-      .not("connection_sent_at", "is", null);
+    const leadEvents = await fetchPagedAnalyticsRows<{
+      connection_sent_at?: string | null;
+      connection_accepted_at?: string | null;
+      sent_at?: string | null;
+      last_reply_at?: string | null;
+    }>(
+      () =>
+        client
+          .from("leads")
+          .select("connection_sent_at, connection_accepted_at, sent_at, last_reply_at")
+          .or(
+            [
+              `connection_sent_at.gte.${window.startIso}`,
+              `connection_accepted_at.gte.${window.startIso}`,
+              `sent_at.gte.${window.startIso}`,
+              `last_reply_at.gte.${window.startIso}`,
+            ].join(",")
+          ),
+      correlationId,
+      "Failed to fetch analytics lead events",
+    );
 
-    // Connections accepted (connection_accepted_at is set)
-    const { count: connectionsAccepted } = await client
-      .from("leads")
-      .select("id", { count: "exact", head: true })
-      .not("connection_accepted_at", "is", null);
+    let connReqSent = 0;
+    let connAccepted = 0;
+    let msgSent = 0;
+    let repliesReceived = 0;
 
-    // Messages sent (sent_at is set)
-    const { count: messagesSent } = await client
-      .from("leads")
-      .select("id", { count: "exact", head: true })
-      .not("sent_at", "is", null);
+    for (const lead of leadEvents ?? []) {
+      if (isInAnalyticsWindow(lead.connection_sent_at, window)) connReqSent += 1;
+      if (isInAnalyticsWindow(lead.connection_accepted_at, window)) connAccepted += 1;
+      if (isInAnalyticsWindow(lead.sent_at, window)) msgSent += 1;
+      if (isInAnalyticsWindow(lead.last_reply_at, window)) repliesReceived += 1;
+    }
 
-    // Replies received - leads who have replied at least once (last_reply_at is set)
-    // This is more accurate than counting status = 'REPLIED' which may not always be set
-    const { count: repliesReceivedCount } = await client
-      .from("leads")
-      .select("id", { count: "exact", head: true })
-      .not("last_reply_at", "is", null);
-
-    const repliesReceived = repliesReceivedCount ?? 0;
-
-    // Follow-ups sent
     const { count: followupsSent } = await client
       .from("followups")
       .select("id", { count: "exact", head: true })
-      .eq("status", "SENT");
+      .eq("status", "SENT")
+      .gte("sent_at", window.startIso)
+      .lt("sent_at", window.endIso);
 
-    // Follow-ups responding to replies - SENT followups that were created to respond to a lead's reply
-    // (followup_type = 'REPLY' AND status = 'SENT' means we actually sent a response to their reply)
     const { count: followupReplies } = await client
       .from("followups")
       .select("id", { count: "exact", head: true })
       .eq("followup_type", "REPLY")
-      .eq("status", "SENT");
+      .eq("status", "SENT")
+      .gte("sent_at", window.startIso)
+      .lt("sent_at", window.endIso);
 
-    // Calculate rates
-    const connReqSent = connectionRequestsSent ?? 0;
-    const connAccepted = connectionsAccepted ?? 0;
-    const msgSent = messagesSent ?? 0;
     const fuSent = followupsSent ?? 0;
     const fuReplies = followupReplies ?? 0;
 
@@ -1957,22 +2023,14 @@ export async function fetchDailyMetrics(days: number = 7): Promise<DailyMetrics[
   try {
     const client = supabaseAdmin();
     const now = new Date();
-    const startDate = new Date(now);
-    startDate.setDate(startDate.getDate() - (days - 1));
-    startDate.setUTCHours(0, 0, 0, 0);
-
-    const endDate = new Date(startDate);
-    endDate.setDate(endDate.getDate() + days);
-
-    const startIso = startDate.toISOString();
-    const endIso = endDate.toISOString();
+    const window = getAnalyticsWindow(days);
     const results: DailyMetrics[] = [];
     const byDate = new Map<string, DailyMetrics>();
 
     const incrementMetric = (timestamp: string | null | undefined, metric: DailyMetricKey) => {
       if (!timestamp) return;
+      if (!isInAnalyticsWindow(timestamp, window)) return;
       const value = new Date(timestamp);
-      if (value < startDate || value >= endDate) return;
       const key = value.toISOString().split("T")[0];
       const row = byDate.get(key);
       if (row) row[metric] += 1;
@@ -1995,21 +2053,27 @@ export async function fetchDailyMetrics(days: number = 7): Promise<DailyMetrics[
       results.push(row);
     }
 
-    const { data: leadMetrics, error: leadMetricsError } = await client
-      .from("leads")
-      .select("connection_sent_at, connection_accepted_at, sent_at, last_reply_at")
-      .or(
-        [
-          `connection_sent_at.gte.${startIso}`,
-          `connection_accepted_at.gte.${startIso}`,
-          `sent_at.gte.${startIso}`,
-          `last_reply_at.gte.${startIso}`,
-        ].join(",")
-      );
-
-    if (leadMetricsError) {
-      logger.error("Failed to fetch lead daily metrics", { correlationId }, leadMetricsError);
-    }
+    const leadMetrics = await fetchPagedAnalyticsRows<{
+      connection_sent_at?: string | null;
+      connection_accepted_at?: string | null;
+      sent_at?: string | null;
+      last_reply_at?: string | null;
+    }>(
+      () =>
+        client
+          .from("leads")
+          .select("connection_sent_at, connection_accepted_at, sent_at, last_reply_at")
+          .or(
+            [
+              `connection_sent_at.gte.${window.startIso}`,
+              `connection_accepted_at.gte.${window.startIso}`,
+              `sent_at.gte.${window.startIso}`,
+              `last_reply_at.gte.${window.startIso}`,
+            ].join(",")
+          ),
+      correlationId,
+      "Failed to fetch lead daily metrics",
+    );
 
     for (const lead of leadMetrics ?? []) {
       incrementMetric(lead.connection_sent_at, "connectionsSent");
@@ -2022,8 +2086,8 @@ export async function fetchDailyMetrics(days: number = 7): Promise<DailyMetrics[
       .from("followups")
       .select("sent_at")
       .eq("status", "SENT")
-      .gte("sent_at", startIso)
-      .lt("sent_at", endIso);
+      .gte("sent_at", window.startIso)
+      .lt("sent_at", window.endIso);
 
     if (followupMetricsError) {
       logger.error("Failed to fetch followup daily metrics", { correlationId }, followupMetricsError);
@@ -2041,89 +2105,6 @@ export async function fetchDailyMetrics(days: number = 7): Promise<DailyMetrics[
     return results;
   } catch (error: any) {
     logger.actionError("fetchDailyMetrics", { correlationId }, error);
-    throw error;
-  }
-}
-
-/**
- * Fetch conversion funnel stats.
- */
-export async function fetchConversionFunnel(): Promise<FunnelStats> {
-  const correlationId = logger.actionStart("fetchConversionFunnel", {});
-
-  try {
-    const client = supabaseAdmin();
-
-    // Total leads
-    const { count: totalLeads } = await client
-      .from("leads")
-      .select("id", { count: "exact", head: true });
-
-    // Connection requests sent
-    const { count: connectionsSent } = await client
-      .from("leads")
-      .select("id", { count: "exact", head: true })
-      .not("connection_sent_at", "is", null);
-
-    // Connections accepted
-    const { count: connectionsAccepted } = await client
-      .from("leads")
-      .select("id", { count: "exact", head: true })
-      .not("connection_accepted_at", "is", null);
-
-    // Messages sent
-    const { count: messagesSent } = await client
-      .from("leads")
-      .select("id", { count: "exact", head: true })
-      .not("sent_at", "is", null);
-
-    const total = totalLeads ?? 0;
-    const connSent = connectionsSent ?? 0;
-    const connAccepted = connectionsAccepted ?? 0;
-    const msgSent = messagesSent ?? 0;
-
-    // Get replies using last_reply_at for accuracy (matches the main analytics)
-    const { count: repliesCount } = await client
-      .from("leads")
-      .select("id", { count: "exact", head: true })
-      .not("last_reply_at", "is", null);
-
-    const replyCount = repliesCount ?? 0;
-
-    // Build funnel with cumulative percentages from total leads
-    // Each stage shows what % of total leads reached this milestone
-    const stages: FunnelStage[] = [
-      {
-        name: "Leads Added",
-        count: total,
-        percentage: 100,
-      },
-      {
-        name: "Outreach Sent",
-        count: msgSent,
-        percentage: total > 0 ? Math.round((msgSent / total) * 1000) / 10 : 0,
-      },
-      {
-        name: "Connection Requests",
-        count: connSent,
-        percentage: total > 0 ? Math.round((connSent / total) * 1000) / 10 : 0,
-      },
-      {
-        name: "Connections Accepted",
-        count: connAccepted,
-        percentage: connSent > 0 ? Math.round((connAccepted / connSent) * 1000) / 10 : 0,
-      },
-      {
-        name: "Replied",
-        count: replyCount,
-        percentage: msgSent > 0 ? Math.round((replyCount / msgSent) * 1000) / 10 : 0,
-      },
-    ];
-
-    logger.actionComplete("fetchConversionFunnel", { correlationId }, { stages: stages.length });
-    return { stages };
-  } catch (error: any) {
-    logger.actionError("fetchConversionFunnel", { correlationId }, error);
     throw error;
   }
 }
