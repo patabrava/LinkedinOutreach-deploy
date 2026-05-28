@@ -1005,6 +1005,18 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
         mocks["mark_followup_failed"] = stack.enter_context(
             patch.object(sender_mod, "mark_followup_failed", MagicMock())
         )
+        mocks["mark_followup_skipped"] = stack.enter_context(
+            patch.object(sender_mod, "mark_followup_skipped", MagicMock())
+        )
+        mocks["_record_reply_at_send_time"] = stack.enter_context(
+            patch.object(sender_mod, "_record_reply_at_send_time", MagicMock())
+        )
+        mocks["extract_last_bubble"] = stack.enter_context(
+            patch.object(sender_mod, "extract_last_bubble", AsyncMock(return_value=None))
+        )
+        mocks["classify_last_sender"] = stack.enter_context(
+            patch.object(sender_mod, "classify_last_sender", MagicMock(return_value="us"))
+        )
         mocks["resolve_followup_message"] = stack.enter_context(
             patch.object(
                 sender_mod,
@@ -1073,6 +1085,35 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
         mocks["send_message"].assert_awaited_once()
         mocks["send_sales_navigator_message"].assert_not_awaited()
         mocks["mark_followup_sent"].assert_called_once()
+
+    async def test_reply_followup_sends_even_when_latest_bubble_is_from_lead(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from sender import process_followup_one, SURFACE_MESSAGE
+
+        page = self._build_mock_page()
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        client = MagicMock()
+        followup = self._build_followup()
+        followup["followup_type"] = "REPLY"
+
+        stack, mocks = self._patches(
+            surface_result=(page, SURFACE_MESSAGE),
+        )
+        mocks["extract_last_bubble"].return_value = {
+            "sender": "Marina Schulz",
+            "text": "Danke dir, passt aktuell nicht.",
+            "is_outbound": False,
+        }
+        mocks["classify_last_sender"].return_value = "lead"
+        with stack:
+            result = await process_followup_one(context, client, followup)
+
+        self.assertEqual(result, "sent")
+        mocks["send_message"].assert_awaited_once()
+        mocks["mark_followup_sent"].assert_called_once()
+        mocks["mark_followup_skipped"].assert_not_called()
+        mocks["_record_reply_at_send_time"].assert_not_called()
 
     async def test_fails_permanently_when_no_surface(self):
         from unittest.mock import AsyncMock, MagicMock

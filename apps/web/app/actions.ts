@@ -750,7 +750,7 @@ export async function approveFollowup(followupId: string, draftText: string) {
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-    const args = [senderPath, "--followup"];
+    const args = [senderPath, "--followup", "--followup-id", followupId];
     spawnTrackedWorker({
       execPath: execToUse,
       args,

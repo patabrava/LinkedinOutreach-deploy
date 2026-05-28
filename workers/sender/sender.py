@@ -3181,8 +3181,9 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
 
         message_page, surface = await open_followup_message_surface(page)
 
-        # --- Just-in-time reply check (Sales Navigator surface deliberately skipped) ---
-        if surface != SURFACE_SALES_NAVIGATOR:
+        # --- Just-in-time nudge guard (Sales Navigator surface deliberately skipped) ---
+        followup_type = str(followup.get("followup_type") or "").upper()
+        if followup_type == "NUDGE" and surface != SURFACE_SALES_NAVIGATOR:
             try:
                 bubble = await extract_last_bubble(message_page)
             except Exception as bubble_exc:
@@ -3223,8 +3224,8 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
             # bubble is None → fresh thread / loader hadn't finished → fall through to send (fail-open).
         else:
             logger.debug(
-                "Reply check skipped: Sales Navigator surface",
-                {"followupId": followup_id, "leadId": lead_id},
+                "Send-time nudge reply check skipped",
+                {"followupId": followup_id, "leadId": lead_id, "followupType": followup_type, "surface": surface},
             )
 
         if surface == SURFACE_SALES_NAVIGATOR:
