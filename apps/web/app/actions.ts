@@ -33,6 +33,7 @@ const MESSAGE_ONLY_FEED_STATUSES = [
   "MESSAGE_ONLY_READY",
   "MESSAGE_ONLY_APPROVED",
 ] as const;
+const CUSTOM_OUTREACH_STATUS_PAGE_SIZE = 1000;
 const CONNECT_ONLY_SEQUENCE_NAME = "SEQUENZ b ohne Vertrag";
 const DEFAULT_CONNECT_MESSAGE_SEQUENCE_NAME = "Default Sequence";
 
@@ -518,6 +519,74 @@ export type CustomOutreachBatchSummary = {
   failed_count: number;
 };
 
+type LeadStatusByBatchRow = {
+  batch_id: number | null;
+  status: string | null;
+};
+
+function buildCustomOutreachBatchSummaries(
+  batches: Array<{ id: number; name: string; batch_intent: "custom_outreach"; created_at: string }>,
+  leadStatuses: LeadStatusByBatchRow[]
+): CustomOutreachBatchSummary[] {
+  const countsByBatch = new Map<number, Record<string, number>>();
+
+  for (const row of leadStatuses) {
+    if (typeof row.batch_id !== "number") continue;
+    const counts = countsByBatch.get(row.batch_id) ?? {};
+    const status = row.status || "UNKNOWN";
+    counts[status] = (counts[status] ?? 0) + 1;
+    countsByBatch.set(row.batch_id, counts);
+  }
+
+  return batches.map((batch) => {
+    const counts = countsByBatch.get(batch.id) ?? {};
+    const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+
+    return {
+      id: batch.id,
+      name: batch.name,
+      batch_intent: "custom_outreach" as const,
+      lead_count: total,
+      draft_count: (counts["DRAFT_READY"] ?? 0) + (counts["APPROVED"] ?? 0),
+      approved_count: counts["APPROVED"] ?? 0,
+      new_count: counts["NEW"] ?? 0,
+      enriched_count: counts["ENRICHED"] ?? 0,
+      draft_ready_count: counts["DRAFT_READY"] ?? 0,
+      sent_count: counts["SENT"] ?? 0,
+      failed_count: (counts["FAILED"] ?? 0) + (counts["ENRICH_FAILED"] ?? 0),
+    };
+  });
+}
+
+async function fetchCustomOutreachLeadStatuses(
+  client: ReturnType<typeof supabaseAdmin>,
+  batchIds: number[]
+): Promise<LeadStatusByBatchRow[]> {
+  const rows: LeadStatusByBatchRow[] = [];
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await client
+      .from("leads")
+      .select("batch_id, status")
+      .in("batch_id", batchIds)
+      .range(offset, offset + CUSTOM_OUTREACH_STATUS_PAGE_SIZE - 1);
+
+    if (error) {
+      throw error;
+    }
+
+    const page = (data || []) as LeadStatusByBatchRow[];
+    rows.push(...page);
+
+    if (page.length < CUSTOM_OUTREACH_STATUS_PAGE_SIZE) {
+      return rows;
+    }
+
+    offset += CUSTOM_OUTREACH_STATUS_PAGE_SIZE;
+  }
+}
+
 export async function fetchCustomOutreachBatchSummaries(): Promise<CustomOutreachBatchSummary[]> {
   if (!isSupabaseAdminConfigured()) {
     return [];
@@ -534,38 +603,20 @@ export async function fetchCustomOutreachBatchSummaries(): Promise<CustomOutreac
     throw error;
   }
 
-  const summaries = await Promise.all(
-    (batches || []).map(async (batch) => {
-      const { data: statusRows, error: statusErr } = await client
-        .from("leads")
-        .select("status")
-        .eq("batch_id", batch.id);
-      if (statusErr) throw statusErr;
+  const customBatches = (batches || []) as Array<{
+    id: number;
+    name: string;
+    batch_intent: "custom_outreach";
+    created_at: string;
+  }>;
+  const batchIds = customBatches.map((batch) => batch.id);
+  if (batchIds.length === 0) {
+    return [];
+  }
 
-      const counts: Record<string, number> = {};
-      for (const row of statusRows ?? []) {
-        counts[row.status] = (counts[row.status] ?? 0) + 1;
-      }
-      const total = (statusRows ?? []).length;
+  const leadStatuses = await fetchCustomOutreachLeadStatuses(client, batchIds);
 
-      return {
-        id: batch.id,
-        name: batch.name,
-        batch_intent: "custom_outreach" as const,
-        lead_count: total,
-        // legacy aggregates kept for unchanged consumers
-        draft_count: (counts["DRAFT_READY"] ?? 0) + (counts["APPROVED"] ?? 0),
-        approved_count: counts["APPROVED"] ?? 0,
-        new_count: counts["NEW"] ?? 0,
-        enriched_count: counts["ENRICHED"] ?? 0,
-        draft_ready_count: counts["DRAFT_READY"] ?? 0,
-        sent_count: counts["SENT"] ?? 0,
-        failed_count: (counts["FAILED"] ?? 0) + (counts["ENRICH_FAILED"] ?? 0),
-      };
-    })
-  );
-
-  return summaries;
+  return buildCustomOutreachBatchSummaries(customBatches, leadStatuses);
 }
 
 export async function saveOutreachSequence(input: {

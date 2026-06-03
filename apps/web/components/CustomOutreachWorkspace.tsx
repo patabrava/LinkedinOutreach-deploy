@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
 
 import {
   approveAndSendAllDrafts,
   approveDraft,
+  fetchCustomOutreachBatchSummaries,
   fetchDraftFeed,
   rejectDraft,
   sendLeadNow,
@@ -86,7 +86,7 @@ type Props = {
 };
 
 export function CustomOutreachWorkspace({ batches }: Props) {
-  const router = useRouter();
+  const [batchSummaries, setBatchSummaries] = useState<CustomOutreachBatchSummary[]>(batches);
   const [selectedBatchId, setSelectedBatchId] = useState<number | null>(batches[0]?.id ?? null);
   const [drafts, setDrafts] = useState<DraftRow[]>([]);
   const [draftEdits, setDraftEdits] = useState<DraftEditMap>({});
@@ -99,15 +99,24 @@ export function CustomOutreachWorkspace({ batches }: Props) {
   const [workingLeadId, setWorkingLeadId] = useState<string | null>(null);
 
   const selectedBatch = useMemo(
-    () => batches.find((batch) => batch.id === selectedBatchId) || null,
-    [batches, selectedBatchId]
+    () => batchSummaries.find((batch) => batch.id === selectedBatchId) || null,
+    [batchSummaries, selectedBatchId]
   );
 
   useEffect(() => {
+    setBatchSummaries(batches);
     if (!selectedBatchId && batches[0]?.id) {
       setSelectedBatchId(batches[0].id);
     }
   }, [batches, selectedBatchId]);
+
+  const syncBatchSummaries = async () => {
+    const nextSummaries = await fetchCustomOutreachBatchSummaries();
+    setBatchSummaries(nextSummaries);
+    if (selectedBatchId && !nextSummaries.some((batch) => batch.id === selectedBatchId)) {
+      setSelectedBatchId(nextSummaries[0]?.id ?? null);
+    }
+  };
 
   const syncDrafts = async (showLoading = false) => {
     if (!selectedBatchId) {
@@ -166,6 +175,7 @@ export function CustomOutreachWorkspace({ batches }: Props) {
     }
 
     const interval = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
       syncDrafts(false);
     }, 4000);
 
@@ -242,8 +252,7 @@ export function CustomOutreachWorkspace({ batches }: Props) {
       });
       clearDraftEdit(draft.leadId);
       setStatusMessage(`Approved ${draft.name || "draft"}.`);
-      await syncDrafts(false);
-      router.refresh();
+      await Promise.all([syncDrafts(false), syncBatchSummaries()]);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to approve draft.";
       setErrorMessage(message);
@@ -275,8 +284,7 @@ export function CustomOutreachWorkspace({ batches }: Props) {
       }
       clearDraftEdit(draft.leadId);
       setStatusMessage(`Queued ${draft.name || "draft"} for sending.`);
-      await syncDrafts(false);
-      router.refresh();
+      await Promise.all([syncDrafts(false), syncBatchSummaries()]);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to send draft.";
       setErrorMessage(message);
@@ -292,8 +300,7 @@ export function CustomOutreachWorkspace({ batches }: Props) {
       await rejectDraft(draft.leadId);
       clearDraftEdit(draft.leadId);
       setStatusMessage(`Rejected ${draft.name || "draft"}.`);
-      await syncDrafts(false);
-      router.refresh();
+      await Promise.all([syncDrafts(false), syncBatchSummaries()]);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to reject draft.";
       setErrorMessage(message);
@@ -314,8 +321,7 @@ export function CustomOutreachWorkspace({ batches }: Props) {
           ? `Approved ${result.approvedCount} draft${result.approvedCount === 1 ? "" : "s"}.`
           : "No drafts were eligible for bulk approval."
       );
-      await syncDrafts(false);
-      router.refresh();
+      await Promise.all([syncDrafts(false), syncBatchSummaries()]);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Bulk approve and send failed.";
       setErrorMessage(message);
@@ -368,7 +374,7 @@ export function CustomOutreachWorkspace({ batches }: Props) {
               Each batch is an isolated review queue. Future sequence edits will not change generated drafts.
             </div>
             <div style={{ display: "grid", gap: 10 }}>
-              {batches.map((batch) => {
+              {batchSummaries.map((batch) => {
                 const active = batch.id === selectedBatchId;
                 return (
                   <div key={batch.id} style={{ display: "grid", gap: 6 }}>
@@ -404,7 +410,7 @@ export function CustomOutreachWorkspace({ batches }: Props) {
                           window.alert("Failed to start enrichment.");
                           return;
                         }
-                        router.refresh();
+                        await Promise.all([syncDrafts(false), syncBatchSummaries()]);
                       }}
                     >
                       ENRICH NOW

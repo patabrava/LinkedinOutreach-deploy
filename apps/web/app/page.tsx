@@ -1,3 +1,5 @@
+import { Suspense } from "react";
+
 import { SequenceEditor } from "../components/SequenceEditor";
 import { requireServerSession } from "../lib/auth";
 import { fetchLeadBatches, fetchOutreachSequences } from "./actions";
@@ -5,12 +7,17 @@ import { fetchLeadBatches, fetchOutreachSequences } from "./actions";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-export default async function MissionControlPage() {
-  const session = await requireServerSession("/");
+async function MissionControlSequences() {
   const [sequences, batches] = await Promise.all([
     fetchOutreachSequences(),
     fetchLeadBatches(),
   ]);
+
+  return <SequenceEditor sequences={sequences} batches={batches} />;
+}
+
+export default async function MissionControlPage() {
+  const session = await requireServerSession("/");
 
   return (
     <div className="page">
@@ -43,7 +50,15 @@ export default async function MissionControlPage() {
         </div>
       </div>
 
-      <SequenceEditor sequences={sequences} batches={batches} />
+      <Suspense
+        fallback={
+          <div className="card" style={{ marginTop: 18 }}>
+            <div className="muted">Loading sequences and batch assignments...</div>
+          </div>
+        }
+      >
+        <MissionControlSequences />
+      </Suspense>
     </div>
   );
 }

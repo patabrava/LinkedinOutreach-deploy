@@ -146,6 +146,7 @@ export function StartEnrichmentButton({ mode = "message", variant = "details", s
       return;
     }
     const intervalId = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
       refreshStatus({ silent: true }).catch(() => undefined);
     }, POLL_INTERVAL_MS);
     return () => clearInterval(intervalId);

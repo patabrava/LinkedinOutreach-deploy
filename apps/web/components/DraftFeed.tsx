@@ -226,7 +226,10 @@ export function DraftFeed({ drafts, initialOutreachMode = "connect_message", var
     }
 
     fetchDrafts();
-    const interval = setInterval(() => fetchDrafts(), POLL_INTERVAL_MS);
+    const interval = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      fetchDrafts();
+    }, POLL_INTERVAL_MS);
 
     pollingTimeoutRef.current = setTimeout(() => {
       if (isPollingRef.current) {
