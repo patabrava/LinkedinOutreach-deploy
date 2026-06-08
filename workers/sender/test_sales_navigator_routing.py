@@ -451,46 +451,37 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual(subject, "Kurze Frage zu deiner bAV")
 
-    def test_strip_sales_navigator_signature_keeps_manual_closing_without_name(self):
+    def test_strip_sales_navigator_signature_preserves_manual_closing_with_name(self):
         body = (
             "Hi Marina,\n\n"
             "freut mich, dass wir uns hier vernetzen.\n\n"
             "Viele Grüße,\nKatharina"
         )
 
-        self.assertEqual(
-            strip_sales_navigator_signature(body),
-            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.\n\nViele Grüße,",
-        )
+        self.assertEqual(strip_sales_navigator_signature(body), body)
 
-    def test_strip_sales_navigator_signature_keeps_single_line_closing_without_name(self):
+    def test_strip_sales_navigator_signature_preserves_single_line_closing_with_name(self):
         body = (
             "Hi Marina,\n\n"
             "freut mich, dass wir uns hier vernetzen.\n\n"
             "Viele Grüße, Katharina"
         )
 
-        self.assertEqual(
-            strip_sales_navigator_signature(body),
-            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.\n\nViele Grüße,",
-        )
+        self.assertEqual(strip_sales_navigator_signature(body), body)
 
     def test_strip_sales_navigator_signature_keeps_non_signature_body(self):
         body = "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen."
 
         self.assertEqual(strip_sales_navigator_signature(body), body)
 
-    def test_build_sales_navigator_body_removes_katharina_signature(self):
+    def test_build_sales_navigator_body_preserves_signature(self):
         message = (
             "Hi Marina,\n\n"
             "freut mich, dass wir uns hier vernetzen.\n\n"
             "Viele Grüße,\nKatharina"
         )
 
-        self.assertEqual(
-            build_sales_navigator_body(message),
-            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.\n\nViele Grüße,",
-        )
+        self.assertEqual(build_sales_navigator_body(message), message)
 
     def test_mark_message_only_processing_locks_connected_without_legacy_timestamp(self):
         lead = {"id": "lead-1", "status": "CONNECTED", "sent_at": None}
@@ -999,6 +990,9 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
         mocks["send_message"] = stack.enter_context(
             patch.object(sender_mod, "send_message", AsyncMock())
         )
+        mocks["message_send_start"] = stack.enter_context(
+            patch.object(sender_mod.logger, "message_send_start", MagicMock())
+        )
         mocks["mark_followup_sent"] = stack.enter_context(
             patch.object(sender_mod, "mark_followup_sent", MagicMock())
         )
@@ -1054,6 +1048,7 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "sent")
         mocks["send_sales_navigator_message"].assert_awaited_once()
         mocks["send_message"].assert_not_awaited()
+        mocks["message_send_start"].assert_called_once()
         mocks["mark_followup_sent"].assert_called_once()
         mocks["mark_followup_failed"].assert_not_called()
 
@@ -1061,8 +1056,7 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
         sent_page, subject, body = call_args.args
         self.assertIs(sent_page, sales_page)
         self.assertEqual(subject, "Kurze Frage zu deiner bAV")
-        # The Sales Navigator body must not duplicate the signature name.
-        self.assertNotIn("\nKatharina", body)
+        self.assertIn("\nKatharina", body)
         self.assertIn("Hi Marina", body)
 
     async def test_routes_to_direct_message_when_dm_surface_returned(self):
@@ -1084,6 +1078,7 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "sent")
         mocks["send_message"].assert_awaited_once()
         mocks["send_sales_navigator_message"].assert_not_awaited()
+        mocks["message_send_start"].assert_called_once()
         mocks["mark_followup_sent"].assert_called_once()
 
     async def test_reply_followup_sends_even_when_latest_bubble_is_from_lead(self):
@@ -1111,9 +1106,45 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "sent")
         mocks["send_message"].assert_awaited_once()
+        mocks["message_send_start"].assert_called_once()
         mocks["mark_followup_sent"].assert_called_once()
         mocks["mark_followup_skipped"].assert_not_called()
         mocks["_record_reply_at_send_time"].assert_not_called()
+
+    async def test_nudge_reply_skip_does_not_log_send_start(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from sender import process_followup_one, SURFACE_MESSAGE
+
+        page = self._build_mock_page()
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        client = MagicMock()
+        followup = self._build_followup()
+        followup["followup_type"] = "NUDGE"
+
+        stack, mocks = self._patches(
+            surface_result=(page, SURFACE_MESSAGE),
+        )
+        mocks["extract_last_bubble"].return_value = {
+            "sender": "Marina Schulz",
+            "text": "Danke, ich melde mich bei Interesse.",
+            "is_outbound": False,
+        }
+        mocks["classify_last_sender"].return_value = "lead"
+        with stack:
+            result = await process_followup_one(context, client, followup)
+
+        self.assertEqual(result, "skipped")
+        mocks["send_message"].assert_not_awaited()
+        mocks["send_sales_navigator_message"].assert_not_awaited()
+        mocks["message_send_start"].assert_not_called()
+        mocks["mark_followup_sent"].assert_not_called()
+        mocks["mark_followup_skipped"].assert_called_once_with(
+            client,
+            followup["id"],
+            "reply_detected_at_send_time",
+        )
+        mocks["_record_reply_at_send_time"].assert_called_once()
 
     async def test_fails_permanently_when_no_surface(self):
         from unittest.mock import AsyncMock, MagicMock

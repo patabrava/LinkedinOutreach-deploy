@@ -55,6 +55,7 @@ def _resolve_scraper_auth_path() -> Path:
 
 AUTH_STATE_PATH = _resolve_scraper_auth_path()
 DAILY_SEND_DEFAULT = 50
+MESSAGE_ONLY_PROBE_LIMIT_DEFAULT = 200
 SEQUENCE_INTERVAL_DEFAULT_DAYS = 3
 LEAD_MESSAGE_ONLY_MAX_RETRIES = 3
 FOLLOWUP_PROCESSING_STALE_MINUTES = 45
@@ -163,10 +164,38 @@ def _should_force_headless(requested_headless: bool) -> bool:
     return False
 
 
+def _local_chromium_executable() -> Optional[str]:
+    configured = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "").strip()
+    candidates = [
+        configured,
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+    return None
+
+
 async def open_browser(headless: bool = False) -> Tuple[Playwright, Browser, BrowserContext]:
     playwright = await async_playwright().start()
     effective_headless = _should_force_headless(headless)
-    browser = await playwright.chromium.launch(headless=effective_headless)
+    try:
+        browser = await playwright.chromium.launch(headless=effective_headless)
+    except Exception as exc:
+        executable_path = _local_chromium_executable()
+        if not executable_path:
+            await playwright.stop()
+            raise
+        logger.warn(
+            "Managed Playwright Chromium unavailable; falling back to local browser executable",
+            data={"executable_path": executable_path},
+            error=exc,
+        )
+        browser = await playwright.chromium.launch(headless=effective_headless, executable_path=executable_path)
     # Use a copy of the auth state to avoid file locking conflicts with scraper
     storage_state = None
     if AUTH_STATE_PATH.exists():
@@ -274,6 +303,23 @@ def resolve_daily_send_limit() -> int:
     except Exception:
         parsed_limit = DAILY_SEND_DEFAULT
     return max(parsed_limit, 1)
+
+
+def resolve_message_only_probe_limit(send_quota_remaining: int) -> int:
+    if send_quota_remaining <= 0:
+        return 0
+
+    env_limit = os.getenv("MESSAGE_ONLY_PROBE_LIMIT")
+    try:
+        parsed_limit = int(env_limit) if env_limit else MESSAGE_ONLY_PROBE_LIMIT_DEFAULT
+    except Exception:
+        parsed_limit = MESSAGE_ONLY_PROBE_LIMIT_DEFAULT
+
+    return max(send_quota_remaining, parsed_limit)
+
+
+def message_only_send_quota_reached(sent_count: int, send_quota_remaining: int) -> bool:
+    return send_quota_remaining <= 0 or sent_count >= send_quota_remaining
 
 
 def fetch_approved_leads(client: Client, limit: int) -> list[Dict[str, Any]]:
@@ -428,42 +474,12 @@ def build_sales_navigator_subject(lead: Dict[str, Any], message: str = "") -> st
 
 
 def build_sales_navigator_body(message: str) -> str:
-    return strip_sales_navigator_signature(message)
+    return (message or "").strip()
 
 
 def strip_sales_navigator_signature(message: str) -> str:
-    """Remove the manual sign-off from Sales Navigator bodies.
-
-    Normal direct messages keep the full template. Sales Navigator/InMail already
-    shows the sender identity separately, so duplicating the manual closing adds
-    a second footer-like signature.
-    """
-    lines = [line.rstrip() for line in (message or "").splitlines()]
-    while lines and not lines[-1].strip():
-        lines.pop()
-
-    signoff_re = re.compile(
-        r"^(?P<closing>viele grüße|beste grüße|liebe grüße|herzliche grüße|mit freundlichen grüßen|freundliche grüße)(?P<punct>[,!]?)\s*(?P<name>.*)?$",
-        re.I,
-    )
-    if not lines:
-        return ""
-
-    # Sales Navigator renders the sender identity below the body. Keep the
-    # human closing phrase, but remove the duplicated name.
-    last_idx = len(lines) - 1
-    last_line = lines[last_idx].strip()
-    if last_idx > 0 and signoff_re.match(lines[last_idx - 1].strip()) and last_line:
-        return "\n".join(lines[:last_idx]).strip()
-
-    match = signoff_re.match(last_line)
-    if match and (match.group("name") or "").strip():
-        closing = match.group("closing")
-        punct = match.group("punct") or ","
-        lines[last_idx] = f"{closing}{punct}"
-        return "\n".join(lines).strip()
-
-    return "\n".join(lines).strip()
+    """Legacy helper kept for compatibility with older tests/imports."""
+    return (message or "").strip()
 
 
 def _connect_or_pending_label_matches(label: str, lead_name: str = "") -> bool:
@@ -3165,7 +3181,6 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
         mark_followup_failed(client, followup_id, error_msg, permanent=True)
         return "failed"
 
-    logger.message_send_start(lead_id or "unknown", {"followupId": followup_id}, message)
     logger.debug(
         f"Followup message preview",
         {"followupId": followup_id},
@@ -3228,6 +3243,7 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
                 {"followupId": followup_id, "leadId": lead_id, "followupType": followup_type, "surface": surface},
             )
 
+        logger.message_send_start(lead_id or "unknown", {"followupId": followup_id}, message)
         if surface == SURFACE_SALES_NAVIGATOR:
             logger.info(
                 "Followup routing through Sales Navigator composer",
@@ -4285,7 +4301,17 @@ async def main() -> None:
                 allow_missing_invite_evidence = targeted_connect_only_probe and not _is_message_only_candidate(lead)
                 leads_to_process = [lead]
             else:
-                leads_to_process = fetch_message_only_leads(client, remaining, args.batch_id)
+                probe_limit = resolve_message_only_probe_limit(remaining)
+                logger.info(
+                    "Message-only probe budget computed",
+                    data={
+                        "send_quota_remaining": remaining,
+                        "probe_limit": probe_limit,
+                        "env": os.getenv("MESSAGE_ONLY_PROBE_LIMIT"),
+                        "default": MESSAGE_ONLY_PROBE_LIMIT_DEFAULT,
+                    },
+                )
+                leads_to_process = fetch_message_only_leads(client, probe_limit, args.batch_id)
                 if not leads_to_process:
                     logger.info(
                         "No message-only leads to process (CONNECT_ONLY_SENT/MESSAGE_ONLY_*)",
@@ -4309,6 +4335,17 @@ async def main() -> None:
 
                 for lead in leads_to_process:
                     try:
+                        if message_only_send_quota_reached(sent_count, remaining):
+                            logger.info(
+                                "Message-only send quota reached during probe batch",
+                                data={
+                                    "sent": sent_count,
+                                    "send_quota_remaining": remaining,
+                                    "probed": sent_count + pending_count + retry_count + failed_count,
+                                    "candidate_count": len(leads_to_process),
+                                },
+                            )
+                            break
                         if not mark_message_only_processing(
                             client,
                             lead,
