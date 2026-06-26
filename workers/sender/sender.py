@@ -6,6 +6,7 @@ import asyncio
 import os
 import random
 import sys
+import unicodedata
 from datetime import datetime, time as dtime, timedelta, timezone
 import re
 from pathlib import Path
@@ -29,10 +30,28 @@ from scraper import (  # noqa: E402
     capture_connect_failure_screenshot,
     confirm_connection_request_sent,
     detect_weekly_invite_limit,
+    normalize_person_name as normalize_linkedin_person_name,
     send_connection_request,
 )
 
-load_dotenv()
+
+def load_runtime_env() -> None:
+    """Load shared repo env files for both daemon and direct worker runs."""
+    sender_dir = Path(__file__).resolve().parent
+    repo_root = sender_dir.parent.parent
+    for env_path in (
+        repo_root / ".env",
+        repo_root / "mcp-server" / ".env",
+        repo_root / "workers" / ".env",
+        repo_root / "apps" / "web" / ".env.local",
+        repo_root / "apps" / "web" / ".env",
+        sender_dir / ".env",
+    ):
+        if env_path.exists():
+            load_dotenv(env_path, override=False)
+
+
+load_runtime_env()
 
 # Initialize logger
 logger = get_logger("sender")
@@ -55,14 +74,24 @@ def _resolve_scraper_auth_path() -> Path:
 
 AUTH_STATE_PATH = _resolve_scraper_auth_path()
 DAILY_SEND_DEFAULT = 50
+FOLLOWUP_BATCH_LIMIT_DEFAULT = 20
 MESSAGE_ONLY_PROBE_LIMIT_DEFAULT = 200
 SEQUENCE_INTERVAL_DEFAULT_DAYS = 3
 LEAD_MESSAGE_ONLY_MAX_RETRIES = 3
 FOLLOWUP_PROCESSING_STALE_MINUTES = 45
+NUDGE_ACTIVE_STATUSES = {"APPROVED", "PROCESSING", "RETRY_LATER"}
+OWN_SENDER_NAME_DEFAULTS = ("Katharina Hoffmann",)
+NETWORK_OUTAGE_PATTERNS = (
+    "ERR_INTERNET_DISCONNECTED",
+    "nodename nor servname provided",
+    "Name or service not known",
+    "Temporary failure in name resolution",
+    "network is unreachable",
+)
 LEAD_SELECT_FIELDS_CORE = (
     "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
     "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
-    "sequence_id, sequence_step, sequence_started_at, sequence_last_sent_at, "
+    "error_message, sequence_id, sequence_step, sequence_started_at, sequence_last_sent_at, "
     "batch_id, outreach_mode, profile_data"
 )
 LEAD_SELECT_FIELDS_EXTENDED = f"{LEAD_SELECT_FIELDS_CORE}, csv_batch_id, ai_tags"
@@ -71,8 +100,13 @@ DIRECT_MESSAGE_COMPOSER_SELECTOR = (
     "section[role='dialog'] div[role='textbox'][contenteditable='true'], "
     "div.msg-form__contenteditable[contenteditable='true'], "
     "div[aria-label*='Write a message'][contenteditable='true'], "
+    "div[aria-label*='Nachricht verfassen'][contenteditable='true'], "
     "div[aria-label*='Nachricht schreiben'][contenteditable='true'], "
-    "div[role='textbox'][contenteditable='true']:not([id^='g-recaptcha']), "
+    "div[aria-placeholder*='Write a message'][contenteditable='true'], "
+    "div[aria-placeholder*='Nachricht'][contenteditable='true'], "
+    "div[data-placeholder*='Write a message'][contenteditable='true'], "
+    "div[data-placeholder*='Nachricht'][contenteditable='true'], "
+    "form.msg-form div[role='textbox'][contenteditable='true'], "
     "div[id^='msg-form-ember'] div[role='textbox'][contenteditable='true']"
 )
 DIRECT_MESSAGE_SEND_BUTTON_SELECTOR = (
@@ -91,6 +125,98 @@ DIRECT_MESSAGE_SCOPED_SEND_ROOT_SELECTORS = (
     "xpath=ancestor::*[contains(@class,'msg-overlay-conversation-bubble')][1]",
     "xpath=ancestor::*[@role='dialog'][1]",
 )
+
+
+class NetworkOutageError(RuntimeError):
+    """Raised when the whole run should stop instead of retrying every row."""
+
+
+class PostSendVerificationError(RuntimeError):
+    """Raised after a send click when LinkedIn's latest bubble cannot be proven."""
+
+
+def is_network_outage_error(error: Any) -> bool:
+    text = str(error or "")
+    lowered = text.lower()
+    return any(pattern.lower() in lowered for pattern in NETWORK_OUTAGE_PATTERNS)
+
+
+def lead_display_name(lead: Dict[str, Any]) -> str:
+    return " ".join(
+        part for part in [
+            str(lead.get("first_name") or "").strip(),
+            str(lead.get("last_name") or "").strip(),
+        ]
+        if part
+    ).strip()
+
+
+def normalize_direct_identity_match_text(value: Any) -> str:
+    normalized = normalize_linkedin_person_name(value)
+    folded = unicodedata.normalize("NFKD", normalized.replace("ß", "ss"))
+    return "".join(ch for ch in folded if not unicodedata.combining(ch)).strip()
+
+
+def direct_thread_text_matches_lead(text: str, lead: Dict[str, Any]) -> bool:
+    haystack = normalize_direct_identity_match_text(text)
+    if not haystack:
+        return False
+
+    full_name = normalize_direct_identity_match_text(lead_display_name(lead))
+    first_name = normalize_direct_identity_match_text(lead.get("first_name"))
+    last_name = normalize_direct_identity_match_text(lead.get("last_name"))
+    return (
+        bool(full_name and (full_name == haystack or full_name in haystack or haystack in full_name))
+        or bool(first_name and last_name and first_name in haystack and last_name in haystack)
+        or bool(first_name and not last_name and first_name in haystack)
+    )
+
+
+def configured_own_sender_names() -> list[str]:
+    raw = (
+        os.getenv("LINKEDIN_ACCOUNT_NAMES")
+        or os.getenv("LINKEDIN_ACCOUNT_NAME")
+        or ""
+    )
+    configured = [
+        part.strip()
+        for part in re.split(r"[,;|]", raw)
+        if part.strip()
+    ]
+    names = [*configured, *OWN_SENDER_NAME_DEFAULTS]
+    unique: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        normalized = normalize_linkedin_person_name(name)
+        if normalized and normalized not in seen:
+            unique.append(name)
+            seen.add(normalized)
+    return unique
+
+
+def sender_name_is_own_account(sender_name: str) -> bool:
+    normalized_sender = normalize_linkedin_person_name(sender_name)
+    if not normalized_sender:
+        return False
+    for own_name in configured_own_sender_names():
+        normalized_own = normalize_linkedin_person_name(own_name)
+        if normalized_own and (
+            normalized_sender == normalized_own
+            or normalized_sender in normalized_own
+            or normalized_own in normalized_sender
+        ):
+            return True
+    return False
+
+
+def direct_message_identity_text_is_generic(text: str) -> bool:
+    normalized = normalize_linkedin_person_name(text)
+    return normalized in {
+        "neue nachricht",
+        "new message",
+        "nachricht",
+        "message",
+    }
 SEQUENCE_DEFAULT_MESSAGES = {
     "first_message": (
         "Hi {first_name},\n\n"
@@ -247,6 +373,19 @@ async def human_type(page: Page, text: str) -> None:
             await asyncio.sleep(random.uniform(0.9, 1.4))
 
 
+async def insert_composer_text(page: Page, target: Any, text: str) -> str:
+    """Insert outbound text without turning newlines into Enter key presses."""
+    safe_text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    try:
+        await target.click()
+        await page.keyboard.insert_text(safe_text)
+        return "insert_text"
+    except Exception as insert_error:
+        logger.warn("Composer insert_text failed; falling back to fill", error=insert_error)
+        await target.fill(safe_text, timeout=10_000)
+        return "fill"
+
+
 def today_utc_iso() -> str:
     now = datetime.utcnow()
     start = datetime.combine(now.date(), dtime.min)
@@ -266,6 +405,22 @@ def sent_today_count(client: Client) -> int:
     count = getattr(resp, "count", None) or 0
     logger.db_result("select-count", "leads", {"status": "SENT"}, count)
     logger.info(f"Sent today: {count}", data={"count": count})
+    return count
+
+
+def followups_sent_today_count(client: Client) -> int:
+    start_iso = today_utc_iso()
+    logger.db_query("select-count", "followups", {"status": "SENT"}, {"since": start_iso})
+    resp = (
+        client.table("followups")
+        .select("id", count="exact")
+        .eq("status", "SENT")
+        .gte("sent_at", start_iso)
+        .execute()
+    )
+    count = getattr(resp, "count", None) or 0
+    logger.db_result("select-count", "followups", {"status": "SENT"}, count)
+    logger.info(f"Followups sent today: {count}", data={"count": count})
     return count
 
 
@@ -303,6 +458,18 @@ def resolve_daily_send_limit() -> int:
     except Exception:
         parsed_limit = DAILY_SEND_DEFAULT
     return max(parsed_limit, 1)
+
+
+def resolve_followup_batch_limit(send_quota_remaining: int) -> int:
+    if send_quota_remaining <= 0:
+        return 0
+
+    env_limit = os.getenv("FOLLOWUP_BATCH_LIMIT")
+    try:
+        parsed_limit = int(env_limit) if env_limit else FOLLOWUP_BATCH_LIMIT_DEFAULT
+    except Exception:
+        parsed_limit = FOLLOWUP_BATCH_LIMIT_DEFAULT
+    return min(max(parsed_limit, 1), send_quota_remaining)
 
 
 def resolve_message_only_probe_limit(send_quota_remaining: int) -> int:
@@ -358,9 +525,23 @@ def _is_message_only_candidate(lead: Dict[str, Any]) -> bool:
         return False
     if lead.get("sent_at"):
         return False
+    status = str(lead.get("status") or "").upper()
+    error_message = str(lead.get("error_message") or "").lower()
+    if status == "FAILED" and any(
+        permanent_error in error_message
+        for permanent_error in (
+            "linkedin profile unavailable",
+            "linkedin_profile_not_found",
+            "no messaging surface found",
+            "3rd-degree",
+            "restrictions",
+            "messaging disabled",
+            "not available",
+        )
+    ):
+        return False
     if lead.get("connection_sent_at") or lead.get("connection_accepted_at"):
         return True
-    status = str(lead.get("status") or "").upper()
     return status in MESSAGE_ONLY_PIPELINE_STATUSES
 
 
@@ -380,6 +561,24 @@ def normalize_linkedin_profile_url(url: str) -> str:
     if normalized.startswith("www.linkedin.com/"):
         normalized = f"https://{normalized}"
     return normalized
+
+
+async def linkedin_profile_unavailable_reason(page: Page) -> Optional[str]:
+    """Return a stable reason when LinkedIn serves a missing/unavailable profile page."""
+    try:
+        body_text = await page.locator("body").inner_text(timeout=2_000)
+    except Exception:
+        body_text = ""
+    normalized_text = re.sub(r"\s+", " ", body_text or "").strip()
+    if re.search(
+        r"(diese seite existiert nicht|this page doesn.?t exist|page not found|profile not found)",
+        normalized_text,
+        re.I,
+    ):
+        return "linkedin_profile_not_found"
+    if re.search(r"(profil.*nicht.*gefunden|profil.*nicht.*verf.gbar)", normalized_text, re.I):
+        return "linkedin_profile_not_found"
+    return None
 
 
 def _resolve_launch_sequence_id(lead: Dict[str, Any]) -> Optional[int]:
@@ -1283,25 +1482,84 @@ async def close_existing_chat_overlays(page: Page) -> int:
     closed = 0
     try:
         await page.wait_for_timeout(300)
-        for _ in range(8):
-            overlay = page.locator("div.msg-overlay-conversation-bubble").first
-            if await overlay.count() == 0:
+        for _ in range(12):
+            result = await page.evaluate(
+                """() => {
+                    const visible = (el) => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                    const overlayRoot = (el) => el.closest('[class*="msg-overlay"], [class*="msg-conversation"], [data-control-name*="overlay"]');
+                    const buttons = Array.from(document.querySelectorAll("button, [role=\"button\"]"))
+                        .map((button, index) => {
+                            const text = (button.innerText || button.textContent || '').replace(/\\s+/g, ' ').trim();
+                            const aria = (button.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
+                            const title = (button.getAttribute('title') || '').replace(/\\s+/g, ' ').trim();
+                            const icon = Array.from(button.querySelectorAll('svg, li-icon, use'))
+                                .map((node) => [
+                                    node.getAttribute('aria-label'),
+                                    node.getAttribute('data-test-icon'),
+                                    node.getAttribute('type'),
+                                    node.getAttribute('href'),
+                                    node.getAttribute('xlink:href'),
+                                ].filter(Boolean).join(' '))
+                                .join(' ');
+                            const label = `${text} ${aria} ${title}`.toLowerCase();
+                            const rect = button.getBoundingClientRect();
+                            const root = overlayRoot(button);
+                            const rootRect = root ? root.getBoundingClientRect() : null;
+                            return { button, index, text, aria, title, label, icon: icon.toLowerCase(), root, rect, rootRect };
+                        })
+                        .filter((candidate) => candidate.root && visible(candidate.button))
+                        .filter((candidate) =>
+                            candidate.label.includes('close') ||
+                            candidate.label.includes('schließen') ||
+                            candidate.label.includes('konversation schließen') ||
+                            candidate.icon.includes('close') ||
+                            candidate.icon.includes('cancel') ||
+                            candidate.text === '×' ||
+                            candidate.text === '✕'
+                        );
+                    if (!buttons.length) {
+                        const fallback = Array.from(document.querySelectorAll("button, [role=\"button\"]"))
+                            .map((button, index) => {
+                                const text = (button.innerText || button.textContent || '').replace(/\\s+/g, ' ').trim();
+                                const aria = (button.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
+                                const title = (button.getAttribute('title') || '').replace(/\\s+/g, ' ').trim();
+                                const label = `${text} ${aria} ${title}`.toLowerCase();
+                                const root = overlayRoot(button);
+                                const rect = button.getBoundingClientRect();
+                                const rootRect = root ? root.getBoundingClientRect() : null;
+                                return { button, index, text, aria, title, label, root, rect, rootRect };
+                            })
+                            .filter((candidate) => candidate.root && candidate.rootRect && visible(candidate.button))
+                            .filter((candidate) => candidate.rect.top <= candidate.rootRect.top + 58)
+                            .filter((candidate) => candidate.rect.right >= candidate.rootRect.right - 42)
+                            .filter((candidate) =>
+                                !candidate.label.includes('send') &&
+                                !candidate.label.includes('senden') &&
+                                !candidate.label.includes('more') &&
+                                !candidate.label.includes('mehr')
+                            )
+                            .sort((a, b) => b.rect.right - a.rect.right);
+                        buttons.push(...fallback.slice(0, 1));
+                    }
+                    if (!buttons.length) return { clicked: false, count: 0 };
+                    buttons[0].button.click();
+                    return {
+                        clicked: true,
+                        count: buttons.length,
+                        target: {
+                            index: buttons[0].index,
+                            text: buttons[0].text,
+                            aria: buttons[0].aria,
+                            title: buttons[0].title,
+                        },
+                    };
+                }"""
+            )
+            if not isinstance(result, dict) or not result.get("clicked"):
                 break
-            close_btn = overlay.locator(
-                "button[aria-label*='Close conversation'], "
-                "button[aria-label*='Konversation schließen'], "
-                "button[data-control-name*='close'], "
-                "button[aria-label*='Close'], "
-                "button[aria-label*='Schließen']"
-            ).first
-            if await close_btn.count() == 0:
-                break
-            try:
-                await close_btn.click(timeout=2_000)
-                closed += 1
-                await page.wait_for_timeout(150)
-            except Exception:
-                break
+            closed += 1
+            logger.debug("Closed stale chat overlay candidate", data=result.get("target") or {})
+            await page.wait_for_timeout(150)
         if closed > 0:
             logger.info(
                 f"Closed {closed} stale chat overlay(s) before opening composer",
@@ -1310,6 +1568,72 @@ async def close_existing_chat_overlays(page: Page) -> int:
     except Exception as exc:
         logger.warn("Failed during chat overlay cleanup", error=exc)
     return closed
+
+
+async def message_target_is_feed_surface(locator) -> bool:
+    try:
+        href = ((await locator.get_attribute("href")) or "").lower()
+    except Exception:
+        href = ""
+    if (
+        "/feed/update/" in href
+        or "/posts/" in href
+        or "urn:li:activity" in href
+        or "urn:li:share" in href
+        or "ugcpost" in href
+    ):
+        return True
+
+    try:
+        result = await locator.evaluate(
+            """node => {
+                const lower = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const href = lower(node.href || node.getAttribute('href') || '');
+                if (
+                    href.includes('/feed/update/') ||
+                    href.includes('/posts/') ||
+                    href.includes('urn:li:activity') ||
+                    href.includes('urn:li:share') ||
+                    href.includes('ugcpost')
+                ) return { feedSurface: true, reason: 'href', href };
+                const root = node.closest(
+                    '[class*="feed-shared"], [class*="profile-creator-shared-feed-update"], ' +
+                    '[data-urn*="activity"], [data-urn*="ugcPost"], article'
+                );
+                if (!root) return { feedSurface: false, reason: 'none' };
+                return {
+                    feedSurface: true,
+                    reason: 'feed-root',
+                    href,
+                    dataUrn: root.getAttribute('data-urn') || '',
+                    rootClass: String(root.className || '').slice(0, 160),
+                };
+            }"""
+        )
+        if isinstance(result, dict) and result.get("feedSurface"):
+            logger.warn("Skipping feed/activity messaging target", data=result)
+            return True
+    except Exception:
+        return False
+    return False
+
+
+async def first_safe_message_target(locator, kind: str):
+    try:
+        count = await locator.count()
+    except Exception:
+        return None, 0
+    for index in range(min(count, 12)):
+        candidate = locator.nth(index)
+        try:
+            if not await candidate.is_visible():
+                continue
+        except Exception:
+            pass
+        if await message_target_is_feed_surface(candidate):
+            continue
+        return candidate, count
+    return None, count
 
 
 async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
@@ -1349,9 +1673,10 @@ async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
     ]
     target_locator = None
     target_kind = ""
+    target_count = 0
     for candidate in explicit_targets:
-        if await candidate.count() > 0:
-            target_locator = candidate.first
+        target_locator, target_count = await first_safe_message_target(candidate, "explicit")
+        if target_locator is not None:
             target_kind = "explicit"
             break
 
@@ -1359,15 +1684,15 @@ async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
         generic_link = profile_container.get_by_role(
             "link", name=re.compile(r"(Message|Nachricht|InMail)", re.I)
         )
-        if await generic_link.count() > 0:
-            target_locator = generic_link.first
+        target_locator, target_count = await first_safe_message_target(generic_link, "generic_link")
+        if target_locator is not None:
             target_kind = "generic_link"
     if target_locator is None:
         generic_button = profile_container.get_by_role(
             "button", name=re.compile(r"(Message|Nachricht|InMail)", re.I)
         )
-        if await generic_button.count() > 0:
-            target_locator = generic_button.first
+        target_locator, target_count = await first_safe_message_target(generic_button, "generic_button")
+        if target_locator is not None:
             target_kind = "generic_button"
 
     if target_locator is None:
@@ -1376,7 +1701,9 @@ async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
         )
 
     logger.element_search(
-        f"followup message target ({target_kind})", 1, context={"surface": "followup"}
+        f"followup message target ({target_kind})",
+        1,
+        context={"surface": "followup", "candidateCount": target_count},
     )
 
     href = ""
@@ -1400,8 +1727,14 @@ async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
 
     is_sales_page = "linkedin.com/sales/" in (message_page.url or "")
     if is_sales_page:
-        await wait_for_sales_navigator_composer(message_page, timeout_ms=20_000)
-    if is_sales_page or await wait_for_sales_navigator_composer(message_page):
+        sales_ready = await wait_for_sales_navigator_composer(
+            message_page,
+            timeout_ms=20_000,
+            allow_body_only=True,
+        )
+    else:
+        sales_ready = await wait_for_sales_navigator_composer(message_page)
+    if sales_ready:
         logger.info(
             "Followup surface is Sales Navigator composer",
             data={"url": message_page.url},
@@ -1438,6 +1771,44 @@ def typed_text_matches(actual_text: str, expected_text: str) -> Tuple[bool, Dict
         "actual": len(actual),
         "lengthFloor": length_floor,
         "missingWords": missing_words[:10],
+    }
+
+
+def post_send_bubble_near_match(actual_text: str, expected_text: str) -> Tuple[bool, Dict[str, Any]]:
+    actual = normalize_typed_text(actual_text)
+    expected = normalize_typed_text(expected_text)
+    matched, details = typed_text_matches(actual_text, expected_text)
+    if matched:
+        return True, {**details, "nearMatch": False}
+
+    if not actual or not expected:
+        return False, {**details, "nearMatch": False}
+
+    prefix_len = min(90, max(35, int(len(expected) * 0.18)))
+    compact_actual = re.sub(r"\s+", "", actual).lower()
+    compact_expected = re.sub(r"\s+", "", expected).lower()
+    compact_prefix_len = min(90, max(35, int(len(compact_expected) * 0.18)))
+    prefix_ok = (
+        actual[:prefix_len] == expected[:prefix_len]
+        or compact_actual[:compact_prefix_len] == compact_expected[:compact_prefix_len]
+    )
+    length_floor = max(0, len(expected) - max(12, int(len(expected) * 0.035)))
+
+    expected_words = [w.lower() for w in re.findall(r"\b[\wÄÖÜäöüß]{4,}\b", expected)]
+    actual_words = set(w.lower() for w in re.findall(r"\b[\wÄÖÜäöüß]{4,}\b", actual))
+    if expected_words:
+        present = sum(1 for word in expected_words if word in actual_words)
+        word_coverage = present / len(expected_words)
+    else:
+        word_coverage = 1.0
+
+    near_match = bool(prefix_ok and len(actual) >= length_floor and word_coverage >= 0.80)
+    return near_match, {
+        **details,
+        "nearMatch": near_match,
+        "prefixOk": prefix_ok,
+        "nearLengthFloor": length_floor,
+        "wordCoverage": round(word_coverage, 3),
     }
 
 
@@ -1557,12 +1928,60 @@ async def fill_text_field(page: Page, selector_name: str, locator, value: str) -
     await clear_text_field(page, locator)
     await human_type(page, value)
     await page.wait_for_timeout(500)
-    actual_text = await locator.evaluate("el => el.value || el.textContent || el.innerText || ''") or ""
+    actual_text = await read_text_field_text(locator) or ""
     matched, verification = typed_text_matches(actual_text, value)
     if not matched:
         logger.warn(f"{selector_name} typed text mismatch", data=verification)
         raise RuntimeError(f"{selector_name} verification failed after typing.")
     logger.element_type(selector_name, len(value), text_preview=value[:40])
+
+
+async def read_text_field_text(locator) -> str:
+    return await locator.evaluate(
+        """el => {
+            const active = document.activeElement;
+            let target = el;
+            if (active && el.contains(active) && (active.isContentEditable || 'value' in active)) {
+                target = active;
+            }
+            if ('value' in target && target.value != null) return target.value;
+            if (target.isContentEditable) return target.innerText || target.textContent || '';
+            const editable = target.querySelector?.("[contenteditable='true']");
+            if (editable) return editable.innerText || editable.textContent || '';
+            return target.innerText || target.textContent || '';
+        }"""
+    )
+
+
+async def first_visible_field(page: Page, candidates: list[tuple[str, str]], *, timeout_ms: int = 800):
+    first_visible = None
+    first_visible_name = ""
+    for name, selector in candidates:
+        group = page.locator(selector)
+        try:
+            count = await group.count()
+        except Exception:
+            continue
+        for index in range(min(count, 8)):
+            candidate = group.nth(index)
+            try:
+                await candidate.wait_for(state="visible", timeout=timeout_ms)
+            except Exception:
+                continue
+            if first_visible is None:
+                first_visible = candidate
+                first_visible_name = name
+            if await locator_has_viewport_intersection(candidate):
+                return candidate, name
+        if count > 0:
+            logger.element_search(
+                name,
+                count,
+                context={"visibleMatch": bool(first_visible), "field": "sales_navigator"},
+            )
+    if first_visible is not None:
+        return first_visible, first_visible_name
+    return None, ""
 
 
 async def dismiss_keyboard_preference_popover(page: Page) -> bool:
@@ -1612,6 +2031,33 @@ async def dismiss_keyboard_preference_popover(page: Page) -> bool:
             editor = page.locator("div.msg-form__contenteditable[contenteditable='true']").last
             if await editor.count() > 0 and await editor.is_visible(timeout=500):
                 await editor.click(timeout=1_500, force=True)
+                await page.wait_for_timeout(300)
+        except Exception:
+            pass
+        if not await preference_text_visible():
+            return
+        try:
+            removed = await page.evaluate(
+                """() => {
+                    const isVisible = (el) => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                    const matches = Array.from(document.querySelectorAll('div, section, aside, ul, li, fieldset, form'))
+                        .filter((el) => {
+                            if (!isVisible(el)) return false;
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 520 || rect.height > 420) return false;
+                            const t = el.textContent || '';
+                            return /Mit\\s+Enter\\s+senden/i.test(t) ||
+                                /Auf\\s*[„"']?Senden[“"']?\\s*klicken/i.test(t) ||
+                                /Press\\s+Enter\\s+to\\s+send/i.test(t) ||
+                                /Click\\s*[„"']?Send[“"']?/i.test(t);
+                        });
+                    if (!matches.length) return false;
+                    matches.sort((a, b) => (a.offsetWidth * a.offsetHeight) - (b.offsetWidth * b.offsetHeight));
+                    matches[0].remove();
+                    return true;
+                }"""
+            )
+            if removed:
                 await page.wait_for_timeout(300)
         except Exception:
             pass
@@ -1721,6 +2167,63 @@ async def wait_for_composer_cleared(editor, page: Optional[Page] = None, timeout
 
 
 async def click_editor_scoped_send_button(editor) -> bool:
+    try:
+        result = await editor.evaluate(
+            """el => {
+                const root = el.closest('form') || el.closest('[class*="msg-form"]') || el.closest('[role="dialog"]') || document;
+                const isVisible = (button) => !!button && !!(button.offsetWidth || button.offsetHeight || button.getClientRects().length);
+                const candidates = Array.from(root.querySelectorAll('button'))
+                    .map((button, index) => {
+                        const text = (button.innerText || button.textContent || '').replace(/\\s+/g, ' ').trim();
+                        const aria = (button.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
+                        const normalized = text.toLowerCase();
+                        const ariaNormalized = aria.toLowerCase();
+                        const className = button.className || '';
+                        const rect = button.getBoundingClientRect();
+                        const isToggle = className.includes('send-toggle') || ariaNormalized.includes('sendoption') || ariaNormalized.includes('sendeoption');
+                        const isSubmit =
+                            className.includes('msg-form__send-button') ||
+                            normalized === 'senden' ||
+                            normalized === 'send' ||
+                            ariaNormalized === 'nachricht senden' ||
+                            ariaNormalized === 'send message';
+                        return {
+                            button,
+                            index,
+                            text,
+                            aria,
+                            className,
+                            visible: isVisible(button),
+                            enabled: !button.disabled && button.getAttribute('aria-disabled') !== 'true',
+                            isToggle,
+                            isSubmit,
+                            y: rect.y,
+                        };
+                    })
+                    .filter((candidate) => candidate.visible && candidate.enabled && candidate.isSubmit && !candidate.isToggle);
+                if (!candidates.length) return { clicked: false, candidates: [] };
+                candidates.sort((a, b) => b.y - a.y);
+                const target = candidates[0];
+                target.button.click();
+                return {
+                    clicked: true,
+                    target: {
+                        index: target.index,
+                        text: target.text,
+                        aria: target.aria,
+                        className: target.className,
+                        y: target.y,
+                    },
+                };
+            }"""
+        )
+        if isinstance(result, dict) and result.get("clicked"):
+            logger.element_click("Send button (message exact submit)", success=True)
+            logger.debug("Clicked exact direct-message submit", data=result.get("target"))
+            return True
+    except Exception:
+        pass
+
     button_selector = (
         "button.msg-form__send-button, "
         "button[aria-label*='Send'], "
@@ -1768,7 +2271,7 @@ async def click_editor_scoped_send_button(editor) -> bool:
         result = await editor.evaluate(
             """el => {
                 const root = el.closest('form') || el.closest('[class*="msg-form"]') || el.closest('[role="dialog"]') || document;
-                const buttons = Array.from(root.querySelectorAll('button'));
+                const buttons = Array.from(root.querySelectorAll("button, [role=\"button\"]"));
                 const candidates = buttons
                     .map((button, index) => {
                         const text = (button.innerText || button.textContent || button.getAttribute('aria-label') || '').trim();
@@ -1836,22 +2339,45 @@ async def capture_direct_message_send_diagnostics(
     return diagnostics
 
 
-async def try_direct_message_keyboard_send(page: Page, editor, surface: str) -> bool:
-    for shortcut in ("Meta+Enter", "Control+Enter"):
-        try:
-            await focus_text_field(page, editor, "direct message editor")
-            await page.keyboard.press(shortcut)
-            logger.element_click(f"Send button (message {shortcut} fallback)", success=True)
-            if await wait_for_composer_cleared(editor, page=page):
-                await random_pause()
-                return True
-        except Exception as exc:
-            logger.warn(
-                "Direct message keyboard send fallback failed",
-                error=exc,
-                data={"shortcut": shortcut, "surface": surface},
-            )
-    return False
+async def verify_latest_outbound_message(page: Page, expected_text: str, timeout_ms: int = 12_000) -> Dict[str, Any]:
+    """Prove LinkedIn's latest visible message bubble contains the full outbound text."""
+    deadline = asyncio.get_event_loop().time() + (timeout_ms / 1000)
+    last_details: Dict[str, Any] = {}
+    while asyncio.get_event_loop().time() < deadline:
+        bubble = await extract_last_bubble(page)
+        if bubble:
+            actual_text = bubble.get("text") or ""
+            matched, details = typed_text_matches(actual_text, expected_text)
+            last_details = {
+                **details,
+                "sender": bubble.get("sender"),
+                "isOutbound": bubble.get("is_outbound"),
+                "preview": normalize_typed_text(actual_text)[:140],
+            }
+            if matched:
+                logger.info("Verified latest outbound message contains full expected text", data=last_details)
+                return last_details
+            sender = str(bubble.get("sender") or "")
+            if bubble.get("is_outbound") or sender_name_is_own_account(sender):
+                near_matched, near_details = post_send_bubble_near_match(actual_text, expected_text)
+                if near_matched:
+                    last_details = {**last_details, **near_details}
+                    logger.warn(
+                        "Verified latest outbound message with near-complete own-account bubble",
+                        data=last_details,
+                    )
+                    return last_details
+            logger.debug("Latest message bubble does not match expected outbound text yet", data=last_details)
+        await page.wait_for_timeout(500)
+
+    screenshot_path = f"/tmp/direct_message_latest_bubble_mismatch_{int(asyncio.get_event_loop().time())}.png"
+    try:
+        await page.screenshot(path=screenshot_path, full_page=True)
+        last_details["screenshot"] = screenshot_path
+    except Exception as exc:
+        last_details["screenshotError"] = str(exc)
+    logger.warn("Latest message bubble did not contain full expected outbound text", data=last_details)
+    raise PostSendVerificationError("Latest LinkedIn message bubble did not match full outbound message.")
 
 
 async def inspect_send_button_candidates(page: Page, editor=None) -> Any:
@@ -1926,8 +2452,8 @@ async def find_direct_message_editor(page: Page):
         ("Nachricht verfassen", "div[aria-label*='Nachricht verfassen'][contenteditable='true']"),
         ("Nachricht schreiben", "div[aria-label*='Nachricht schreiben'][contenteditable='true']"),
         ("msg-form-ember", "div[id^='msg-form-ember'] div[role='textbox'][contenteditable='true']"),
+        ("msg-form textbox", "form.msg-form div[role='textbox'][contenteditable='true']"),
         ("msg-form contenteditable", "div.msg-form__contenteditable[contenteditable='true']"),
-        ("generic textbox", "div[role='textbox'][contenteditable='true']:not([id^='g-recaptcha'])"),
     ]
 
     first_visible = None
@@ -1943,6 +2469,12 @@ async def find_direct_message_editor(page: Page):
             try:
                 await loc.wait_for(state="visible", timeout=1_000)
             except Exception:
+                continue
+            if await direct_message_editor_is_comment_surface(loc):
+                logger.warn(
+                    "Skipping visible textbox because it belongs to a feed/comment surface",
+                    data={"selector": name, "candidateIndex": index},
+                )
                 continue
             if first_visible is None:
                 first_visible = loc
@@ -1968,6 +2500,330 @@ async def find_direct_message_editor(page: Page):
     raise RuntimeError("Could not find message input box")
 
 
+async def direct_message_editor_is_comment_surface(editor) -> bool:
+    try:
+        return bool(
+            await editor.evaluate(
+                """el => {
+                    const lower = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const classText = (node) => {
+                        if (!node) return '';
+                        const className = node.className;
+                        if (typeof className === 'string') return className;
+                        if (className && typeof className.baseVal === 'string') return className.baseVal;
+                        return '';
+                    };
+                    const hasMessageRoot = !!el.closest(
+                        'form.msg-form, .msg-form, .msg-overlay-conversation-bubble, ' +
+                        '[id^="msg-form-ember"], [class*="message-overlay"]'
+                    );
+                    if (hasMessageRoot) return false;
+                    const label = lower(
+                        el.getAttribute('aria-label') ||
+                        el.getAttribute('data-placeholder') ||
+                        el.getAttribute('aria-placeholder') ||
+                        el.getAttribute('placeholder') ||
+                        ''
+                    );
+                    if (label.includes('comment') || label.includes('kommentar')) return true;
+                    const commentRoot = el.closest(
+                        '[class*="comments-comment"], [class*="comment-box"], [class*="feed-shared"], ' +
+                        '[data-urn*="activity"], [data-test-id*="comment"], article'
+                    );
+                    if (!commentRoot) return false;
+                    const rootClasses = lower(classText(commentRoot));
+                    return rootClasses.includes('comment') ||
+                        rootClasses.includes('feed-shared') ||
+                        !!commentRoot.getAttribute('data-urn');
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+async def click_sales_navigator_overlay_send_button(page: Page) -> bool:
+    """Click only the Sales Navigator composer footer send button."""
+    try:
+        result = await page.evaluate(
+            """() => {
+                const isVisible = (el) => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                const labelFor = (button) => (
+                    button.innerText ||
+                    button.textContent ||
+                    button.getAttribute('aria-label') ||
+                    ''
+                ).replace(/\\s+/g, ' ').trim();
+                const classText = (node) => {
+                    const className = node && node.className;
+                    if (typeof className === 'string') return className;
+                    if (className && typeof className.baseVal === 'string') return className.baseVal;
+                    return '';
+                };
+                const isSendLabel = (label) => {
+                    const normalized = (label || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    return normalized === 'send' ||
+                        normalized === 'senden' ||
+                        normalized === 'send message' ||
+                        normalized === 'nachricht senden';
+                };
+                const isExcluded = (button) => !!(
+                    (button.id || '').startsWith('lead-timeline-message-item') ||
+                    button.closest('[id^="lead-timeline-message-item"]') ||
+                    button.closest('[class*="right-rail"]') ||
+                    button.closest('.artdeco-entity-pile') ||
+                    button.closest('header') ||
+                    button.closest('[data-sn-view-name="feature-global-nav"]')
+                );
+                const bodyFields = Array.from(document.querySelectorAll(
+                    'textarea[name="message"], textarea[aria-label*="Message"], textarea[aria-label*="Nachricht"], ' +
+                    'div[aria-label*="Nachricht hier eingeben"][contenteditable="true"], ' +
+                    'div[data-placeholder*="Message"][contenteditable="true"], ' +
+                    'div[data-placeholder*="Nachricht"][contenteditable="true"], ' +
+                    'div[role="textbox"][contenteditable="true"]'
+                )).filter(isVisible);
+                const roots = [
+                    ...bodyFields.map((field) => field.closest('[role="dialog"], #message-overlay, [class*="message-overlay"], [data-sn-view-name*="message"]')),
+                    '#message-overlay',
+                    '[data-sn-view-name="subpage-message-overlay"]',
+                    '[class*="message-overlay"]',
+                    '[role="dialog"]'
+                ].map((item) => typeof item === 'string' ? document.querySelector(item) : item).filter(isVisible);
+                if (!roots.includes(document)) roots.push(document);
+                const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 800;
+                const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1200;
+                const seen = new Set();
+                const buttons = [];
+                roots.forEach((root, rootIndex) => {
+                    Array.from(root.querySelectorAll("button, [role=\"button\"]")).forEach((button) => {
+                        if (seen.has(button)) return;
+                        seen.add(button);
+                        buttons.push({ button, rootIndex });
+                    });
+                });
+                const candidates = buttons.map(({ button, rootIndex }, index) => {
+                    const label = labelFor(button);
+                    const rect = button.getBoundingClientRect();
+                    const style = window.getComputedStyle(button);
+                    const backgroundColor = (style.backgroundColor || '').replace(/\\s+/g, '');
+                    const hasProminentBackground = !!backgroundColor &&
+                        backgroundColor !== 'transparent' &&
+                        backgroundColor !== 'rgba(0,0,0,0)' &&
+                        backgroundColor !== 'rgb(255,255,255)' &&
+                        backgroundColor !== 'rgba(255,255,255,0)';
+                    const hasIcon = !!button.querySelector('svg, li-icon, use');
+                    const iconOnlySend = !label &&
+                        hasIcon &&
+                        hasProminentBackground &&
+                        rect.width >= 24 &&
+                        rect.width <= 72 &&
+                        rect.height >= 24 &&
+                        rect.height <= 72 &&
+                        rect.x > viewportWidth * 0.45;
+                    return {
+                        index,
+                        text: label,
+                        aria: button.getAttribute('aria-label') || '',
+                        id: button.id || '',
+                        className: classText(button),
+                        rootIndex,
+                        visible: isVisible(button),
+                        enabled: !button.disabled && button.getAttribute('aria-disabled') !== 'true',
+                        exactSendLabel: isSendLabel(label),
+                        iconOnlySend,
+                        hasProminentBackground,
+                        excluded: isExcluded(button),
+                        nearComposerFooter: rect.y > viewportHeight * 0.55,
+                        x: Math.round(rect.x),
+                        y: Math.round(rect.y),
+                    };
+                });
+                const eligible = candidates.filter((candidate) =>
+                    candidate.visible &&
+                    candidate.enabled &&
+                    (candidate.exactSendLabel || candidate.iconOnlySend) &&
+                    !candidate.excluded &&
+                    candidate.nearComposerFooter
+                );
+                if (!eligible.length) {
+                    return {
+                        clicked: false,
+                        candidates: candidates
+                            .filter((candidate) => candidate.visible && (candidate.exactSendLabel || candidate.iconOnlySend))
+                            .slice(-8),
+                    };
+                }
+                eligible.sort((a, b) =>
+                    Number(a.exactSendLabel) - Number(b.exactSendLabel) ||
+                    (a.y - b.y) ||
+                    (a.x - b.x)
+                );
+                const target = eligible[eligible.length - 1];
+                buttons[target.index].click();
+                return { clicked: true, target };
+            }"""
+        )
+        if isinstance(result, dict) and result.get("clicked"):
+            logger.debug("Clicked Sales Navigator overlay send button", data=result.get("target"))
+            return True
+        logger.warn("Sales Navigator overlay send button was not clickable", data=result)
+    except Exception as exc:
+        logger.warn("Sales Navigator overlay send button probe failed", error=exc)
+    return False
+
+
+async def click_sales_navigator_visual_send_button(page: Page) -> bool:
+    """Click the visible blue paper-plane control inside the SN composer body."""
+    try:
+        result = await page.evaluate(
+            """() => {
+                const isVisible = (el) => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                const classText = (node) => {
+                    const className = node && node.className;
+                    if (typeof className === 'string') return className;
+                    if (className && typeof className.baseVal === 'string') return className.baseVal;
+                    return '';
+                };
+                const bodyFields = Array.from(document.querySelectorAll(
+                    'textarea[name="message"], textarea[aria-label*="Message"], textarea[aria-label*="Nachricht"], ' +
+                    'div[aria-label*="Nachricht hier eingeben"][contenteditable="true"], ' +
+                    'div[data-placeholder*="Message"][contenteditable="true"], ' +
+                    'div[data-placeholder*="Nachricht"][contenteditable="true"], ' +
+                    'div[role="textbox"][contenteditable="true"], div[contenteditable="true"]'
+                )).filter(isVisible);
+                const fallbackComposerRoot = (field) => {
+                    const fieldRect = field.getBoundingClientRect();
+                    let current = field.parentElement;
+                    for (let depth = 0; current && depth < 10; depth += 1, current = current.parentElement) {
+                        const rect = current.getBoundingClientRect();
+                        if (
+                            isVisible(current) &&
+                            rect.top <= fieldRect.top &&
+                            rect.left <= fieldRect.left &&
+                            rect.right >= fieldRect.right &&
+                            rect.bottom >= fieldRect.bottom &&
+                            rect.width >= 360 &&
+                            rect.width <= 760 &&
+                            rect.height >= fieldRect.height + 90 &&
+                            rect.height <= 760
+                        ) {
+                            return current;
+                        }
+                    }
+                    return null;
+                };
+                const roots = bodyFields
+                    .map((field) =>
+                        field.closest(
+                            '[role="dialog"], #message-overlay, [class*="message-overlay"], ' +
+                            '[class*="msg-overlay"], [class*="compose"], [data-sn-view-name*="message"]'
+                        ) || fallbackComposerRoot(field)
+                    )
+                    .filter(isVisible);
+                let root = roots[0] || document.querySelector('#message-overlay, [class*="message-overlay"], [class*="msg-overlay"], [role="dialog"]');
+                const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 800;
+                const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1200;
+                const usingViewportRoot = !root || !isVisible(root);
+                if (usingViewportRoot) root = document.body;
+                if (!root || !isVisible(root)) return { found: false, reason: 'no-root' };
+                const measuredRootRect = root.getBoundingClientRect();
+                const rootRect = usingViewportRoot
+                    ? { left: 0, top: 0, right: viewportWidth, bottom: viewportHeight, width: viewportWidth, height: viewportHeight }
+                    : measuredRootRect;
+                const nodes = Array.from(root.querySelectorAll('*'));
+                const candidates = nodes.map((node, index) => {
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    const backgroundColor = (style.backgroundColor || '').replace(/\\s+/g, '');
+                    const color = (style.color || '').replace(/\\s+/g, '');
+                    const label = (
+                        node.innerText ||
+                        node.textContent ||
+                        node.getAttribute('aria-label') ||
+                        node.getAttribute('title') ||
+                        ''
+                    ).replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const hasIcon = node.matches('svg, li-icon, use') || !!node.querySelector('svg, li-icon, use');
+                    const blue = backgroundColor.includes('10,102,194') ||
+                        backgroundColor.includes('0,115,177') ||
+                        backgroundColor.includes('0,65,130') ||
+                        color.includes('10,102,194');
+                    const enabled = !node.disabled && node.getAttribute('aria-disabled') !== 'true';
+                    const bodySendZone = usingViewportRoot
+                        ? (
+                            rect.x > viewportWidth * 0.35 &&
+                            rect.x < viewportWidth * 0.86 &&
+                            rect.y > viewportHeight * 0.25 &&
+                            rect.y < viewportHeight - 70
+                        )
+                        : (
+                            rect.x > rootRect.left + rootRect.width * 0.72 &&
+                            rect.y > rootRect.top + rootRect.height * 0.45 &&
+                            rect.y < rootRect.bottom - 42
+                        );
+                    return {
+                        index,
+                        usingViewportRoot,
+                        visible: isVisible(node),
+                        enabled,
+                        label,
+                        className: classText(node),
+                        hasIcon,
+                        blue,
+                        bodySendZone,
+                        x: Math.round(rect.x),
+                        y: Math.round(rect.y),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height),
+                        centerX: rect.x + rect.width / 2,
+                        centerY: rect.y + rect.height / 2,
+                    };
+                });
+                const eligible = candidates.filter((candidate) =>
+                    candidate.visible &&
+                    candidate.enabled &&
+                    candidate.bodySendZone &&
+                    candidate.width >= 16 &&
+                    candidate.width <= 84 &&
+                    candidate.height >= 16 &&
+                    candidate.height <= 84 &&
+                    (candidate.blue || candidate.hasIcon) &&
+                    !candidate.label.includes('emoji') &&
+                    !candidate.label.includes('image') &&
+                    !candidate.label.includes('bild') &&
+                    !candidate.label.includes('anhang') &&
+                    !candidate.label.includes('attach')
+                );
+                if (!eligible.length) {
+                    return {
+                        found: false,
+                        reason: 'no-eligible-paper-plane',
+                        candidates: candidates
+                            .filter((candidate) => candidate.visible && candidate.bodySendZone)
+                            .slice(-12),
+                    };
+                }
+                eligible.sort((a, b) =>
+                    Number(b.blue) - Number(a.blue) ||
+                    Number(b.hasIcon) - Number(a.hasIcon) ||
+                    b.x - a.x ||
+                    b.y - a.y
+                );
+                const target = eligible[0];
+                return { found: true, target };
+            }"""
+        )
+        if isinstance(result, dict) and result.get("found"):
+            target = result.get("target") or {}
+            await page.mouse.click(float(target.get("centerX")), float(target.get("centerY")))
+            logger.debug("Clicked Sales Navigator visual paper-plane send control", data=target)
+            return True
+        logger.warn("Sales Navigator visual paper-plane send control was not found", data=result)
+    except Exception as exc:
+        logger.warn("Sales Navigator visual paper-plane send control probe failed", error=exc)
+    return False
+
+
 async def send_sales_navigator_message(page: Page, subject: str, body: str) -> None:
     safe_subject = _hard_cap_text((subject or "").strip(), 80)
     safe_body = (body or "").strip()
@@ -1985,32 +2841,23 @@ async def send_sales_navigator_message(page: Page, subject: str, body: str) -> N
         ("body textarea:name", "textarea[name='message']"),
         ("body textarea:placeholder", "textarea[placeholder*='Message'], textarea[placeholder*='Nachricht']"),
         ("body textarea:aria", "textarea[aria-label*='Message'], textarea[aria-label*='Nachricht']"),
+        ("body contenteditable:data-placeholder", "div[data-placeholder*='Message'][contenteditable='true'], div[data-placeholder*='Nachricht'][contenteditable='true']"),
+        ("body contenteditable:aria-placeholder", "div[aria-placeholder*='Message'][contenteditable='true'], div[aria-placeholder*='Nachricht'][contenteditable='true']"),
+        ("body contenteditable:placeholder", "div[aria-label*='Nachricht hier eingeben'][contenteditable='true']"),
+        ("body contenteditable:any visible", "div[contenteditable='true']"),
         ("body contenteditable", "div[role='textbox'][contenteditable='true']"),
     ]
 
-    subject_locator = None
-    subject_selector = ""
-    for name, selector in subject_candidates:
-        candidate = page.locator(selector).first
-        if await candidate.count() > 0:
-            subject_locator = candidate
-            subject_selector = name
-            break
+    subject_locator, subject_selector = await first_visible_field(page, subject_candidates)
     if subject_locator is None:
-        raise RuntimeError("Could not find Sales Navigator subject field.")
+        logger.info("Sales Navigator composer has no subject field; sending body-only message")
 
-    body_locator = None
-    body_selector = ""
-    for name, selector in body_candidates:
-        candidate = page.locator(selector).first
-        if await candidate.count() > 0:
-            body_locator = candidate
-            body_selector = name
-            break
+    body_locator, body_selector = await first_visible_field(page, body_candidates)
     if body_locator is None:
         raise RuntimeError("Could not find Sales Navigator body field.")
 
-    await fill_text_field(page, subject_selector, subject_locator, safe_subject)
+    if subject_locator is not None:
+        await fill_text_field(page, subject_selector, subject_locator, safe_subject)
     await fill_text_field(page, body_selector, body_locator, safe_body)
 
     # SN page DOM is much busier than a normal DM overlay: timeline message
@@ -2023,40 +2870,172 @@ async def send_sales_navigator_message(page: Page, subject: str, body: str) -> N
         await random_pause()
         return
 
-    # Fallback: the broad selector chain (used by direct messages). Last
-    # resort - keep it for cases where the body locator's closest form
-    # cannot be resolved.
-    send_btn = page.locator(DIRECT_MESSAGE_SEND_BUTTON_SELECTOR).first
-    await send_btn.wait_for(state="visible", timeout=10_000)
-    if not await send_btn.is_enabled():
-        raise RuntimeError("Sales Navigator send button is disabled.")
-    await send_btn.click()
-    logger.element_click("Sales Navigator send button (fallback)", success=True)
-    await random_pause()
+    if await click_sales_navigator_overlay_send_button(page):
+        logger.element_click("Sales Navigator send button (overlay scoped)", success=True)
+        await random_pause()
+        return
+
+    if await click_sales_navigator_visual_send_button(page):
+        logger.element_click("Sales Navigator send button (visual paper-plane)", success=True)
+        await random_pause()
+        return
+
+    raise RuntimeError("Sales Navigator composer send button was not clickable after typing.")
 
 
-async def has_sales_navigator_composer(page: Page) -> bool:
+async def has_sales_navigator_composer(page: Page, allow_body_only: bool = False) -> bool:
     subject_count = await page.locator(
         "input[name='subject'], input[placeholder*='Subject'], input[aria-label*='Subject'], "
         "input[placeholder*='Betreff'], input[aria-label*='Betreff']"
     ).count()
     body_count = await page.locator(
         "textarea[name='message'], textarea[placeholder*='Message'], textarea[aria-label*='Message'], "
+        "textarea[placeholder*='Nachricht'], textarea[aria-label*='Nachricht'], "
+        "div[aria-label*='Nachricht hier eingeben'][contenteditable='true'], "
         "div[role='textbox'][contenteditable='true']"
     ).count()
-    return subject_count > 0 and body_count > 0
+    return body_count > 0 and (allow_body_only or subject_count > 0)
 
 
-async def wait_for_sales_navigator_composer(page: Page, timeout_ms: int = 10_000) -> bool:
+async def wait_for_sales_navigator_composer(
+    page: Page,
+    timeout_ms: int = 10_000,
+    allow_body_only: bool = False,
+) -> bool:
     deadline = asyncio.get_event_loop().time() + (timeout_ms / 1000)
     while asyncio.get_event_loop().time() < deadline:
-        if await has_sales_navigator_composer(page):
+        if await has_sales_navigator_composer(page, allow_body_only=allow_body_only):
             return True
         await page.wait_for_timeout(250)
     return False
 
 
-async def send_message(page: Page, message: str, surface: str, draft: Optional[Dict[str, Any]] = None) -> None:
+async def read_direct_message_editor_identity(editor) -> Dict[str, Any]:
+    try:
+        result = await editor.evaluate(
+            """el => {
+                const visible = (node) => !!node && !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length);
+                const root =
+                    el.closest('div.msg-overlay-conversation-bubble') ||
+                    el.closest('[class*="msg-overlay-conversation"]') ||
+                    el.closest('[class*="msg-overlay"]') ||
+                    el.closest('section[role="dialog"]') ||
+                    el.closest('[role="dialog"]') ||
+                    el.closest('main') ||
+                    document.body;
+                const selectors = [
+                    'header a[href*="/in/"]',
+                    'header [class*="title"]',
+                    'header [class*="name"]',
+                    '.msg-overlay-bubble-header__title',
+                    '.msg-overlay-conversation-bubble__title',
+                    '.msg-overlay-bubble-header a[href*="/in/"]',
+                    '.msg-thread__link-to-profile',
+                    'h2',
+                    'h3'
+                ];
+                const headerTexts = [];
+                for (const selector of selectors) {
+                    for (const node of Array.from(root.querySelectorAll(selector))) {
+                        if (!visible(node)) continue;
+                        const text = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                        if (text && !headerTexts.includes(text)) headerTexts.push(text);
+                    }
+                }
+                const links = Array.from(root.querySelectorAll('a[href*="/in/"]'))
+                    .filter(visible)
+                    .map((node) => ({
+                        text: (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim(),
+                        href: node.href || node.getAttribute('href') || ''
+                    }))
+                    .filter((item) => item.text || item.href)
+                    .slice(0, 6);
+                return {
+                    headerTexts: headerTexts.slice(0, 8),
+                    links,
+                    rootClass: root.className || '',
+                    rootPreview: ((root.innerText || root.textContent || '').replace(/\\s+/g, ' ').trim()).slice(0, 240),
+                };
+            }"""
+        )
+        return result if isinstance(result, dict) else {}
+    except Exception as exc:
+        logger.warn("Failed to read direct-message editor identity", error=exc)
+        return {}
+
+
+async def assert_direct_message_editor_matches_lead(page: Page, editor, lead: Optional[Dict[str, Any]]) -> None:
+    if not lead:
+        return
+
+    identity = await read_direct_message_editor_identity(editor)
+    header_text = " ".join(str(item or "") for item in identity.get("headerTexts") or []).strip()
+    link_text = " ".join(str((item or {}).get("text") or "") for item in identity.get("links") or []).strip()
+    root_preview = str(identity.get("rootPreview") or "").strip()
+    identity_candidates = [
+        ("header", header_text),
+        ("link", link_text),
+        ("preview", root_preview),
+    ]
+
+    for source, candidate_text in identity_candidates:
+        if not candidate_text:
+            continue
+        if direct_thread_text_matches_lead(candidate_text, lead):
+            logger.debug(
+                "Verified direct-message thread identity before typing",
+                data={"leadId": lead.get("id"), "identity": candidate_text[:120], "source": source},
+            )
+            return
+
+    for _source, candidate_text in identity_candidates[:2]:
+        if candidate_text and not direct_message_identity_text_is_generic(candidate_text):
+            raise RuntimeError(
+                "Direct message editor belongs to a different thread "
+                f"(expected={lead_display_name(lead)!r}, identity={candidate_text[:120]!r})."
+            )
+
+    bubble = await extract_last_bubble(page)
+    if bubble and not bubble.get("is_outbound"):
+        lead_full = lead_display_name(lead)
+        verdict = classify_last_sender(bubble, lead_full, str(lead.get("first_name") or ""))
+        sender_name = (bubble.get("sender") or "").strip()
+        if verdict == "unknown" and sender_name_is_own_account(sender_name):
+            logger.debug(
+                "Treating latest direct-message bubble as own account",
+                data={"sender": sender_name[:80], "leadId": lead.get("id")},
+            )
+            return
+        if verdict == "unknown" and sender_name:
+            raise RuntimeError(
+                "Direct message editor identity could not be read and latest visible "
+                f"thread sender did not match lead (sender={(bubble.get('sender') or '')[:80]!r})."
+            )
+
+    logger.warn(
+        "Could not prove direct-message thread identity before typing; proceeding with verified composer only",
+        data={"leadId": lead.get("id"), "identity": identity},
+    )
+
+
+def is_direct_thread_mismatch_error(error: Any) -> bool:
+    text = str(error or "")
+    return any(
+        marker in text
+        for marker in (
+            "Direct message editor belongs to a different thread",
+            "Direct message editor identity could not be read and latest visible thread sender did not match lead",
+        )
+    )
+
+
+async def send_message(
+    page: Page,
+    message: str,
+    surface: str,
+    draft: Optional[Dict[str, Any]] = None,
+    lead: Optional[Dict[str, Any]] = None,
+) -> None:
     """Send a message through the opened messaging surface.
     
     Args:
@@ -2122,8 +3101,9 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
                 await target.evaluate("el => { if ('value' in el) el.value=''; if (el.isContentEditable) el.textContent=''; }")
             except Exception:
                 pass
-            await human_type(page, safe_message)
+            input_method = await insert_composer_text(page, target, safe_message)
             logger.element_type(used_selector, len(safe_message), text_preview=safe_message[:40])
+            logger.debug("Inserted note text", data={"method": input_method, "length": len(safe_message)})
             await random_pause(0.5, 1.0)
 
             # CRITICAL: Verify the full message was typed before clicking send
@@ -2186,10 +3166,12 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
     logger.info("Sending direct message", data={"surface": surface})
 
     editor, used_selector = await find_direct_message_editor(page)
+    await assert_direct_message_editor_matches_lead(page, editor, lead)
     await focus_text_field(page, editor, used_selector)
     await clear_text_field(page, editor)
-    await human_type(page, message)
+    input_method = await insert_composer_text(page, editor, message)
     logger.element_type(used_selector, len(message), text_preview=message[:40])
+    logger.debug("Inserted direct message text", data={"method": input_method, "length": len(message)})
     await random_pause()
 
     # CRITICAL: Verify the full message was typed before clicking send
@@ -2199,7 +3181,7 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
     # Verify the text was actually entered
     for verification_attempt in range(10):
         try:
-            actual_text = await editor.evaluate("el => el.value || el.textContent || el.innerText || ''") or ""
+            actual_text = await read_text_field_text(editor) or ""
             actual_normalized = normalize_typed_text(actual_text)
             expected_normalized = normalize_typed_text(message)
 
@@ -2223,7 +3205,30 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
             logger.warn(f"Text verification attempt {verification_attempt} failed", error=e)
             await page.wait_for_timeout(200)
     else:
-        raise RuntimeError("Direct message composer verification failed after typing.")
+        logger.warn("Direct message composer verification failed after insert; retrying with fill")
+        await clear_text_field(page, editor)
+        try:
+            await editor.fill(message, timeout=10_000)
+        except Exception as fill_error:
+            logger.warn("Direct message fill retry failed", error=fill_error)
+            raise RuntimeError("Direct message composer verification failed after typing.")
+        await page.wait_for_timeout(500)
+        for retry_attempt in range(8):
+            actual_text = await read_text_field_text(editor) or ""
+            matched, verification = typed_text_matches(actual_text, message)
+            if matched:
+                logger.debug(
+                    "Text verification passed after fill retry",
+                    data={**verification, "attempt": retry_attempt},
+                )
+                break
+            logger.debug(
+                "Text still mismatched after fill retry",
+                data={**verification, "attempt": retry_attempt},
+            )
+            await page.wait_for_timeout(200)
+        else:
+            raise RuntimeError("Direct message composer verification failed after typing.")
 
     scoped_candidates = await inspect_send_button_candidates(page, editor)
     scoped_target = _pick_send_button_candidate(scoped_candidates)
@@ -2279,6 +3284,7 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
             if await dismiss_keyboard_preference_popover(page):
                 if await click_editor_scoped_send_button(editor) and await wait_for_composer_cleared(editor, page=page):
                     logger.element_click("Send button (message scoped after popover)", success=True)
+                    await verify_latest_outbound_message(page, message)
                     await random_pause()
                     return
             diagnostics = await capture_direct_message_send_diagnostics(
@@ -2292,17 +3298,21 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
                 data=diagnostics,
             )
             raise RuntimeError("Direct message composer did not clear after scoped send click.")
+        await verify_latest_outbound_message(page, message)
         await random_pause()
+    except PostSendVerificationError as e:
+        logger.element_click("Send button (message scoped)", success=False)
+        logger.warn("Post-send verification failed after scoped click; refusing resend fallback", error=e)
+        raise
     except Exception as e:
         logger.element_click("Send button (message scoped)", success=False)
-        logger.warn("Send button unavailable or ineffective; trying Enter key fallback", error=e)
+        logger.warn("Direct message scoped send failed; refusing unsafe keyboard submission", error=e)
         await dismiss_keyboard_preference_popover(page)
         if await click_editor_scoped_send_button(editor):
             if await wait_for_composer_cleared(editor, page=page):
                 logger.element_click("Send button (message scoped fallback)", success=True)
+                await verify_latest_outbound_message(page, message)
                 await random_pause()
-                return
-            if await try_direct_message_keyboard_send(page, editor, surface):
                 return
             diagnostics = await capture_direct_message_send_diagnostics(
                 page,
@@ -2315,24 +3325,17 @@ async def send_message(page: Page, message: str, surface: str, draft: Optional[D
                 data=diagnostics,
             )
             raise RuntimeError("Direct message composer did not clear after scoped send fallback.")
-        if await try_direct_message_keyboard_send(page, editor, surface):
-            return
-        await editor.click()
-        await page.keyboard.press("Enter")
-        if not await wait_for_composer_cleared(editor, page=page):
-            diagnostics = await capture_direct_message_send_diagnostics(
-                page,
-                editor,
-                "composer_still_populated_after_enter",
-                surface,
-            )
-            logger.warn(
-                "Direct message composer still appeared populated after Enter fallback",
-                data=diagnostics,
-            )
-            raise RuntimeError("Direct message composer did not clear after Enter send fallback.")
-        logger.element_click("Send button (message enter fallback)", success=True)
-        await random_pause()
+        diagnostics = await capture_direct_message_send_diagnostics(
+            page,
+            editor,
+            "direct_message_scoped_send_failed_no_keyboard_fallback",
+            surface,
+        )
+        logger.warn(
+            "Direct message send aborted because scoped send did not complete",
+            data=diagnostics,
+        )
+        raise RuntimeError("Direct message scoped send failed; keyboard send fallback is disabled.")
 
 
 def mark_processing(client: Client, lead_id: str) -> None:
@@ -2675,7 +3678,7 @@ def _nudge_lead_state_valid(lead: Dict[str, Any]) -> Tuple[bool, str]:
     if not lead.get("sent_at"):
         return False, "lead_sent_at_null"
     if (lead.get("outreach_mode") or "").lower() == "connect_only":
-        if not lead.get("connection_sent_at"):
+        if not lead.get("connection_sent_at") and not lead.get("connection_accepted_at"):
             return False, "connect_only_invite_not_sent"
         if not lead.get("connection_accepted_at"):
             return False, "connect_only_not_accepted"
@@ -2699,6 +3702,8 @@ def fetch_approved_followups(
                 "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
             )
             .eq("status", "APPROVED")
+            .or_(f"next_send_at.is.null,next_send_at.lte.{now_utc.isoformat()}")
+            .order("next_send_at", desc=False)
             .order("updated_at", desc=True)
             .limit(max(limit * 5, limit))
             .execute()
@@ -2714,6 +3719,8 @@ def fetch_approved_followups(
                     "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
                 )
                 .eq("status", "APPROVED")
+                .or_(f"next_send_at.is.null,next_send_at.lte.{now_utc.isoformat()}")
+                .order("next_send_at", desc=False)
                 .order("updated_at", desc=True)
                 .limit(max(limit * 5, limit))
                 .execute()
@@ -2728,6 +3735,8 @@ def fetch_approved_followups(
                     "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
                 )
                 .eq("status", "APPROVED")
+                .or_(f"next_send_at.is.null,next_send_at.lte.{now_utc.isoformat()}")
+                .order("next_send_at", desc=False)
                 .order("updated_at", desc=True)
                 .limit(max(limit * 5, limit))
                 .execute()
@@ -3001,6 +4010,37 @@ def revert_followup_to_approved(client: Client, followup_id: str) -> None:
     logger.info(f"Followup reverted to APPROVED for retry", {"followupId": followup_id})
 
 
+def requeue_processing_followup_batch(client: Client, followup_ids: list[str], reason: str) -> int:
+    ids = [followup_id for followup_id in followup_ids if followup_id]
+    if not ids:
+        return 0
+
+    logger.db_query(
+        "update",
+        "followups",
+        {"status": "PROCESSING", "count": len(ids)},
+        {"status": "APPROVED", "reason": reason[:120]},
+    )
+    resp = (
+        client.table("followups")
+        .update({
+            "status": "APPROVED",
+            "processing_started_at": None,
+            "last_error": reason[:500] if reason else None,
+        })
+        .in_("id", ids)
+        .eq("status", "PROCESSING")
+        .execute()
+    )
+    row_count = len(getattr(resp, "data", None) or [])
+    logger.db_result("update", "followups", {"status": "PROCESSING"}, row_count)
+    logger.warn(
+        "Requeued PROCESSING followups after aborted batch",
+        data={"count": row_count, "requested": len(ids), "reason": reason[:200]},
+    )
+    return row_count
+
+
 def _record_reply_at_send_time(
     client: Client,
     lead_id: Optional[str],
@@ -3034,6 +4074,191 @@ def _record_reply_at_send_time(
             {"leadId": lead_id, "followupId": followup_id},
             error=exc,
         )
+
+
+def _pick_existing_nudge_for_schedule(
+    existing_rows: list[Dict[str, Any]],
+    *,
+    precise_attempt: bool,
+) -> Optional[Dict[str, Any]]:
+    """Return the existing row that should block/reactivate scheduling.
+
+    When `attempt` exists in the DB, the caller already filtered to the exact
+    second/third follow-up attempt. Legacy production schemas lack that column,
+    so a previously SENT second-nudge row must not block creating the later
+    third-nudge row; only active unsent rows should block in that fallback.
+    """
+    if not existing_rows:
+        return None
+    if precise_attempt:
+        return existing_rows[0]
+
+    for row in existing_rows:
+        if str(row.get("status") or "").upper() in NUDGE_ACTIVE_STATUSES:
+            return row
+    return None
+
+
+def _next_due_nudge_for_lead(
+    lead: Dict[str, Any],
+    sequence_messages: Dict[str, Any],
+    now_utc: datetime,
+) -> Tuple[Optional[int], Optional[datetime], str]:
+    """Infer whether a sent, unreplied lead needs a missing second/third nudge."""
+    if lead.get("last_reply_at"):
+        return None, None, "lead_replied"
+
+    ok, reason = _nudge_lead_state_valid(lead)
+    if not ok:
+        return None, None, reason
+
+    current_step = _safe_int(lead.get("sequence_step"), 0)
+    if current_step >= 3:
+        return None, None, "sequence_complete"
+
+    attempt = 2 if current_step == 2 else 1
+    message_key = "third_message" if attempt == 2 else "second_message"
+    if not str(sequence_messages.get(message_key) or "").strip():
+        return None, None, f"empty_{message_key}"
+
+    base_value = (
+        lead.get("sequence_last_sent_at")
+        if current_step >= 2
+        else (lead.get("sequence_last_sent_at") or lead.get("sent_at"))
+    )
+    base_time = _parse_iso_datetime(base_value)
+    if base_time is None:
+        return None, None, "missing_sequence_base_time"
+
+    interval_days = _safe_int(sequence_messages.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS)
+    if interval_days < 1:
+        interval_days = SEQUENCE_INTERVAL_DEFAULT_DAYS
+
+    if base_time + timedelta(days=interval_days) > now_utc:
+        return None, base_time, "not_due"
+
+    return attempt, base_time, "due"
+
+
+def recover_due_retry_later_nudges(client: Client, limit: int = 500) -> int:
+    """Move due, still-valid NUDGE retry rows back to APPROVED."""
+    now_utc = _utc_now()
+    try:
+        resp = (
+            client.table("followups")
+            .select(
+                "id, lead_id, status, followup_type, attempt, next_send_at, "
+                "lead:leads(id, status, sent_at, last_reply_at, outreach_mode, connection_sent_at, connection_accepted_at)"
+            )
+            .eq("status", "RETRY_LATER")
+            .eq("followup_type", "NUDGE")
+            .limit(limit)
+            .execute()
+        )
+    except Exception:
+        resp = (
+            client.table("followups")
+            .select(
+                "id, lead_id, status, followup_type, next_send_at, "
+                "lead:leads(id, status, sent_at, last_reply_at, outreach_mode, connection_sent_at, connection_accepted_at)"
+            )
+            .eq("status", "RETRY_LATER")
+            .eq("followup_type", "NUDGE")
+            .limit(limit)
+            .execute()
+        )
+
+    recovered = 0
+    for row in resp.data or []:
+        if not _followup_is_due(row, now_utc):
+            continue
+        lead = row.get("lead") or {}
+        ok, reason = _nudge_lead_state_valid(lead)
+        if not ok or lead.get("last_reply_at"):
+            logger.info(
+                "Leaving RETRY_LATER nudge unrecovered: lead is no longer eligible",
+                {"followupId": row.get("id"), "leadId": row.get("lead_id"), "reason": reason},
+            )
+            continue
+        client.table("followups").update(
+            {"status": "APPROVED", "processing_started_at": None, "last_error": None}
+        ).eq("id", row["id"]).execute()
+        recovered += 1
+
+    if recovered:
+        logger.info("Recovered due RETRY_LATER nudge followups", data={"count": recovered})
+    return recovered
+
+
+def schedule_missing_due_nudges(client: Client, limit: int = 1000) -> int:
+    """Backfill due second/third NUDGE rows that are missing from the queue."""
+    now_utc = _utc_now()
+    try:
+        resp = (
+            client.table("leads")
+            .select(
+                "id, linkedin_url, first_name, last_name, company_name, status, sent_at, last_reply_at, "
+                "sequence_id, sequence_step, sequence_last_sent_at, outreach_mode, connection_sent_at, "
+                "connection_accepted_at, batch_id"
+            )
+            .eq("status", "SENT")
+            .is_("last_reply_at", "null")
+            .limit(limit)
+            .execute()
+        )
+    except Exception as exc:
+        logger.warn("Skipping missing nudge scheduling: lead query failed", error=exc)
+        return 0
+
+    scheduled = 0
+    for lead in resp.data or []:
+        sequence_messages = load_sequence_messages(client, lead)
+        attempt, base_time, reason = _next_due_nudge_for_lead(lead, sequence_messages, now_utc)
+        if attempt is None or base_time is None:
+            if reason not in {"not_due", "sequence_complete", "lead_replied"}:
+                logger.debug(
+                    "Lead does not need missing nudge scheduling",
+                    {"leadId": lead.get("id"), "reason": reason},
+                )
+            continue
+
+        before_count = 0
+        try:
+            before_resp = (
+                client.table("followups")
+                .select("id")
+                .eq("lead_id", lead["id"])
+                .eq("followup_type", "NUDGE")
+                .in_("status", list(NUDGE_ACTIVE_STATUSES))
+                .execute()
+            )
+            before_count = len(before_resp.data or [])
+        except Exception:
+            before_count = -1
+
+        previous_message = (
+            sequence_messages.get("second_message") if attempt == 2 else sequence_messages.get("first_message")
+        ) or ""
+        schedule_nudge_followup(client, lead, attempt, sequence_messages, base_time, str(previous_message))
+
+        if before_count == 0:
+            try:
+                after_resp = (
+                    client.table("followups")
+                    .select("id")
+                    .eq("lead_id", lead["id"])
+                    .eq("followup_type", "NUDGE")
+                    .in_("status", list(NUDGE_ACTIVE_STATUSES))
+                    .execute()
+                )
+                if len(after_resp.data or []) > 0:
+                    scheduled += 1
+            except Exception:
+                pass
+
+    if scheduled:
+        logger.info("Scheduled missing due nudge followups", data={"count": scheduled})
+    return scheduled
 
 
 def schedule_nudge_followup(
@@ -3071,23 +4296,27 @@ def schedule_nudge_followup(
             .limit(1)
             .execute()
         ).data or []
+        precise_attempt = True
     except Exception:
-        # Legacy schemas may not expose attempt/followup_type. Fall back to lead-only dedupe.
+        # Legacy schemas may not expose attempt. Fall back to active-row dedupe.
         try:
             existing = (
                 client.table("followups")
-                .select("id, status, followup_type")
+                .select("id, status, followup_type, sent_at, created_at")
                 .eq("lead_id", lead_id)
-                .limit(1)
+                .eq("followup_type", "NUDGE")
+                .order("created_at", desc=True)
+                .limit(20)
                 .execute()
             ).data or []
+            precise_attempt = False
         except Exception as e:
             logger.warn("Skipping nudge scheduling: followups table unavailable", {"leadId": lead_id, "attempt": attempt}, error=e)
             return
-    if existing:
-        existing_row = existing[0]
+    existing_row = _pick_existing_nudge_for_schedule(existing, precise_attempt=precise_attempt)
+    if existing_row:
         existing_status = str(existing_row.get("status") or "").upper()
-        if existing_status in {"SKIPPED", "FAILED", "RETRY_LATER"}:
+        if existing_status in {"SKIPPED", "RETRY_LATER"}:
             update_payload = {
                 "status": "APPROVED",
                 "draft_text": draft_text,
@@ -3107,6 +4336,12 @@ def schedule_nudge_followup(
                 "Reactivated existing nudge followup",
                 {"leadId": lead_id, "attempt": attempt, "followupId": existing_row["id"]},
                 {"next_send_at": next_send_at},
+            )
+            return
+        if existing_status == "FAILED":
+            logger.debug(
+                "Nudge followup is FAILED; leaving it unrecovered by missing-nudge scheduler",
+                {"leadId": lead_id, "attempt": attempt, "followupId": existing_row["id"]},
             )
             return
         logger.debug("Nudge followup already exists", {"leadId": lead_id, "attempt": attempt, "followupId": existing_row["id"]})
@@ -3214,6 +4449,18 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
                     p for p in [(lead.get("first_name") or ""), (lead.get("last_name") or "")] if p
                 ).strip()
                 verdict = classify_last_sender(bubble, lead_full, (lead.get("first_name") or ""))
+                sender_name = (bubble.get("sender") or "").strip()
+                if sender_name_is_own_account(sender_name):
+                    logger.debug(
+                        "Latest nudge bubble sender matched own account",
+                        {
+                            "followupId": followup_id,
+                            "leadId": lead_id,
+                            "sender": sender_name[:80],
+                            "previousVerdict": verdict,
+                        },
+                    )
+                    verdict = "us"
                 if verdict == "lead":
                     logger.info(
                         "Lead replied since nudge was scheduled; skipping send",
@@ -3228,12 +4475,17 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
                     mark_followup_skipped(client, followup_id, "reply_detected_at_send_time")
                     return "skipped"
                 if verdict == "unknown":
+                    if sender_name:
+                        raise RuntimeError(
+                            "Latest direct-message thread sender did not match lead "
+                            f"(sender={sender_name[:80]!r}, expected={lead_display_name(lead)!r})."
+                        )
                     logger.warn(
                         "Reply check inconclusive; proceeding with send",
                         {
                             "followupId": followup_id,
                             "leadId": lead_id,
-                            "sender": (bubble.get("sender") or "")[:80],
+                            "sender": "",
                         },
                     )
             # bubble is None → fresh thread / loader hadn't finished → fall through to send (fail-open).
@@ -3255,9 +4507,62 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
                 build_sales_navigator_body(message),
             )
         else:
-            await send_message(message_page, message, surface)
+            try:
+                await send_message(message_page, message, surface, lead=lead)
+            except Exception as send_error:
+                if not is_direct_thread_mismatch_error(send_error):
+                    raise
+                logger.warn(
+                    "Direct message surface opened a stale or mismatched thread; closing overlays and retrying once",
+                    {"followupId": followup_id, "leadId": lead_id},
+                    error=send_error,
+                )
+                await close_existing_chat_overlays(message_page)
+                if message_page is not page:
+                    try:
+                        await message_page.close()
+                    except Exception:
+                        pass
+                    message_page = None
+                await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
+                await page.wait_for_timeout(1_000)
+                await close_existing_chat_overlays(page)
+                message_page, surface = await open_followup_message_surface(page)
+                if surface == SURFACE_SALES_NAVIGATOR:
+                    logger.info(
+                        "Followup retry routed through Sales Navigator composer",
+                        {"followupId": followup_id, "leadId": lead_id},
+                    )
+                    await send_sales_navigator_message(
+                        message_page,
+                        build_sales_navigator_subject(lead, message),
+                        build_sales_navigator_body(message),
+                    )
+                else:
+                    await send_message(message_page, message, surface, lead=lead)
 
         mark_followup_sent(client, followup_id, message, followup, sequence_step=resolved_step)
+        if followup_type == "NUDGE" and resolved_step == 2 and lead_id:
+            next_base = _utc_now()
+            lead_for_next = dict(lead)
+            lead_for_next["sequence_step"] = 2
+            lead_for_next["sequence_last_sent_at"] = next_base.isoformat()
+            try:
+                sequence_messages = load_sequence_messages(client, lead_for_next)
+                schedule_nudge_followup(
+                    client,
+                    lead_for_next,
+                    2,
+                    sequence_messages,
+                    next_base,
+                    message,
+                )
+            except Exception as schedule_error:
+                logger.warn(
+                    "Failed to schedule third followup after second followup send",
+                    {"followupId": followup_id, "leadId": lead_id},
+                    error=schedule_error,
+                )
         logger.message_send_complete(lead_id or "unknown", {"followupId": followup_id})
         logger.info(
             f"Followup sent successfully via {surface}",
@@ -3268,6 +4573,8 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
     except Exception as e:
         error_msg = str(e)
         logger.error(f"Failed to send followup", {"followupId": followup_id}, error=e)
+        if is_network_outage_error(error_msg):
+            raise NetworkOutageError(error_msg) from e
 
         # Take screenshot for debugging
         try:
@@ -3693,6 +5000,11 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
         await page.wait_for_timeout(1_500)
         await random_pause()
         await close_existing_chat_overlays(page)
+        unavailable_reason = await linkedin_profile_unavailable_reason(page)
+        if unavailable_reason:
+            mark_failed(client, lead_id, f"LinkedIn profile unavailable: {unavailable_reason}; url={page.url}")
+            await page.close()
+            return "failed"
 
         # Check for pending connection indicator (Ausstehend)
         pending_indicators = [
@@ -3722,30 +5034,44 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                 profile_container = page.locator("main.scaffold-layout__main, section.artdeco-card").first
                 await profile_container.wait_for(state="visible", timeout=5_000)
             except Exception:
-                profile_container = page
+                unavailable_reason = await linkedin_profile_unavailable_reason(page)
+                if unavailable_reason:
+                    mark_failed(client, lead_id, f"LinkedIn profile unavailable: {unavailable_reason}; url={page.url}")
+                    await page.close()
+                    return "failed"
+                raise RuntimeError(
+                    "Profile container not found; refusing to fall back to page-level selectors for message-only send."
+                )
         
         # Look for explicit connected-user messaging affordances first.
         explicit_message_targets = [
             profile_container.get_by_role("button", name=re.compile(r"(Nachricht an|Message to)", re.I)),
             profile_container.get_by_role("link", name=re.compile(r"(Nachricht an|Message to)", re.I)),
         ]
-        explicit_message_link = None
+        explicit_message_target = None
+        explicit_message_candidate_count = 0
         for candidate in explicit_message_targets:
-            if await candidate.count() > 0:
-                explicit_message_link = candidate
+            explicit_message_target, explicit_message_candidate_count = await first_safe_message_target(
+                candidate,
+                "message_only_explicit",
+            )
+            if explicit_message_target is not None:
                 break
 
-        if explicit_message_link is None:
+        if explicit_message_target is None:
             # Generic "Nachricht" surfaces can be Sales Navigator/InMail entry points and
             # are not strong enough by themselves to prove acceptance.
-            message_link = profile_container.get_by_role("link", name=re.compile(r"(Message|Nachricht)", re.I))
-            message_link_count = await message_link.count()
+            generic_message_link = profile_container.get_by_role("link", name=re.compile(r"(Message|Nachricht)", re.I))
+            message_target, message_candidate_count = await first_safe_message_target(
+                generic_message_link,
+                "message_only_generic",
+            )
         else:
-            message_link = explicit_message_link
-            message_link_count = 1
+            message_target = explicit_message_target
+            message_candidate_count = explicit_message_candidate_count
 
-        if message_link_count > 0:
-            if explicit_message_link is None and await _has_visible_connect_or_pending_state(profile_container, full_name):
+        if message_target is not None:
+            if explicit_message_target is None and await _has_visible_connect_or_pending_state(profile_container, full_name):
                 logger.info(
                     "Generic message surface is ambiguous; connect/pending state is still visible",
                     {"leadId": lead_id},
@@ -3753,7 +5079,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                 mark_message_only_pending(client, lead)
                 await page.close()
                 return "pending"
-            if explicit_message_link is None and await _more_menu_has_pending_invite(page, profile_container):
+            if explicit_message_target is None and await _more_menu_has_pending_invite(page, profile_container):
                 logger.info(
                     "Generic message surface is Sales Navigator/InMail while More menu still shows pending invite",
                     {"leadId": lead_id},
@@ -3764,7 +5090,6 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
 
             logger.debug("Found Message link - user is connected", {"leadId": lead_id})
             try:
-                message_target = message_link.first
                 message_href = ""
                 try:
                     message_href = (await message_target.get_attribute("href")) or ""
@@ -3779,8 +5104,14 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                 await random_pause()
                 is_sales_page = "linkedin.com/sales/" in (message_page.url or "")
                 if is_sales_page:
-                    await wait_for_sales_navigator_composer(message_page, timeout_ms=20_000)
-                if is_sales_page or await wait_for_sales_navigator_composer(message_page):
+                    sales_ready = await wait_for_sales_navigator_composer(
+                        message_page,
+                        timeout_ms=20_000,
+                        allow_body_only=True,
+                    )
+                else:
+                    sales_ready = await wait_for_sales_navigator_composer(message_page)
+                if sales_ready:
                     logger.info("Nachricht opened Sales Navigator composer", {"leadId": lead_id})
                     await send_sales_navigator_message(
                         message_page,
@@ -3788,11 +5119,43 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                         build_sales_navigator_body(message),
                     )
                 else:
-                    await message_page.wait_for_selector(
-                        DIRECT_MESSAGE_COMPOSER_SELECTOR,
-                        timeout=20_000,
-                    )
-                    await send_message(message_page, message, SURFACE_MESSAGE)
+                    try:
+                        await message_page.wait_for_selector(
+                            DIRECT_MESSAGE_COMPOSER_SELECTOR,
+                            timeout=20_000,
+                        )
+                        await send_message(message_page, message, SURFACE_MESSAGE, lead=lead)
+                    except Exception as send_error:
+                        if not is_direct_thread_mismatch_error(send_error):
+                            raise
+                        logger.warn(
+                            "First-message direct surface opened a stale or mismatched thread; closing overlays and retrying once",
+                            {"leadId": lead_id},
+                            error=send_error,
+                        )
+                        await close_existing_chat_overlays(message_page)
+                        if message_page is not page:
+                            try:
+                                await message_page.close()
+                            except Exception:
+                                pass
+                            message_page = None
+                        await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                        await page.wait_for_timeout(1_000)
+                        await close_existing_chat_overlays(page)
+                        message_page, retry_surface = await open_followup_message_surface(page)
+                        if retry_surface == SURFACE_SALES_NAVIGATOR:
+                            logger.info(
+                                "First-message retry routed through Sales Navigator composer",
+                                {"leadId": lead_id},
+                            )
+                            await send_sales_navigator_message(
+                                message_page,
+                                build_sales_navigator_subject(lead, message),
+                                build_sales_navigator_body(message),
+                            )
+                        else:
+                            await send_message(message_page, message, retry_surface, lead=lead)
                 
                 # Mark as SENT, capture acceptance, and initialize sequence progress metadata.
                 accepted_at = datetime.utcnow().isoformat()
@@ -3849,6 +5212,11 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                 
                 logger.message_send_complete(lead_id)
                 logger.info("Message sent to connected lead", {"leadId": lead_id})
+                if message_page is not None and message_page is not page:
+                    try:
+                        await message_page.close()
+                    except Exception:
+                        pass
                 await page.close()
                 return "sent"
             except Exception as e:
@@ -4179,9 +5547,14 @@ async def main() -> None:
        
         daily_limit = resolve_daily_send_limit()
         logger.info("Daily send limit computed", data={"limit": daily_limit, "env": os.getenv("DAILY_SEND_LIMIT"), "default": DAILY_SEND_DEFAULT})
-        already_sent = connect_only_sent_today_count(client) if args.send_invites else sent_today_count(client)
+        if args.send_invites:
+            already_sent = connect_only_sent_today_count(client)
+        elif args.followup:
+            already_sent = sent_today_count(client) + followups_sent_today_count(client)
+        else:
+            already_sent = sent_today_count(client)
 
-        if already_sent >= daily_limit and not args.followup:
+        if already_sent >= daily_limit:
             logger.warn("Daily send limit reached", data={"limit": daily_limit, "sent": already_sent})
             return
 
@@ -4197,6 +5570,8 @@ async def main() -> None:
             elif args.lead_id:
                 # Targeted run by lead id: pick the APPROVED row for this lead.
                 recover_stale_processing_followups(client)
+                recover_due_retry_later_nudges(client)
+                schedule_missing_due_nudges(client)
                 resp = (
                     client.table("followups")
                     .select(
@@ -4219,7 +5594,9 @@ async def main() -> None:
                 batch_limit = 1
             else:
                 recover_stale_processing_followups(client)
-                batch_limit = min(20, max(1, daily_limit - already_sent))
+                recover_due_retry_later_nudges(client)
+                schedule_missing_due_nudges(client)
+                batch_limit = resolve_followup_batch_limit(daily_limit - already_sent)
                 items = fetch_approved_followups(client, batch_limit)
 
             if not items:
@@ -4237,7 +5614,7 @@ async def main() -> None:
                 retry_count = 0
                 skipped_count = 0
 
-                for fu in items:
+                for index, fu in enumerate(items):
                     try:
                         result = await process_followup_one(context, client, fu)
                         if result == "sent":
@@ -4248,6 +5625,43 @@ async def main() -> None:
                             failed_count += 1
                         else:  # retry
                             retry_count += 1
+                    except NetworkOutageError as exc:
+                        remaining_ids = [
+                            str(item.get("id") or "")
+                            for item in items[index:]
+                            if item.get("id")
+                        ]
+                        logger.error(
+                            "Network outage detected; aborting followup batch",
+                            {
+                                "followupId": fu.get("id"),
+                                "remaining": len(remaining_ids),
+                            },
+                            error=exc,
+                        )
+                        requeued = 0
+                        try:
+                            requeued = requeue_processing_followup_batch(
+                                client,
+                                remaining_ids,
+                                f"batch_aborted_network_outage: {exc}",
+                            )
+                        except Exception as requeue_error:
+                            logger.warn(
+                                "Failed to requeue followups after network outage; stale recovery will retry later",
+                                error=requeue_error,
+                            )
+                        logger.operation_complete("sender-followup", result={
+                            "sent": sent_count,
+                            "skipped": skipped_count,
+                            "failed": failed_count,
+                            "retry": retry_count,
+                            "requeued": requeued,
+                            "aborted": True,
+                            "abort_reason": "network_outage",
+                            "total": len(items),
+                        })
+                        return
                     except Exception as exc:
                         logger.error(f"Failed to send followup", {"followupId": fu.get('id')}, error=exc)
                         # Unexpected exception - mark as retry

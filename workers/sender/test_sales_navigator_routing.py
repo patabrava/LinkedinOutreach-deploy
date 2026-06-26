@@ -2,11 +2,14 @@
 """Tests for Sales Navigator sender routing helpers."""
 
 import sys
+import asyncio
+import inspect
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import sender as sender_module
 from sender import (
     INVITE_RETRY_STATUSES,
     DIRECT_MESSAGE_COMPOSER_SELECTOR,
@@ -17,11 +20,13 @@ from sender import (
     classify_connect_only_surface,
     classify_connect_only_probe_surface,
     connect_only_sent_today_count,
+    direct_thread_text_matches_lead,
     fetch_invite_queue,
     fetch_message_only_leads,
     build_sales_navigator_body,
     build_sales_navigator_subject,
     clear_message_only_retry_profile_data,
+    is_network_outage_error,
     linkedin_absolute_url,
     _is_invite_candidate,
     _is_message_only_candidate,
@@ -30,12 +35,19 @@ from sender import (
     mark_message_only_processing,
     normalize_typed_text,
     normalize_linkedin_profile_url,
+    linkedin_profile_unavailable_reason,
     persist_invite_sent,
+    post_send_bubble_near_match,
     promote_connect_only_to_connected,
+    resolve_followup_batch_limit,
+    send_sales_navigator_message,
+    sender_name_is_own_account,
     strip_sales_navigator_signature,
     typed_text_matches,
     _message_only_priority,
     _connect_or_pending_label_matches,
+    insert_composer_text,
+    verify_latest_outbound_message,
 )
 
 
@@ -316,6 +328,56 @@ class FakeMessageOnlyClient:
         return FakeMessageOnlyQuery(self)
 
 
+class FakeKeyboard:
+    def __init__(self, insert_error=None):
+        self.typed = []
+        self.inserted = []
+        self.insert_error = insert_error
+
+    async def type(self, text, delay=None):
+        self.typed.append((text, delay))
+
+    async def insert_text(self, text):
+        if self.insert_error:
+            raise self.insert_error
+        self.inserted.append(text)
+
+
+class FakePage:
+    def __init__(self, insert_error=None):
+        self.keyboard = FakeKeyboard(insert_error=insert_error)
+        self.screenshots = []
+
+    async def wait_for_timeout(self, timeout):
+        await asyncio.sleep(min(float(timeout) / 1000, 0.001))
+
+    async def screenshot(self, path, full_page=False):
+        self.screenshots.append((path, full_page))
+
+
+class FakeEditor:
+    def __init__(self, fill_error=None):
+        self.fill_error = fill_error
+        self.filled = []
+        self.clicked = False
+
+    async def fill(self, text, timeout=None):
+        if self.fill_error:
+            raise self.fill_error
+        self.filled.append((text, timeout))
+
+    async def click(self):
+        self.clicked = True
+
+
+class AsyncBubble:
+    def __init__(self, bubble):
+        self.bubble = bubble
+
+    async def __call__(self, _page):
+        return self.bubble
+
+
 class SalesNavigatorRoutingTest(unittest.TestCase):
     def test_normalize_linkedin_profile_url_removes_query_and_trailing_slash(self):
         result = normalize_linkedin_profile_url(
@@ -324,16 +386,465 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual(result, "https://www.linkedin.com/in/marcel-ohlendorf-42335a197")
 
+    def test_linkedin_profile_unavailable_detector_covers_german_404(self):
+        class BodyLocator:
+            async def inner_text(self, timeout=None):
+                return "Diese Seite existiert nicht. Überprüfen Sie die URL."
+
+        class Page:
+            url = "https://www.linkedin.com/in/missing"
+
+            def locator(self, selector):
+                if selector != "body":
+                    raise AssertionError(selector)
+                return BodyLocator()
+
+        result = asyncio.run(linkedin_profile_unavailable_reason(Page()))
+
+        self.assertEqual(result, "linkedin_profile_not_found")
+
+    def test_message_only_flow_refuses_page_level_profile_fallback(self):
+        source = inspect.getsource(sender_module.process_message_only_one)
+
+        self.assertIn("refusing to fall back to page-level selectors", source)
+        self.assertIn("first_safe_message_target", source)
+        self.assertNotIn("profile_container = page\n", source)
+
+    def test_message_only_direct_thread_mismatch_retries_once(self):
+        source = inspect.getsource(sender_module.process_message_only_one)
+
+        self.assertIn("is_direct_thread_mismatch_error(send_error)", source)
+        self.assertIn("First-message direct surface opened a stale or mismatched thread", source)
+        self.assertIn("open_followup_message_surface(page)", source)
+
     def test_normalize_typed_text_matches_linkedin_collapsed_paragraph_spacing(self):
         expected = "Hi Sabrina,\n\nfreut mich, dass wir uns vernetzen.\n\nViele Gruesse,\nKatharina"
         actual = "Hi Sabrina, freut mich, dass wir uns vernetzen. Viele Gruesse, Katharina"
 
         self.assertEqual(normalize_typed_text(actual), normalize_typed_text(expected))
 
+    def test_insert_composer_text_uses_insert_text_without_keyboard_enter(self):
+        async def run():
+            page = FakePage()
+            editor = FakeEditor()
+            method = await insert_composer_text(page, editor, "Hi Daniel,\n\nvolle Nachricht")
+            return page, editor, method
+
+        page, editor, method = asyncio.run(run())
+
+        self.assertEqual(method, "insert_text")
+        self.assertTrue(editor.clicked)
+        self.assertEqual(editor.filled, [])
+        self.assertEqual(page.keyboard.typed, [])
+        self.assertEqual(page.keyboard.inserted, ["Hi Daniel,\n\nvolle Nachricht"])
+
+    def test_insert_composer_text_fallback_uses_fill_not_keyboard_type(self):
+        async def run():
+            page = FakePage(insert_error=RuntimeError("insert unavailable"))
+            editor = FakeEditor()
+            method = await insert_composer_text(page, editor, "Hi Daniel,\n\nvolle Nachricht")
+            return page, editor, method
+
+        page, editor, method = asyncio.run(run())
+
+        self.assertEqual(method, "fill")
+        self.assertTrue(editor.clicked)
+        self.assertEqual(editor.filled, [("Hi Daniel,\n\nvolle Nachricht", 10_000)])
+        self.assertEqual(page.keyboard.inserted, [])
+        self.assertEqual(page.keyboard.typed, [])
+
+    def test_direct_thread_text_matches_hyphenated_lead_name(self):
+        lead = {
+            "first_name": "Iasonas",
+            "last_name": "Kouveliotis Lysikatos",
+        }
+
+        self.assertTrue(
+            direct_thread_text_matches_lead(
+                "Iasonas Kouveliotis-Lysikatos",
+                lead,
+            )
+        )
+        self.assertFalse(direct_thread_text_matches_lead("Sabrina Lem", lead))
+
+    def test_direct_thread_text_matches_accented_linkedin_identity(self):
+        lead = {
+            "first_name": "Elise",
+            "last_name": "Lebosse",
+        }
+
+        self.assertTrue(direct_thread_text_matches_lead("Elise Lebossé", lead))
+
+    def test_resolve_followup_batch_limit_respects_env_and_daily_remainder(self):
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {"FOLLOWUP_BATCH_LIMIT": "250"}):
+            self.assertEqual(resolve_followup_batch_limit(17), 17)
+            self.assertEqual(resolve_followup_batch_limit(300), 250)
+
+    def test_sender_name_is_own_account_for_observed_linkedin_label(self):
+        self.assertTrue(sender_name_is_own_account("Katharina Hoffmann"))
+        self.assertFalse(sender_name_is_own_account("Sabrina Lem"))
+
+    def test_direct_editor_identity_accepts_generic_new_message_header_with_recipient_preview(self):
+        async def fake_identity(_editor):
+            return {
+                "headerTexts": ["Neue Nachricht"],
+                "links": [],
+                "rootPreview": "Neue Nachricht Liva Kallite 1. Grades Senior Product Designer",
+            }
+
+        async def fail_extract(_page):
+            raise AssertionError("recipient preview should prove identity before bubble fallback")
+
+        async def run():
+            original_identity = sender_module.read_direct_message_editor_identity
+            original_bubble = sender_module.extract_last_bubble
+            sender_module.read_direct_message_editor_identity = fake_identity
+            sender_module.extract_last_bubble = fail_extract
+            try:
+                await sender_module.assert_direct_message_editor_matches_lead(
+                    FakePage(),
+                    object(),
+                    {"id": "lead-1", "first_name": "Liva", "last_name": "Kallite"},
+                )
+            finally:
+                sender_module.read_direct_message_editor_identity = original_identity
+                sender_module.extract_last_bubble = original_bubble
+
+        asyncio.run(run())
+
+    def test_network_outage_detector_matches_browser_and_dns_failures(self):
+        self.assertTrue(is_network_outage_error("Page.goto: net::ERR_INTERNET_DISCONNECTED"))
+        self.assertTrue(is_network_outage_error("[Errno 8] nodename nor servname provided, or not known"))
+        self.assertFalse(is_network_outage_error("Direct message composer verification failed after typing"))
+
+    def test_post_send_bubble_near_match_accepts_own_visible_truncation(self):
+        expected = (
+            "Hi Veronika,\n\nletzte kurze Nachricht.\n\n"
+            "Drei Dinge stehen dir bei deinem Arbeitgeber zu:\n\n"
+            "-> Arbeitgeberzuschuss zur Altersvorsorge (mindestens 15%)\n"
+            "-> Steuerliche Foerderung (Beitrag aus dem Brutto)\n"
+            "-> Sozialversicherungsersparnis\n\n"
+            "Dazu kommt ab 2027 das neue Altersvorsorgedepot.\n\n"
+            "eine komplett neue Moeglichkeit, steuerlich gefoerdert in ETFs zu sparen. "
+            "Degura wird das ab Tag eins anbieten.\n\n"
+            "Wenn du magst, schauen wir uns das kurz zusammen an, "
+            "ich freue mich auf den Austausch.\n\n"
+            "Viele Gruesse\nKatharina"
+        )
+        actual = (
+            expected
+            .replace("Sozialversicherungsersparnis", "Sozialversicherungser sparnis")
+            .replace("Dazu", "Da zu")
+            .replace("Gruesse", "Grues se")
+            .replace("Katharina", "Katha rina")
+        )
+
+        matched, details = post_send_bubble_near_match(actual, expected)
+
+        self.assertTrue(matched)
+        self.assertTrue(details["prefixOk"])
+
+    def test_post_send_bubble_near_match_accepts_linkedin_collapsed_block_breaks(self):
+        expected = (
+            "Hi Quentin,\n\nletzte kurze Nachricht.\n\n"
+            "Drei Dinge stehen dir bei deinem Arbeitgeber zu:\n\n"
+            "-> Arbeitgeberzuschuss zur Altersvorsorge (mindestens 15%)\n"
+            "-> Steuerliche Foerderung (Beitrag aus dem Brutto)\n"
+            "-> Sozialversicherungsersparnis\n\n"
+            "Dazu kommt ab 2027 das neue Altersvorsorgedepot.\n\n"
+            "eine komplett neue Moeglichkeit, steuerlich gefoerdert in ETFs zu sparen. "
+            "Degura wird das ab Tag eins anbieten.\n\n"
+            "Wenn du magst, schauen wir uns das kurz zusammen an, "
+            "ich freue mich auf den Austausch.\n\n"
+            "Viele Gruesse\nKatharina"
+        )
+        actual = (
+            "Hi Quentin,letzte kurze Nachricht."
+            "Drei Dinge stehen dir bei deinem Arbeitgeber zu:"
+            "-> Arbeitgeberzuschuss zur Altersvorsorge (mindestens 15%)"
+            "-> Steuerliche Foerderung (Beitrag aus dem Brutto)"
+            "-> Sozialversicherungser sparnis"
+            "Da zu kommt ab 2027 das neue Altersvorsorgedepot."
+            "eine komplett neue Moeglichkeit, steuerlich gefoerdert in ETFs zu sparen. "
+            "Degura wird das ab Tag eins anbieten."
+            "Wenn du magst, schauen wir uns das kurz zusammen an, "
+            "ich freue mich auf den Austausch."
+            "Viele Grues se"
+            "Katha rina"
+        )
+
+        matched, details = post_send_bubble_near_match(actual, expected)
+
+        self.assertTrue(matched)
+        self.assertTrue(details["prefixOk"])
+
+    def test_sales_navigator_body_only_composer_does_not_require_subject(self):
+        from unittest.mock import AsyncMock, patch
+
+        class Locator:
+            def __init__(self, count, visible=True):
+                self._count = count
+                self.visible = visible
+                self.first = self
+
+            async def count(self):
+                return self._count
+
+            def nth(self, _index):
+                return self
+
+            async def wait_for(self, **_kwargs):
+                if not self.visible:
+                    raise TimeoutError("hidden")
+                return None
+
+        class Page:
+            def __init__(self):
+                self.body = Locator(1)
+                self.subject = Locator(0)
+
+            def locator(self, selector):
+                if "subject" in selector.lower() or "betreff" in selector.lower():
+                    return self.subject
+                return self.body
+
+            async def wait_for_timeout(self, _timeout):
+                return None
+
+        page = Page()
+        filled = []
+
+        async def fake_fill(_page, selector_name, locator, value):
+            filled.append((selector_name, locator, value))
+
+        async def run():
+            with patch.object(sender_module, "fill_text_field", AsyncMock(side_effect=fake_fill)), \
+                patch.object(sender_module, "click_editor_scoped_send_button", AsyncMock(return_value=True)), \
+                patch.object(sender_module, "random_pause", AsyncMock()):
+                await send_sales_navigator_message(page, "Subject text", "Body text")
+
+        asyncio.run(run())
+
+        self.assertEqual(len(filled), 1)
+        self.assertEqual(filled[0][2], "Body text")
+        self.assertIs(filled[0][1], page.body)
+
+    def test_sales_navigator_body_selection_skips_hidden_textarea(self):
+        from unittest.mock import AsyncMock, patch
+
+        class Locator:
+            def __init__(self, count, visible=True):
+                self._count = count
+                self.visible = visible
+                self.first = self
+
+            async def count(self):
+                return self._count
+
+            def nth(self, _index):
+                return self
+
+            async def wait_for(self, **_kwargs):
+                if not self.visible:
+                    raise TimeoutError("hidden")
+                return None
+
+            async def evaluate(self, _script):
+                return self.visible
+
+        class Page:
+            def __init__(self):
+                self.hidden_textarea = Locator(1, visible=False)
+                self.visible_editor = Locator(1, visible=True)
+                self.subject = Locator(0)
+
+            def locator(self, selector):
+                lowered = selector.lower()
+                if "subject" in lowered or "betreff" in lowered:
+                    return self.subject
+                if "textarea" in lowered:
+                    return self.hidden_textarea
+                return self.visible_editor
+
+            async def wait_for_timeout(self, _timeout):
+                return None
+
+        page = Page()
+        filled = []
+
+        async def fake_fill(_page, selector_name, locator, value):
+            filled.append((selector_name, locator, value))
+
+        async def run():
+            with patch.object(sender_module, "fill_text_field", AsyncMock(side_effect=fake_fill)), \
+                patch.object(sender_module, "click_editor_scoped_send_button", AsyncMock(return_value=True)), \
+                patch.object(sender_module, "random_pause", AsyncMock()):
+                await send_sales_navigator_message(page, "Subject text", "Body text")
+
+        asyncio.run(run())
+
+        self.assertEqual(len(filled), 1)
+        self.assertIs(filled[0][1], page.visible_editor)
+
+    def test_sales_navigator_does_not_click_global_send_fallback_when_scoped_send_missing(self):
+        from unittest.mock import AsyncMock, patch
+
+        class Locator:
+            def __init__(self, count=1, visible=True):
+                self._count = count
+                self.visible = visible
+                self.first = self
+                self.clicked = False
+
+            async def count(self):
+                return self._count
+
+            def nth(self, _index):
+                return self
+
+            async def wait_for(self, **_kwargs):
+                if not self.visible:
+                    raise TimeoutError("hidden")
+                return None
+
+            async def is_enabled(self):
+                return True
+
+            async def click(self):
+                self.clicked = True
+
+        class Page:
+            def __init__(self):
+                self.subject = Locator(0)
+                self.body = Locator(1)
+                self.global_send = Locator(1)
+
+            def locator(self, selector):
+                lowered = selector.lower()
+                if "subject" in lowered or "betreff" in lowered:
+                    return self.subject
+                if "button.msg-form__send-button" in lowered:
+                    return self.global_send
+                return self.body
+
+            async def wait_for_timeout(self, _timeout):
+                return None
+
+        page = Page()
+
+        async def run():
+            with patch.object(sender_module, "fill_text_field", AsyncMock()), \
+                patch.object(sender_module, "click_editor_scoped_send_button", AsyncMock(return_value=False)), \
+                patch.object(sender_module, "random_pause", AsyncMock()):
+                await send_sales_navigator_message(page, "Subject text", "Body text")
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(run())
+        self.assertFalse(page.global_send.clicked)
+
+    def test_sales_navigator_overlay_probe_supports_icon_only_send_button(self):
+        source = inspect.getsource(sender_module.click_sales_navigator_overlay_send_button)
+
+        self.assertIn("iconOnlySend", source)
+        self.assertIn("hasProminentBackground", source)
+        self.assertIn("classText", source)
+        self.assertIn("bodyFields", source)
+        self.assertIn("rootIndex", source)
+        self.assertIn('querySelectorAll("button, [role=\\"button\\"]")', source)
+
+    def test_sales_navigator_visual_send_fallback_is_composer_bounded(self):
+        source = inspect.getsource(sender_module.click_sales_navigator_visual_send_button)
+
+        self.assertIn("bodySendZone", source)
+        self.assertIn("paper-plane", source)
+        self.assertIn("page.mouse.click", source)
+        self.assertIn("fallbackComposerRoot", source)
+        self.assertIn('div[contenteditable="true"]', source)
+        self.assertIn("usingViewportRoot", source)
+        self.assertIn("viewportHeight - 70", source)
+        self.assertIn("rootRect", source)
+
+    def test_followup_message_target_skips_feed_activity_controls(self):
+        source = inspect.getsource(sender_module.message_target_is_feed_surface)
+
+        self.assertIn("/feed/update/", source)
+        self.assertIn("urn:li:activity", source)
+        self.assertIn("profile-creator-shared-feed-update", source)
+        self.assertIn("data-urn", source)
+
+    def test_close_existing_chat_overlays_scans_role_button_controls(self):
+        source = inspect.getsource(sender_module.close_existing_chat_overlays)
+
+        self.assertIn('querySelectorAll("button, [role=\\"button\\"]")', source)
+
+    def test_send_message_has_no_direct_keyboard_send_fallback(self):
+        source = inspect.getsource(sender_module.send_message)
+
+        self.assertNotIn("keyboard.press(\"Enter\")", source)
+        self.assertNotIn("Meta+Enter", source)
+        self.assertNotIn("Control+Enter", source)
+        self.assertNotIn("Enter fallback", source)
+
+    def test_verify_latest_outbound_message_accepts_full_bubble(self):
+        async def run():
+            page = FakePage()
+            original = sender_module.extract_last_bubble
+            sender_module.extract_last_bubble = AsyncBubble(
+                {"sender": "Sie", "text": "Hi Daniel,\n\nvolle Nachricht mit Inhalt", "is_outbound": True}
+            )
+            try:
+                return await verify_latest_outbound_message(
+                    page,
+                    "Hi Daniel,\n\nvolle Nachricht mit Inhalt",
+                    timeout_ms=10,
+                )
+            finally:
+                sender_module.extract_last_bubble = original
+
+        details = asyncio.run(run())
+
+        self.assertEqual(details["missingWords"], [])
+
+    def test_verify_latest_outbound_message_rejects_chopped_greeting(self):
+        async def run():
+            page = FakePage()
+            original = sender_module.extract_last_bubble
+            sender_module.extract_last_bubble = AsyncBubble(
+                {"sender": "Sie", "text": "Hi Daniel,", "is_outbound": True}
+            )
+            try:
+                await verify_latest_outbound_message(
+                    page,
+                    "Hi Daniel,\n\nvolle Nachricht mit Inhalt",
+                    timeout_ms=5,
+                )
+            finally:
+                sender_module.extract_last_bubble = original
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(run())
+
     def test_direct_message_wait_selector_covers_current_linkedin_composer(self):
         self.assertIn("Write a message", DIRECT_MESSAGE_COMPOSER_SELECTOR)
+        self.assertIn("Nachricht verfassen", DIRECT_MESSAGE_COMPOSER_SELECTOR)
+        self.assertIn("data-placeholder*='Nachricht'", DIRECT_MESSAGE_COMPOSER_SELECTOR)
         self.assertIn("msg-form-ember", DIRECT_MESSAGE_COMPOSER_SELECTOR)
+        self.assertIn("form.msg-form", DIRECT_MESSAGE_COMPOSER_SELECTOR)
         self.assertIn("role='textbox'", DIRECT_MESSAGE_COMPOSER_SELECTOR)
+        self.assertNotIn(
+            "div[role='textbox'][contenteditable='true']:not([id^='g-recaptcha'])",
+            DIRECT_MESSAGE_COMPOSER_SELECTOR,
+        )
+
+    def test_direct_message_editor_skips_feed_comment_surfaces(self):
+        source = inspect.getsource(sender_module.direct_message_editor_is_comment_surface)
+
+        self.assertIn("comments-comment", source)
+        self.assertIn("comment-box", source)
+        self.assertIn("feed-shared", source)
+        self.assertIn("hasMessageRoot", source)
 
     def test_direct_message_send_selector_covers_current_linkedin_button(self):
         self.assertIn("msg-form__send-button", DIRECT_MESSAGE_SEND_BUTTON_SELECTOR)
@@ -841,6 +1352,30 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
             )
         )
 
+    def test_message_only_candidate_rejects_permanent_profile_failure(self):
+        self.assertFalse(
+            _is_message_only_candidate(
+                {
+                    "status": "FAILED",
+                    "connection_sent_at": "2026-04-26T00:00:00Z",
+                    "sent_at": None,
+                    "error_message": "LinkedIn profile unavailable: linkedin_profile_not_found",
+                }
+            )
+        )
+
+    def test_message_only_candidate_keeps_transient_timeout_retryable(self):
+        self.assertTrue(
+            _is_message_only_candidate(
+                {
+                    "status": "FAILED",
+                    "connection_sent_at": "2026-04-26T00:00:00Z",
+                    "sent_at": None,
+                    "error_message": "Page.wait_for_selector: Timeout 20000ms exceeded",
+                }
+            )
+        )
+
     def test_message_only_candidate_rejects_unstarted_new_lead(self):
         self.assertFalse(
             _is_message_only_candidate(
@@ -957,8 +1492,8 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
     def _patches(self, *, surface_result):
         """Patch `open_followup_message_surface` with `surface_result`.
 
-        `surface_result` is either an Exception (side_effect) or a
-        `(target_page, surface_string)` tuple (return_value).
+        `surface_result` is an Exception, a `(target_page, surface_string)`
+        tuple, or a list consumed as `side_effect`.
         """
         from contextlib import ExitStack
         from unittest.mock import AsyncMock, MagicMock, patch
@@ -968,7 +1503,15 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
         stack = ExitStack()
         mocks = {}
 
-        if isinstance(surface_result, Exception):
+        if isinstance(surface_result, list):
+            mocks["open_followup_message_surface"] = stack.enter_context(
+                patch.object(
+                    sender_mod,
+                    "open_followup_message_surface",
+                    AsyncMock(side_effect=surface_result),
+                )
+            )
+        elif isinstance(surface_result, Exception):
             mocks["open_followup_message_surface"] = stack.enter_context(
                 patch.object(
                     sender_mod,
@@ -989,6 +1532,9 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
         )
         mocks["send_message"] = stack.enter_context(
             patch.object(sender_mod, "send_message", AsyncMock())
+        )
+        mocks["close_existing_chat_overlays"] = stack.enter_context(
+            patch.object(sender_mod, "close_existing_chat_overlays", AsyncMock(return_value=1))
         )
         mocks["message_send_start"] = stack.enter_context(
             patch.object(sender_mod.logger, "message_send_start", MagicMock())
@@ -1145,6 +1691,133 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
             "reply_detected_at_send_time",
         )
         mocks["_record_reply_at_send_time"].assert_called_once()
+
+    async def test_nudge_own_account_sender_overrides_shared_first_name_reply_match(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from sender import process_followup_one, SURFACE_MESSAGE
+
+        page = self._build_mock_page()
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        client = MagicMock()
+        followup = self._build_followup()
+        followup["followup_type"] = "NUDGE"
+        followup["lead"]["first_name"] = "Katharina"
+        followup["lead"]["last_name"] = "Muster"
+
+        stack, mocks = self._patches(
+            surface_result=(page, SURFACE_MESSAGE),
+        )
+        mocks["extract_last_bubble"].return_value = {
+            "sender": "Katharina Hoffmann",
+            "text": "Hi Luisa, nur ein kurzer Followup.",
+            "is_outbound": False,
+        }
+        mocks["classify_last_sender"].return_value = "lead"
+        with stack:
+            result = await process_followup_one(context, client, followup)
+
+        self.assertEqual(result, "sent")
+        mocks["send_message"].assert_awaited_once()
+        mocks["message_send_start"].assert_called_once()
+        mocks["mark_followup_sent"].assert_called_once()
+        mocks["mark_followup_skipped"].assert_not_called()
+        mocks["_record_reply_at_send_time"].assert_not_called()
+
+    async def test_direct_thread_mismatch_closes_and_reopens_once_before_sending(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from sender import process_followup_one, SURFACE_MESSAGE
+
+        page = self._build_mock_page()
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        client = MagicMock()
+        followup = self._build_followup()
+        followup["followup_type"] = "NUDGE"
+
+        stack, mocks = self._patches(
+            surface_result=[(page, SURFACE_MESSAGE), (page, SURFACE_MESSAGE)],
+        )
+        mocks["send_message"].side_effect = [
+            RuntimeError(
+                "Direct message editor belongs to a different thread "
+                "(expected='Marina Schulz', identity='Meysam Azad')."
+            ),
+            None,
+        ]
+        with stack:
+            result = await process_followup_one(context, client, followup)
+
+        self.assertEqual(result, "sent")
+        self.assertEqual(page.goto.await_count, 2)
+        self.assertEqual(page.goto.await_args_list[1].args[0], followup["lead"]["linkedin_url"])
+        self.assertEqual(mocks["open_followup_message_surface"].await_count, 2)
+        self.assertEqual(mocks["send_message"].await_count, 2)
+        self.assertGreaterEqual(mocks["close_existing_chat_overlays"].await_count, 1)
+        mocks["send_sales_navigator_message"].assert_not_awaited()
+        mocks["message_send_start"].assert_called_once()
+        mocks["mark_followup_sent"].assert_called_once()
+        mocks["mark_followup_failed"].assert_not_called()
+
+    async def test_nudge_mismatched_visible_thread_retries_without_send_start(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from sender import process_followup_one, SURFACE_MESSAGE
+
+        page = self._build_mock_page()
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        client = MagicMock()
+        followup = self._build_followup()
+        followup["followup_type"] = "NUDGE"
+
+        stack, mocks = self._patches(
+            surface_result=(page, SURFACE_MESSAGE),
+        )
+        mocks["extract_last_bubble"].return_value = {
+            "sender": "Sabrina Lem",
+            "text": "Hello. I am in the North America branch.",
+            "is_outbound": False,
+        }
+        mocks["classify_last_sender"].return_value = "unknown"
+        with stack:
+            result = await process_followup_one(context, client, followup)
+
+        self.assertEqual(result, "retry")
+        mocks["send_message"].assert_not_awaited()
+        mocks["send_sales_navigator_message"].assert_not_awaited()
+        mocks["message_send_start"].assert_not_called()
+        mocks["mark_followup_sent"].assert_not_called()
+        mocks["mark_followup_failed"].assert_called_once()
+        self.assertIn("sender='Sabrina Lem'", mocks["mark_followup_failed"].call_args.args[2])
+
+    async def test_nudge_own_sender_name_is_treated_as_outbound(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from sender import process_followup_one, SURFACE_MESSAGE
+
+        page = self._build_mock_page()
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        client = MagicMock()
+        followup = self._build_followup()
+        followup["followup_type"] = "NUDGE"
+
+        stack, mocks = self._patches(
+            surface_result=(page, SURFACE_MESSAGE),
+        )
+        mocks["extract_last_bubble"].return_value = {
+            "sender": "Katharina Hoffmann",
+            "text": "Hi Marina, nur ein kurzer Followup.",
+            "is_outbound": False,
+        }
+        mocks["classify_last_sender"].return_value = "unknown"
+        with stack:
+            result = await process_followup_one(context, client, followup)
+
+        self.assertEqual(result, "sent")
+        mocks["send_message"].assert_awaited_once()
+        mocks["message_send_start"].assert_called_once()
+        mocks["mark_followup_sent"].assert_called_once()
+        mocks["mark_followup_failed"].assert_not_called()
 
     async def test_fails_permanently_when_no_surface(self):
         from unittest.mock import AsyncMock, MagicMock
