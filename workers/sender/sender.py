@@ -78,6 +78,7 @@ FOLLOWUP_BATCH_LIMIT_DEFAULT = 20
 MESSAGE_ONLY_PROBE_LIMIT_DEFAULT = 200
 SEQUENCE_INTERVAL_DEFAULT_DAYS = 3
 LEAD_MESSAGE_ONLY_MAX_RETRIES = 3
+CONNECT_ONLY_CONSECUTIVE_FAILURE_LIMIT = 3
 FOLLOWUP_PROCESSING_STALE_MINUTES = 45
 NUDGE_ACTIVE_STATUSES = {"APPROVED", "PROCESSING", "RETRY_LATER"}
 OWN_SENDER_NAME_DEFAULTS = ("Katharina Hoffmann",)
@@ -842,6 +843,18 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
 
 
 INVITE_RETRY_STATUSES = ["NEW", "FAILED"]
+
+
+def update_invite_failure_streak(
+    result: str,
+    current_streak: int,
+    threshold: int = CONNECT_ONLY_CONSECUTIVE_FAILURE_LIMIT,
+) -> tuple[int, bool]:
+    """Track consecutive invite send failures and signal a probable weekly cap."""
+    if result == "failed":
+        next_streak = current_streak + 1
+        return next_streak, next_streak >= threshold
+    return 0, False
 
 
 def _is_invite_candidate(lead: Dict[str, Any]) -> bool:
@@ -5838,6 +5851,7 @@ async def main() -> None:
                 failed_count = 0
                 skipped_count = 0
                 limit_reached = False
+                consecutive_invite_failures = 0
                 attempted_invite_ids: set[str] = set()
                 total_seen = 0
 
@@ -5870,6 +5884,25 @@ async def main() -> None:
                                 skipped_count += 1
                             else:
                                 failed_count += 1
+                            consecutive_invite_failures, probable_limit_reached = update_invite_failure_streak(
+                                result,
+                                consecutive_invite_failures,
+                            )
+                            if probable_limit_reached:
+                                limit_reached = True
+                                mark_connect_only_limit_reached(
+                                    client,
+                                    lead,
+                                    "Probable LinkedIn weekly invite limit reached after 3 consecutive unconfirmed friend-request attempts",
+                                )
+                                logger.warn(
+                                    "Probable weekly invite limit reached after consecutive invite failures - aborting run",
+                                    {
+                                        "leadId": lead_id,
+                                        "consecutiveFailures": consecutive_invite_failures,
+                                    },
+                                )
+                                break
                         except Exception as exc:
                             logger.error("Failed to process invite lead", {"leadId": lead_id}, error=exc)
                             failed_count += 1

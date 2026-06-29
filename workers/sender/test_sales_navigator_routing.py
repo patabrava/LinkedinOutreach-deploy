@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import sender as sender_module
 from sender import (
     INVITE_RETRY_STATUSES,
+    CONNECT_ONLY_CONSECUTIVE_FAILURE_LIMIT,
     DIRECT_MESSAGE_COMPOSER_SELECTOR,
     DIRECT_MESSAGE_SCOPED_SEND_ROOT_SELECTORS,
     DIRECT_MESSAGE_SEND_BUTTON_SELECTOR,
@@ -46,6 +47,7 @@ from sender import (
     typed_text_matches,
     _message_only_priority,
     _connect_or_pending_label_matches,
+    update_invite_failure_streak,
     insert_composer_text,
     verify_latest_outbound_message,
 )
@@ -1154,6 +1156,27 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         )
         self.assertIn("connect_only_limit_at", client.lead["profile_data"]["meta"])
         self.assertTrue(client.lead["profile_data"]["meta"]["existing"])
+
+    def test_invite_failure_streak_stops_after_three_consecutive_failures(self):
+        streak, stop = update_invite_failure_streak("failed", 0)
+        self.assertEqual(streak, 1)
+        self.assertFalse(stop)
+
+        streak, stop = update_invite_failure_streak("failed", streak)
+        self.assertEqual(streak, 2)
+        self.assertFalse(stop)
+
+        streak, stop = update_invite_failure_streak("failed", streak)
+        self.assertEqual(streak, CONNECT_ONLY_CONSECUTIVE_FAILURE_LIMIT)
+        self.assertTrue(stop)
+
+    def test_invite_failure_streak_resets_after_successful_invite_state(self):
+        streak, stop = update_invite_failure_streak("failed", 2)
+        self.assertTrue(stop)
+
+        streak, stop = update_invite_failure_streak("sent", streak)
+        self.assertEqual(streak, 0)
+        self.assertFalse(stop)
 
     def test_persist_invite_sent_moves_lead_to_connect_only_sent(self):
         lead = {"id": "lead-1", "status": "PROCESSING", "outreach_mode": "connect_only"}
