@@ -129,6 +129,29 @@ export default function DeguraPerformanceReportPage() {
         </div>
       </section>
 
+      <section className="report-section report-section--call-potential">
+        <div className="report-section__header">
+          <div>
+            <span className="pill status-approved">Call-Potenzial</span>
+            <h2 className="section-title">{report.callPotential.title}</h2>
+          </div>
+          <p>{report.callPotential.summary}</p>
+        </div>
+        <div className="report-call-grid">
+          {report.callPotential.items.map((item) => (
+            <article
+              key={item.label}
+              className={`report-call-card${item.emphasis ? " report-call-card--emphasis" : ""}`}
+            >
+              <div className="report-call-card__label">{item.label}</div>
+              <div className="report-call-card__value">{item.value}</div>
+              <p>{item.detail}</p>
+            </article>
+          ))}
+        </div>
+        <p className="report-call-note">{report.callPotential.note}</p>
+      </section>
+
       <section className="report-two-column">
         <article className="report-section">
           <span className="pill">Nachrichten-Learning</span>

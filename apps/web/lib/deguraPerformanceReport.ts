@@ -33,6 +33,13 @@ export type VolumeScenario = {
   note: string;
 };
 
+export type CallPotentialItem = {
+  label: string;
+  value: string;
+  detail: string;
+  emphasis?: boolean;
+};
+
 export type DeguraPerformanceReport = {
   snapshotAt: string;
   campaignWindow: string;
@@ -47,6 +54,12 @@ export type DeguraPerformanceReport = {
   funnel: ReportFunnelStep[];
   responseClusters: ResponseCluster[];
   positiveSignals: PositiveSignal[];
+  callPotential: {
+    title: string;
+    summary: string;
+    items: CallPotentialItem[];
+    note: string;
+  };
   copyLearnings: string[];
   volumeScenarios: VolumeScenario[];
   nextActions: string[];
@@ -115,7 +128,7 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
       { label: "Nachrichten", value: "274", detail: "Erste Nachrichten gesendet" },
       { label: "Antworten", value: "44", detail: "16,1% Antwortrate", accent: "yellow" },
       { label: "Positive Antworten", value: "11", detail: "25,0% der Antworten", accent: "red" },
-      { label: "Positivrate", value: "4,0%", detail: "Der gesendeten Nachrichten", accent: "red" },
+      { label: "Call-Potenzial", value: "1 + 5", detail: "1 explizit, 5 qualifiziert", accent: "red" },
     ],
     funnel,
     responseClusters: [
@@ -147,13 +160,13 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
           "Der CTA sollte als kurzer Status- oder Anspruchscheck formuliert werden, nicht als allgemeiner Altersvorsorge-Pitch.",
       },
       {
-        title: "Nächster Schritt offen",
+        title: "Explizite Terminbereitschaft",
         count: 1,
         positive: 1,
         interpretation:
-          "Direkte Terminbereitschaft ist selten, aber wertvoll. Diese Antworten sind die stärksten Signale im Funnel.",
+          "Eine Person hat konkret vorgeschlagen, das Thema in der nächsten Woche zu besprechen, inklusive möglicher Tage und Uhrzeit.",
         implication:
-          "Der Buchungslink bleibt sinnvoll, sollte aber als einfache Klärung und nicht als großer Beratungstermin wirken.",
+          "Das ist der klarste Sales-Trigger im Datensatz und sollte getrennt von allgemeinem Interesse ausgewiesen werden.",
       },
       {
         title: "Nicht relevant oder Zielgruppen-Mismatch",
@@ -206,6 +219,38 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
         followUp: "Termin sofort absichern und den Kontext vor dem Gespräch knapp zusammenfassen.",
       },
     ],
+    callPotential: {
+      title: "Call-Potenzial sauber getrennt",
+      summary:
+        "Die Detailprüfung der gespeicherten Antworten zeigt einen harten Meeting-Intent und mehrere qualifizierte positive Antworten, die sinnvoll in einen Call oder Buchungslink überführt wurden.",
+      items: [
+        {
+          label: "Explizite Terminbereitschaft",
+          value: "1",
+          detail: "Inbound-Antwort mit konkretem Vorschlag für nächste Woche, Dienstag oder Mittwoch ab 16 Uhr.",
+          emphasis: true,
+        },
+        {
+          label: "Qualifizierte Call-Kandidaten",
+          value: "5",
+          detail:
+            "Positive Antworten mit bAV-Unsicherheit, bestätigtem Zuschuss, Arbeitgeber-Kontextfrage oder neuem Jobstatus.",
+        },
+        {
+          label: "Positive Antworten gesamt",
+          value: "13",
+          detail: "Alle positiv klassifizierten Reply-Zeilen im Datensatz, inklusive Sprachwechsel und Rückfragen.",
+        },
+        {
+          label: "Booking-CTA gesendet",
+          value: "12",
+          detail:
+            "Outbound-Follow-ups mit Buchungslink nach positiver Klassifizierung; nicht als inbound Call-Anfrage gezählt.",
+        },
+      ],
+      note:
+        "Wichtig für die Bewertung: Der Bericht zählt nur echte eingehende Terminbereitschaft als expliziten Call-Intent. Booking-Link-Texte, die wir danach verschickt haben, werden separat ausgewiesen.",
+    },
     copyLearnings: [
       "Die Nachricht funktioniert dort gut, wo Personen ihren aktuellen bAV-Status nicht sicher einordnen können.",
       "Der Kontext zum früheren Arbeitgeber sollte früher und klarer kommen.",
@@ -234,6 +279,7 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
       "Volumen kontrolliert erhöhen: mehr qualifizierte Kontakte oder zusätzliche sichere Senderkapazität.",
       "Vergleichsbasis behalten: SEQUENZ B bleibt Bezugspunkt für die nächste Auswertung.",
       "Eine klare Textvariante testen: Kontextzeile plus Statuscheck-CTA.",
+      "Call-Potenzial separat tracken: explizite Terminbereitschaft, qualifizierte Call-Kandidaten und outbound Booking-CTA nicht vermischen.",
       "Antworten wöchentlich clustern: Interesse, Kontextfrage, Sprachwechsel, Nicht-Passung, klares Desinteresse.",
     ],
     methodology: [

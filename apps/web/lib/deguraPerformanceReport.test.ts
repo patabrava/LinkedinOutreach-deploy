@@ -11,6 +11,8 @@ test("degura report exposes the required client-facing sections", () => {
   assert.ok(report.funnel.length >= 6);
   assert.ok(report.responseClusters.length >= 6);
   assert.ok(report.positiveSignals.length >= 5);
+  assert.equal(report.callPotential.items.find((item) => item.label === "Explizite Terminbereitschaft")?.value, "1");
+  assert.equal(report.callPotential.items.find((item) => item.label === "Qualifizierte Call-Kandidaten")?.value, "5");
   assert.ok(report.copyLearnings.length >= 5);
   assert.ok(report.volumeScenarios.length >= 3);
   assert.ok(report.nextActions.length >= 4);

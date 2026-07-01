@@ -1342,6 +1342,65 @@ label {
   font-weight: 700;
 }
 
+.report-section--call-potential {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.report-section--call-potential .section-title,
+.report-section--call-potential .report-section__header p {
+  color: var(--bg);
+}
+
+.report-section--call-potential .report-section__header {
+  border-bottom-color: var(--bg);
+}
+
+.report-call-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+}
+
+.report-call-card {
+  border: 2px solid var(--bg);
+  margin: -2px 0 0 -2px;
+  padding: 18px;
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.report-call-card--emphasis {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.report-call-card__label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.report-call-card__value {
+  font-size: 64px;
+  line-height: 0.9;
+  font-weight: 700;
+}
+
+.report-call-card p {
+  margin-top: auto;
+}
+
+.report-call-note {
+  border-top: 2px solid var(--bg);
+  margin-top: 18px;
+  padding-top: 14px;
+  font-weight: 700;
+}
+
 .report-two-column {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -1426,6 +1485,7 @@ label {
   }
 
   .report-signal-list,
+  .report-call-grid,
   .report-volume-grid {
     grid-template-columns: 1fr;
   }
