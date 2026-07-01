@@ -14,7 +14,7 @@ services:
     shm_size: "1gb"
     labels:
       traefik.enable: "true"
-      traefik.http.routers.linkedin-outreach.rule: Host(`deguraleads.de`) || Host(`www.deguraleads.de`)
+      traefik.http.routers.linkedin-outreach.rule: Host(`deguraleads.de`) || Host(`www.deguraleads.de`) || Host(`report.deguraleads.de`)
       traefik.http.routers.linkedin-outreach.entrypoints: websecure
       traefik.http.routers.linkedin-outreach.tls: "true"
       traefik.http.routers.linkedin-outreach.tls.certresolver: letsencrypt

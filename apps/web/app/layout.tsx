@@ -1,5 +1,6 @@
 import "./globals.css";
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 
 import { NavBar } from "../components/NavBar";
 import { getServerSession } from "../lib/auth";
@@ -18,18 +19,20 @@ export default async function RootLayout({
   children: React.ReactNode;
 }) {
   const session = await getServerSession();
+  const host = headers().get("host")?.split(":")[0]?.toLowerCase() || "";
+  const isReportHost = host === "report.deguraleads.de";
 
   return (
-    <html lang="en">
+    <html lang={isReportHost ? "de" : "en"}>
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
       </head>
       <body>
         <a className="skip-link" href="#main">
-          Skip to content
+          {isReportHost ? "Direkt zum Inhalt" : "Skip to content"}
         </a>
-        <NavBar authenticated={Boolean(session)} email={session?.user.email ?? null} />
+        {isReportHost ? null : <NavBar authenticated={Boolean(session)} email={session?.user.email ?? null} />}
         <main id="main">{children}</main>
       </body>
     </html>

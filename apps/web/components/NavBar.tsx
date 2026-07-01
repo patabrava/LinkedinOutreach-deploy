@@ -24,6 +24,10 @@ type NavBarProps = {
 
 export function NavBar({ authenticated = false, email = null }: NavBarProps) {
   const pathname = usePathname();
+  if (pathname.startsWith("/reports/")) {
+    return null;
+  }
+
   const moreActive = MORE_NAV_ITEMS.some((item) => pathname.startsWith(item.href));
   const [mobileOpen, setMobileOpen] = useState(false);
 

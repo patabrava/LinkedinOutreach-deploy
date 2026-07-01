@@ -20,6 +20,12 @@ const redirectToLogin = (request: NextRequest, reason?: string) => {
 
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
+  const host = request.headers.get("host")?.split(":")[0]?.toLowerCase() || "";
+
+  if (host === "report.deguraleads.de" && pathname === "/") {
+    return NextResponse.rewrite(new URL("/reports/degura-performance", request.url));
+  }
+
   const response = NextResponse.next();
 
   if (isProtectedRoute(pathname) && !isSupabaseAuthConfigured()) {
