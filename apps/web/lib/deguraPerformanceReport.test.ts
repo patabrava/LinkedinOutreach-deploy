@@ -7,12 +7,18 @@ test("degura report exposes the required client-facing sections", () => {
   const report = getDeguraPerformanceReport();
 
   assert.equal(report.hero.title, "DEGURA OUTREACH PERFORMANCE");
+  assert.equal(report.snapshotAt, "9. Juli 2026, 07:47 Uhr MESZ");
   assert.ok(report.kpis.length >= 8);
-  assert.ok(report.funnel.length >= 6);
+  assert.equal(report.kpis.find((item) => item.label === "Hauptsequenz")?.value, "3.184");
+  assert.equal(report.kpis.find((item) => item.label === "Antwortsignale")?.value, "59");
+  assert.equal(report.kpis.find((item) => item.label === "Positive Gespräche")?.value, "12");
+  assert.ok(report.funnel.length >= 7);
   assert.ok(report.responseClusters.length >= 6);
   assert.ok(report.positiveSignals.length >= 5);
   assert.equal(report.callPotential.items.find((item) => item.label === "Explizite Terminbereitschaft")?.value, "1");
-  assert.equal(report.callPotential.items.find((item) => item.label === "Qualifizierte Call-Kandidaten")?.value, "5");
+  assert.equal(report.callPotential.items.find((item) => item.label === "Qualifizierte Call-Kandidaten")?.value, "6");
+  assert.ok(report.conversationHighlights.length >= 6);
+  assert.ok(report.conversationHighlights.some((item) => item.name === "Dennis Proll"));
   assert.ok(report.copyLearnings.length >= 5);
   assert.ok(report.volumeScenarios.length >= 3);
   assert.ok(report.nextActions.length >= 4);

@@ -33,7 +33,7 @@ export default function DeguraPerformanceReportPage() {
             <div className="report-callout__label">Empfehlung</div>
             <strong>Volumen kontrolliert erhöhen</strong>
             <p>
-              Mehr qualifizierte Kontakte, eine klare Textvariante und wöchentliche Cluster-Auswertung. So wird aus dem ersten Signal eine belastbare Marketingentscheidung.
+              Mehr qualifizierte Kontakte, eine klarere Kontextzeile und wöchentliche Gesprächsauswertung. So wird aus den Reply-Signalen eine belastbare Marketingentscheidung.
             </p>
           </aside>
         </div>
@@ -60,7 +60,7 @@ export default function DeguraPerformanceReportPage() {
             <h2 className="section-title">Vom Kontakt zur positiven Antwort</h2>
           </div>
           <p>
-            Die Raten zeigen jeweils den relevanten Nenner. Dadurch bleibt sichtbar, wo Volumen verloren geht und wo die Nachricht selbst wirkt.
+            Die Raten zeigen jeweils den relevanten Nenner. Antwortsignale kommen aus Lead-Status und Inbox-Erkennung; lesbare Reply-Snippets sind die Grundlage der qualitativen Gesprächsauswertung.
           </p>
         </div>
         <div className="report-funnel">
@@ -114,7 +114,7 @@ export default function DeguraPerformanceReportPage() {
             <h2 className="section-title">Welche Antworten weiterverfolgt werden sollten</h2>
           </div>
           <p>
-            Die Beispiele sind bewusst paraphrasiert. Entscheidend ist nicht der einzelne Wortlaut, sondern das Muster für Marketing und Follow-up.
+            Die Beispiele sind bewusst verdichtet. Entscheidend ist nicht der einzelne Wortlaut, sondern das Muster für Marketing und Follow-up.
           </p>
         </div>
         <div className="report-signal-list">
@@ -152,6 +152,40 @@ export default function DeguraPerformanceReportPage() {
         <p className="report-call-note">{report.callPotential.note}</p>
       </section>
 
+      <section className="report-section report-section--conversations">
+        <div className="report-section__header">
+          <div>
+            <span className="pill status-sent">Gesprächsbeispiele</span>
+            <h2 className="section-title">Welche Konversationen besonders wichtig sind</h2>
+          </div>
+          <p>
+            Diese Fälle zeigen die Spannweite der Kampagne: harter Meeting-Intent, qualifizierte Unsicherheit, bestätigter Zuschuss, Kontextreibung und ein vollständiges Outbound-Nurture-Beispiel wie Dennis Proll.
+          </p>
+        </div>
+        <div className="report-conversation-list">
+          {report.conversationHighlights.map((conversation) => (
+            <article
+              key={`${conversation.name}-${conversation.category}`}
+              className={`report-conversation${conversation.emphasis ? " report-conversation--emphasis" : ""}`}
+            >
+              <div className="report-conversation__topline">
+                <div>
+                  <h3>{conversation.name}</h3>
+                  <span>{conversation.company}</span>
+                </div>
+                <strong>{conversation.category}</strong>
+              </div>
+              <div className="report-conversation__timeline">{conversation.timeline}</div>
+              <div className="report-conversation__grid">
+                <p><strong>Signal:</strong> {conversation.inbound}</p>
+                <p><strong>Handling:</strong> {conversation.handling}</p>
+                <p><strong>Warum wichtig:</strong> {conversation.whyItMatters}</p>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+
       <section className="report-two-column">
         <article className="report-section">
           <span className="pill">Nachrichten-Learning</span>
@@ -167,7 +201,7 @@ export default function DeguraPerformanceReportPage() {
           <span className="pill status-sent">Nächster Schritt</span>
           <h2 className="section-title">Warum mehr kontrolliertes Volumen nötig ist</h2>
           <p>
-            Die bisherigen Antworten zeigen echtes Interesse, vor allem bei Personen, die ihre aktuelle bAV-Situation nicht genau einschätzen können oder nach einem Arbeitgeberwechsel unsicher sind.
+            Die bisherigen Antworten zeigen echtes Interesse, vor allem bei Personen, die ihre aktuelle bAV-Situation nicht genau einschätzen können, nach einem Arbeitgeberwechsel unsicher sind oder ihren bestehenden Zuschuss prüfen möchten.
           </p>
           <p>
             Der limitierende Faktor ist aktuell die verfügbare Kontaktmenge. Für die operative Planung rechnen wir konservativ mit etwa 50 Kontaktanfragen pro LinkedIn-Account und Woche.

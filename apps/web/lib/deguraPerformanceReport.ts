@@ -40,6 +40,17 @@ export type CallPotentialItem = {
   emphasis?: boolean;
 };
 
+export type ConversationHighlight = {
+  name: string;
+  company: string;
+  category: string;
+  timeline: string;
+  inbound: string;
+  handling: string;
+  whyItMatters: string;
+  emphasis?: boolean;
+};
+
 export type DeguraPerformanceReport = {
   snapshotAt: string;
   campaignWindow: string;
@@ -61,6 +72,7 @@ export type DeguraPerformanceReport = {
     note: string;
   };
   copyLearnings: string[];
+  conversationHighlights: ConversationHighlight[];
   volumeScenarios: VolumeScenario[];
   nextActions: string[];
   methodology: string[];
@@ -71,93 +83,99 @@ const formatPercent = (value: number) => `${value.toFixed(1).replace(".", ",")}%
 const funnel = [
   {
     label: "Kontakte im Haupttest",
-    count: 1000,
-    rateLabel: "Basis der Sequenz",
+    count: 3184,
+    rateLabel: "Basis: SEQUENZ B / Batch 21",
     rate: 100,
   },
   {
     label: "Kontaktanfragen gesendet",
-    count: 580,
-    rateLabel: `${formatPercent(58)} der Testkontakte`,
-    rate: 58,
+    count: 863,
+    rateLabel: `${formatPercent(27.1)} der Testkontakte`,
+    rate: 27.1,
   },
   {
     label: "Angenommene Kontakte",
-    count: 273,
-    rateLabel: `${formatPercent(47.1)} der Anfragen`,
-    rate: 47.1,
+    count: 310,
+    rateLabel: `${formatPercent(35.9)} der Anfragen`,
+    rate: 35.9,
   },
   {
     label: "Erste Nachrichten gesendet",
-    count: 274,
-    rateLabel: "Nach Annahme gesendet",
-    rate: 47.2,
+    count: 307,
+    rateLabel: `${formatPercent(99)} der angenommenen Kontakte`,
+    rate: 99,
   },
   {
-    label: "Antworten",
-    count: 44,
-    rateLabel: `${formatPercent(16.1)} der Nachrichten`,
-    rate: 16.1,
+    label: "Antwortsignale",
+    count: 59,
+    rateLabel: `${formatPercent(19.2)} der Nachrichten`,
+    rate: 19.2,
   },
   {
-    label: "Positive Antworten",
-    count: 11,
-    rateLabel: `${formatPercent(25)} der Antworten`,
-    rate: 25,
+    label: "Lesbare Reply-Snippets",
+    count: 53,
+    rateLabel: "Qualitative Gesprächsanalyse",
+    rate: 89.8,
+  },
+  {
+    label: "Positive Gespräche",
+    count: 12,
+    rateLabel: `${formatPercent(22.6)} der lesbaren Snippets`,
+    rate: 22.6,
   },
 ];
 
 export function getDeguraPerformanceReport(): DeguraPerformanceReport {
   return {
-    snapshotAt: "1. Juli 2026, 22:33 Uhr MESZ",
+    snapshotAt: "9. Juli 2026, 07:47 Uhr MESZ",
     campaignWindow: "Seit Start des Degura LinkedIn-Outreach-Prozesses",
-    sourceLabel: "Auswertung aus dem LinkedIn-Outreach-System, Snapshot 2026-07-01",
+    sourceLabel: "Auswertung aus dem LinkedIn-Outreach-System, Snapshot 2026-07-09",
     planningAssumption:
       "Für die operative Planung rechnen wir konservativ mit ca. 50 Kontaktanfragen pro LinkedIn-Account und Woche. LinkedIn veröffentlicht kein fixes Limit; das tatsächliche Limit hängt vom Account und vom Verhalten ab.",
     hero: {
       eyebrow: "Degura Marketing-Auswertung",
       title: "DEGURA OUTREACH PERFORMANCE",
       summary:
-        "Die Kampagne liefert ein klares erstes Signal: Ein Viertel der Antworten aus der Hauptsequenz ist positiv oder offen genug, um weiter bearbeitet zu werden. Für eine belastbare Marketingbewertung braucht Degura jetzt vor allem mehr kontrolliertes Volumen.",
+        "Die aktualisierte Auswertung zeigt mehr Volumen und weiterhin verwertbare Gesprächssignale: 59 Leads haben geantwortet oder ein Reply-Signal erzeugt, 53 Gespräche enthalten lesbare Antworttexte und 12 davon sind positiv oder qualifiziert anschlussfähig.",
     },
     kpis: [
       { label: "Leads im System", value: "3.186", detail: "Gesamter Datenbestand" },
-      { label: "Hauptsequenz", value: "1.000", detail: "Kontakte in SEQUENZ B", accent: "black" },
-      { label: "Kontaktanfragen", value: "580", detail: "Gesendet im Haupttest" },
-      { label: "Angenommen", value: "273", detail: "47,1% der Anfragen", accent: "yellow" },
-      { label: "Nachrichten", value: "274", detail: "Erste Nachrichten gesendet" },
-      { label: "Antworten", value: "44", detail: "16,1% Antwortrate", accent: "yellow" },
-      { label: "Positive Antworten", value: "11", detail: "25,0% der Antworten", accent: "red" },
-      { label: "Call-Potenzial", value: "1 + 5", detail: "1 explizit, 5 qualifiziert", accent: "red" },
+      { label: "Hauptsequenz", value: "3.184", detail: "Kontakte in SEQUENZ B", accent: "black" },
+      { label: "Kontaktanfragen", value: "863", detail: "Gesendet im Haupttest" },
+      { label: "Angenommen", value: "310", detail: "35,9% der Anfragen", accent: "yellow" },
+      { label: "Nachrichten", value: "307", detail: "Erste Nachrichten gesendet" },
+      { label: "Antwortsignale", value: "59", detail: "19,2% der Nachrichten", accent: "yellow" },
+      { label: "Positive Gespräche", value: "12", detail: "22,6% der lesbaren Snippets", accent: "red" },
+      { label: "Call-Potenzial", value: "1 + 6", detail: "1 explizit, 6 qualifiziert", accent: "red" },
     ],
     funnel,
     responseClusters: [
       {
-        title: "Kontextfrage: welcher Arbeitgeber oder Vertrag?",
-        count: 14,
-        positive: 6,
+        title: "Zuschuss- oder bAV-Unsicherheit",
+        count: 5,
+        positive: 4,
         interpretation:
-          "Der Einstieg erzeugt Aufmerksamkeit, aber viele Personen brauchen mehr Kontext, warum Degura sie genau anspricht.",
+          "Mehrere Antworten zeigen genau den Kern-Hook der Kampagne: Personen wissen nicht sicher, ob sie den Zuschuss nutzen, haben keinen aktuellen Stand oder klären das Thema gerade erst.",
         implication:
-          "Die nächste Variante sollte den alten Arbeitgeber oder den Anlass klarer machen, sofern diese Information sauber vorliegt.",
+          "Der stärkste CTA bleibt ein kurzer Statuscheck statt eines allgemeinen Vorsorge-Pitches.",
+      },
+      {
+        title: "Kontextfrage: welcher Arbeitgeber oder warum Degura?",
+        count: 4,
+        positive: 3,
+        interpretation:
+          "Diese Antworten sind nicht automatisch Ablehnung. Sie zeigen, dass der Anlass der Ansprache und der frühere Arbeitgeber früher erklärt werden müssen.",
+        implication:
+          "Die nächste Textvariante sollte den Bezug in einer eigenen Kontextzeile sichtbar machen.",
       },
       {
         title: "Sprachwechsel oder Englisch benötigt",
-        count: 7,
+        count: 2,
         positive: 2,
         interpretation:
-          "Ein Teil der Zielgruppe ist nicht verloren, sondern braucht eine englische Fortsetzung.",
+          "Ein Teil der Zielgruppe ist erreichbar, aber die deutsche Erstnachricht erzeugt Reibung.",
         implication:
-          "Ein kurzer englischer Fallback ist ein sinnvoller Test, besonders bei internationalen Profilen.",
-      },
-      {
-        title: "Unklarer bAV-Status",
-        count: 3,
-        positive: 0,
-        interpretation:
-          "Die strenge Clusterzahl ist klein, aber mehrere positive Antworten zeigen dieselbe Unsicherheit: Personen wissen nicht genau, ob und wie sie ihren Arbeitgeberzuschuss nutzen.",
-        implication:
-          "Der CTA sollte als kurzer Status- oder Anspruchscheck formuliert werden, nicht als allgemeiner Altersvorsorge-Pitch.",
+          "Internationale Profile sollten eine englische Folgeantwort oder direkt eine englische Variante erhalten.",
       },
       {
         title: "Explizite Terminbereitschaft",
@@ -170,41 +188,41 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
       },
       {
         title: "Nicht relevant oder Zielgruppen-Mismatch",
-        count: 2,
+        count: 19,
         positive: 0,
         interpretation:
-          "Ein Teil der negativen Antworten entsteht nicht durch die Nachricht, sondern durch falsche oder nicht mehr passende Zielgruppenmerkmale.",
+          "Viele negative Antworten kommen aus Auslandswechsel, Selbstständigkeit, Arbeitslosigkeit, falschem Arbeitgeberkontext oder nicht mehr passender Zielgruppe.",
         implication:
           "Vor Skalierung sollten Land, aktueller Beschäftigungsstatus, Arbeitgeberkontext und Sonderfälle wie Selbstständigkeit besser gefiltert werden.",
       },
       {
-        title: "Klares Desinteresse",
-        count: 1,
+        title: "Bereits versorgt oder klares Desinteresse",
+        count: 16,
         positive: 0,
         interpretation:
-          "Direktes Desinteresse ist im Verhältnis zur Antwortmenge niedrig. Viele negative Antworten sind eher Nicht-Passung als Ablehnung.",
+          "Ein relevanter Teil ist bereits abgesichert, hat einen Anbieter, lehnt bAV bewusst ab oder möchte keine weitere Ansprache.",
         implication:
-          "Die Kampagne sollte nicht wegen einzelner Absagen gestoppt werden; wichtiger ist bessere Qualifizierung bei höherem Volumen.",
+          "Diese Gespräche sind wertvoll für Ausschlusslogik und Tonalität, aber nicht für kurzfristiges Sales-Potenzial.",
       },
     ],
     positiveSignals: [
       {
-        label: "Englisch als Türöffner",
-        example: "Eine interessierte Person bittet darum, die Unterhaltung auf Englisch fortzuführen.",
-        meaning: "Die Relevanz ist vorhanden, aber die Sprache erzeugt Reibung.",
-        followUp: "Englische Kurzantwort vorbereiten und internationale Profile gezielt markieren.",
+        label: "Unsicherheit als stärkster Aufhänger",
+        example: "Eine Person ist neu im Unternehmen und weiß noch nicht, ob und in welchem Umfang der bAV-Zuschuss genutzt wird.",
+        meaning: "Die Kampagne trifft dann, wenn der Status offen oder ungeprüft ist.",
+        followUp: "Statuscheck als primären CTA ausspielen.",
       },
       {
         label: "Kontext wird aktiv nachgefragt",
-        example: "Mehrere Personen fragen, auf welchen früheren Arbeitgeber sich Degura bezieht.",
+        example: "Mehrere Personen fragen nach dem früheren Arbeitgeber oder warum Degura sie anspricht.",
         meaning: "Die Nachricht aktiviert Erinnerung, braucht aber mehr Begründung.",
         followUp: "Kontextzeile ergänzen: warum Degura schreibt und worauf sich der Anspruch beziehen könnte.",
       },
       {
-        label: "Unsicherheit nach Jobwechsel",
-        example: "Eine Person ist neu im Unternehmen und weiß noch nicht, ob der bAV-Zuschuss genutzt wird.",
-        meaning: "Das ist ein starker Aufhänger für einen Statuscheck.",
-        followUp: "CTA auf einen kurzen Check zuspitzen: 'Wir prüfen, ob etwas ungenutzt bleibt.'",
+        label: "Englisch als Türöffner",
+        example: "Zwei positive Antworten bitten um Englisch oder sagen, dass Deutsch nicht funktioniert.",
+        meaning: "Die Relevanz ist vorhanden, aber die Sprache erzeugt Reibung.",
+        followUp: "Englische Kurzantwort vorbereiten und internationale Profile gezielt markieren.",
       },
       {
         label: "Bestehender Zuschuss wird bestätigt",
@@ -222,7 +240,7 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
     callPotential: {
       title: "Call-Potenzial sauber getrennt",
       summary:
-        "Die Detailprüfung der gespeicherten Antworten zeigt einen harten Meeting-Intent und mehrere qualifizierte positive Antworten, die sinnvoll in einen Call oder Buchungslink überführt wurden.",
+        "Die Detailprüfung der gespeicherten Antworten zeigt einen harten Meeting-Intent und sechs qualifizierte positive Antworten, die sinnvoll in einen Call oder Buchungslink überführt wurden.",
       items: [
         {
           label: "Explizite Terminbereitschaft",
@@ -232,20 +250,20 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
         },
         {
           label: "Qualifizierte Call-Kandidaten",
-          value: "5",
+          value: "6",
           detail:
-            "Positive Antworten mit bAV-Unsicherheit, bestätigtem Zuschuss, Arbeitgeber-Kontextfrage oder neuem Jobstatus.",
+            "Positive Antworten mit bAV-Unsicherheit, bestätigtem Zuschuss, Arbeitgeber-Kontextfrage, Sprachwechsel oder neuem Jobstatus.",
         },
         {
           label: "Positive Antworten gesamt",
-          value: "13",
-          detail: "Alle positiv klassifizierten Reply-Zeilen im Datensatz, inklusive Sprachwechsel und Rückfragen.",
+          value: "12",
+          detail: "Alle positiv klassifizierten lesbaren Reply-Snippets in der Hauptsequenz.",
         },
         {
           label: "Booking-CTA gesendet",
-          value: "12",
+          value: "13",
           detail:
-            "Outbound-Follow-ups mit Buchungslink nach positiver Klassifizierung; nicht als inbound Call-Anfrage gezählt.",
+            "Outbound-Follow-ups mit Buchungslink nach positiver Klassifizierung, inklusive einer Zusatznachricht mit korrigiertem Link.",
         },
       ],
       note:
@@ -257,6 +275,81 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
       "Ein englischer Fallback ist kein Nice-to-have, sondern ein messbarer Testpunkt.",
       "Die stärkere Formulierung ist ein Statuscheck oder Anspruchscheck, nicht ein allgemeiner Rentenhinweis.",
       "Negative Antworten sollten getrennt werden: echtes Desinteresse, falsche Zielgruppe und aktuell nicht relevant sind unterschiedliche Fälle.",
+    ],
+    conversationHighlights: [
+      {
+        name: "Thomas Rolfsmeyer-Wicklein",
+        company: "Aginode",
+        category: "Explizite Terminbereitschaft",
+        timeline: "Reply am 26. Juni 2026; Booking-CTA danach gesendet.",
+        inbound:
+          "Er entschuldigt die späte Antwort und schlägt vor, das Thema in der nächsten Woche zu besprechen, Dienstag oder Mittwoch ab 16 Uhr.",
+        handling:
+          "Wir haben den Team-Kalender geschickt und den Fall als expliziten Meeting-Intent gezählt.",
+        whyItMatters:
+          "Das ist der klarste Beweis, dass der Statuscheck-CTA nicht nur Antworten, sondern konkrete Gesprächsbereitschaft erzeugen kann.",
+        emphasis: true,
+      },
+      {
+        name: "Saktheesh Muneeswaran",
+        company: "reev",
+        category: "bAV-Status unklar",
+        timeline: "Reply am 5. Juni 2026; Booking-Link als Follow-up gesendet.",
+        inbound:
+          "Er ist erst vor Kurzem ins Unternehmen eingetreten und ist nicht sicher, ob oder in welchem Umfang er den Zuschuss nutzt.",
+        handling:
+          "Wir haben den Fall als sinnvollen kurzen Check eingeordnet und direkt auf einen Termin mit bAV-Experten geführt.",
+        whyItMatters:
+          "Dieses Muster passt exakt zur Degura-Hypothese: Jobwechsel erzeugt Unsicherheit, die mit einem kurzen Check auflösbar ist.",
+      },
+      {
+        name: "Sriram Raghunathan",
+        company: "Taxdoo",
+        category: "Keine aktuelle Altersvorsorge",
+        timeline: "Reply am 9. Juni 2026; Booking-Link als Follow-up gesendet.",
+        inbound:
+          "Er schreibt, dass er derzeit keine Altersvorsorge hat und nicht sicher ist, ob der nächste Arbeitgeber etwas anbietet.",
+        handling:
+          "Wir haben den Status als qualifizierten Check-Anlass behandelt und zum bAV-Termin weitergeleitet.",
+        whyItMatters:
+          "Das ist ein starkes Beispiel für latente Nachfrage: kein harter Terminwunsch, aber ein klares offenes Vorsorgethema.",
+      },
+      {
+        name: "Tommy Nieminen",
+        company: "Munich Electrification",
+        category: "Zuschuss bestätigt",
+        timeline: "Reply am 24. Juni 2026; Booking-Link als Follow-up gesendet.",
+        inbound:
+          "Er bestätigt, dass monatlich ein Zuschuss in die Altersvorsorge eingezahlt wird.",
+        handling:
+          "Wir haben auf einen kurzen Check fokussiert, ob der Zuschuss sauber genutzt wird.",
+        whyItMatters:
+          "Auch bereits aktive Zuschüsse können ein Gespräch wert sein, wenn Optimierung oder Vollständigkeit geprüft werden soll.",
+      },
+      {
+        name: "Dennis Proll",
+        company: "Microsoft",
+        category: "Outbound-Nurture ohne Inbound-Reply",
+        timeline: "Connect am 16. Juni, erster Text am 16. Juni, Follow-up am 25. Juni, dritte Nachricht am 8. Juli 2026.",
+        inbound:
+          "Für Dennis Proll ist im System noch keine eingehende Antwort gespeichert.",
+        handling:
+          "Die komplette Sequenz wurde ausgespielt: Erstnachricht zur bAV nach Arbeitgeberwechsel, Follow-up zum ungenutzten Zuschuss und finale Nachricht zu Zuschuss, Steuerförderung und Altersvorsorgedepot.",
+        whyItMatters:
+          "Der Fall zeigt, warum der Report Gespräche und Sequenzabdeckung trennt: Nicht jede sichtbare Konversation ist ein Reply, aber die Nurture-Strecke ist vollständig dokumentiert.",
+      },
+      {
+        name: "Daniel Wolde-Selassie",
+        company: "BRITA Group",
+        category: "Kontextkritische Rückfrage",
+        timeline: "Reply am 9. Juli 2026; Antwortentwurf erstellt, Versand steht auf Retry.",
+        inbound:
+          "Er fragt nach der Einladung, ob man sich kennt.",
+        handling:
+          "Der Entwurf erklärt knapp, dass noch kein persönlicher Kontakt bestand und dass der Anlass ein kurzer bAV-Check nach Arbeitgeberwechsel ist.",
+        whyItMatters:
+          "Das neueste Reply-Signal zeigt, dass Kontext und Beziehungserklärung in der Erstnachricht noch stärker sein müssen.",
+      },
     ],
     volumeScenarios: [
       {
