@@ -120,7 +120,7 @@ class ReplyDraftingTest(unittest.TestCase):
 
         self.assertIn("bestens aufgestellt", result["message"])
         self.assertIn("lieb von dir zu fragen", result["message"])
-        self.assertIn("schicke ich dir", result["message"])
+        self.assertIn("schau gerne hier vorbei", result["message"])
         self.assertNotIn("Daniel", result["message"])
         self.assertNotIn("Danke für die Nachfrage zu", result["message"])
         self.assertIn(agent.NEGATIVE_REPLY_LINK, result["message"])
@@ -143,7 +143,7 @@ class ReplyDraftingTest(unittest.TestCase):
         })
 
         self.assertIn("macht das aktuell keinen Sinn", result["message"])
-        self.assertIn("schicke ich dir", result["message"])
+        self.assertIn("schau gerne hier vorbei", result["message"])
         self.assertNotIn("Atanas", result["message"])
         self.assertNotIn("Bulgarien", result["message"])
         self.assertNotIn("Schade, dass", result["message"])
@@ -164,8 +164,27 @@ class ReplyDraftingTest(unittest.TestCase):
         })
 
         self.assertIn("lieb von dir zu fragen", result["message"])
-        self.assertIn("schicke ich dir", result["message"])
+        self.assertIn("schau gerne hier vorbei", result["message"])
         self.assertNotIn("findest du hier einen Überblick", result["message"])
+        self.assertIn(agent.NEGATIVE_REPLY_LINK, result["message"])
+
+    def test_negative_reply_uses_english_fallback_for_english_no_interest(self):
+        payload = json.dumps({
+            "intent": "negative",
+            "draft_text": (
+                "Thanks for letting me know that you are not interested. "
+                f"If it becomes relevant later, here is some info: {agent.NEGATIVE_REPLY_LINK}"
+            ),
+            "confidence": 0.88,
+        })
+        result = agent.parse_reply_generation_response(payload, {
+            "first_name": "Gulshan",
+            "last_message_text": "Thank you for reaching out, however I am not interested at the moment.",
+        })
+
+        self.assertIn("Totally understandable", result["message"])
+        self.assertIn("feel free to take a look here", result["message"])
+        self.assertNotIn("Gulshan", result["message"])
         self.assertIn(agent.NEGATIVE_REPLY_LINK, result["message"])
 
 

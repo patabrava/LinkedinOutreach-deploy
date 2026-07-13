@@ -32,24 +32,29 @@ POSITIVE_REPLY_ANCHOR = (
     f"bAV Experten buchen {POSITIVE_REPLY_LINK}"
 )
 NEGATIVE_REPLY_ANCHOR = (
-    "Wenn es später interessant wird, findest du hier einen Überblick: "
+    "Passt, vollkommen verständlich. Falls bAV später nochmal interessant wird, "
+    "schau gerne hier vorbei: "
     f"{NEGATIVE_REPLY_LINK}"
 )
 NEGATIVE_REPLY_FALLBACK_GENERIC = (
-    "Alles gut, danke dir für die Rückmeldung. Falls bAV später nochmal Thema wird, "
-    f"schicke ich dir hier den Überblick: {NEGATIVE_REPLY_LINK}"
+    "Passt, vollkommen verständlich. Falls bAV später nochmal interessant wird, "
+    f"schau gerne hier vorbei: {NEGATIVE_REPLY_LINK}"
+)
+NEGATIVE_REPLY_FALLBACK_GENERIC_EN = (
+    "Totally understandable. If occupational pension becomes relevant later, "
+    f"feel free to take a look here: {NEGATIVE_REPLY_LINK}"
 )
 NEGATIVE_REPLY_FALLBACK_VENDOR = (
     "Danke dir, lieb von dir zu fragen. Beim IT-Ticketsystem sind wir bestens aufgestellt. "
-    f"Falls bAV bei euch doch nochmal Thema wird, schicke ich dir hier den Überblick: {NEGATIVE_REPLY_LINK}"
+    f"Falls bAV bei euch doch nochmal Thema wird, schau gerne hier vorbei: {NEGATIVE_REPLY_LINK}"
 )
 NEGATIVE_REPLY_FALLBACK_RELOCATION = (
-    "Alles gut, dann macht das aktuell keinen Sinn. Falls bAV später nochmal Thema wird, "
-    f"schicke ich dir hier den Überblick: {NEGATIVE_REPLY_LINK}"
+    "Alles gut, dann macht das aktuell keinen Sinn. Falls bAV später nochmal interessant wird, "
+    f"schau gerne hier vorbei: {NEGATIVE_REPLY_LINK}"
 )
 NEGATIVE_REPLY_FALLBACK_ALREADY_COVERED = (
     "Danke dir, alles klar. Dann bist du ja erstmal versorgt. "
-    f"Falls später doch mal etwas offen ist, schicke ich dir hier den Überblick: {NEGATIVE_REPLY_LINK}"
+    f"Falls später doch mal etwas offen ist, schau gerne hier vorbei: {NEGATIVE_REPLY_LINK}"
 )
 
 ASCII_UMLAUT_WORDS = {
@@ -195,6 +200,8 @@ def _strip_contact_name_from_opening(text: str, context: Optional[Dict[str, Any]
 
 def _negative_reply_fallback(context: Optional[Dict[str, Any]]) -> str:
     reply_text = _context_reply_text(context).lower()
+    if re.search(r"\b(not interested|no longer|unemployed|current employer|doesn.t apply|don.t speak german|north america)\b", reply_text):
+        return NEGATIVE_REPLY_FALLBACK_GENERIC_EN
     if re.search(r"\b(servicenow|ticket\s*system|ticketsystem|it\s*ticket|anders\s+herum|bei\s+degura)\b", reply_text):
         return NEGATIVE_REPLY_FALLBACK_VENDOR
     if re.search(r"\b(bulgarien|umzug|umgezogen|gezogen|ausland|nicht\s+zutreffen|trifft\s+nicht|passt\s+nicht)\b", reply_text):
@@ -233,10 +240,17 @@ def _repair_reply_style(draft_text: str, intent: str, context: Optional[Dict[str
                 reply_text,
             )
         )
+        is_english_negative = bool(
+            re.search(
+                r"\b(not interested|no longer|unemployed|current employer|doesn.t apply|don.t speak german|north america)\b",
+                reply_text,
+            )
+        )
         if (
             NEGATIVE_REPLY_LINK not in cleaned
             or _has_echo_style_violation(cleaned, context)
             or is_vendor_pitch
+            or is_english_negative
             or needs_warmer_phrase
         ):
             return _sanitize_reply_message(_negative_reply_fallback(context))
@@ -298,6 +312,7 @@ def build_reply_generation_prompt(context: Dict[str, Any]) -> str:
         "Wenn die Person Interesse zeigt, ein Gespräch will oder mehr wissen möchte, wähle positive.",
         "Wenn die Person stattdessen ihre eigene Leistung anbietet, eine Gegenfrage zu Degura als Kunde stellt oder ein Verkaufsgespräch für ihr Produkt startet, wähle negative.",
         "Schreibe wie Katharina in einer echten kurzen LinkedIn DM: freundlich, locker, knapp, nicht corporate.",
+        "Wenn der Kontakt auf Englisch schreibt, antworte auf Englisch. Sonst Deutsch.",
         "Die Antwort darf warm klingen, aber nicht überschwänglich. Nutze natürliche Formulierungen wie 'Alles gut', 'Danke dir', 'macht Sinn', 'schicke ich dir'.",
         "Niemals mit dem Vornamen oder einer Anrede beginnen. Den Namen des Kontakts nicht wiederholen.",
         "Nicht paraphrasieren: keine Sätze wie 'Danke für die Info, dass ...' oder 'Schade, dass ...'.",
@@ -308,9 +323,11 @@ def build_reply_generation_prompt(context: Dict[str, Any]) -> str:
         "Negative Antworten müssen den negativen Link vollständig enthalten.",
         "",
         "Beispiele für negative Antworten:",
-        f"- Gegenfrage/Vendor Pitch: Danke dir, lieb von dir zu fragen. Beim IT-Ticketsystem sind wir bestens aufgestellt. Falls bAV bei euch doch nochmal Thema wird, schicke ich dir hier den Überblick: {NEGATIVE_REPLY_LINK}",
-        f"- Umzug/nicht passend: Alles gut, dann macht das aktuell keinen Sinn. Falls bAV später nochmal Thema wird, schicke ich dir hier den Überblick: {NEGATIVE_REPLY_LINK}",
-        f"- Bereits versorgt: Danke dir, alles klar. Dann bist du ja erstmal versorgt. Falls später doch mal etwas offen ist, schicke ich dir hier den Überblick: {NEGATIVE_REPLY_LINK}",
+        f"- Kein Interesse/kein Bedarf: Passt, vollkommen verständlich. Falls bAV später nochmal interessant wird, schau gerne hier vorbei: {NEGATIVE_REPLY_LINK}",
+        f"- English no interest/out of scope: Totally understandable. If occupational pension becomes relevant later, feel free to take a look here: {NEGATIVE_REPLY_LINK}",
+        f"- Gegenfrage/Vendor Pitch: Danke dir, lieb von dir zu fragen. Beim IT-Ticketsystem sind wir bestens aufgestellt. Falls bAV bei euch doch nochmal Thema wird, schau gerne hier vorbei: {NEGATIVE_REPLY_LINK}",
+        f"- Umzug/nicht passend: Alles gut, dann macht das aktuell keinen Sinn. Falls bAV später nochmal interessant wird, schau gerne hier vorbei: {NEGATIVE_REPLY_LINK}",
+        f"- Bereits versorgt: Danke dir, alles klar. Dann bist du ja erstmal versorgt. Falls später doch mal etwas offen ist, schau gerne hier vorbei: {NEGATIVE_REPLY_LINK}",
         "",
         f"Positive Vorlage: {POSITIVE_REPLY_ANCHOR}",
         f"Negative Vorlage: {NEGATIVE_REPLY_ANCHOR}",
