@@ -192,12 +192,35 @@ def _should_force_headless(requested_headless: bool) -> bool:
     return False
 
 
+def _local_chromium_executable() -> Optional[str]:
+    configured = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "").strip()
+    candidates = [
+        configured,
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+    return None
+
+
 async def open_browser(headless: bool = True) -> Tuple[Playwright, Browser, BrowserContext]:
     """Start Playwright and return playwright, browser, and a context with saved cookies."""
     storage_state = str(AUTH_STATE_PATH) if AUTH_STATE_PATH.exists() else None
     playwright = await async_playwright().start()
     effective_headless = _should_force_headless(headless)
-    browser = await playwright.chromium.launch(headless=effective_headless)
+    try:
+        browser = await playwright.chromium.launch(headless=effective_headless)
+    except Exception:
+        executable_path = _local_chromium_executable()
+        if not executable_path:
+            await playwright.stop()
+            raise
+        browser = await playwright.chromium.launch(headless=effective_headless, executable_path=executable_path)
     context = await browser.new_context(storage_state=storage_state)
     return playwright, browser, context
 

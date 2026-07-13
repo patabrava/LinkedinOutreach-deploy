@@ -26,10 +26,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: false, error: "Scraper directory not found" }, { status: 500 });
     }
 
-    const venvPython = path.join(scraperDir, "venv", "bin", "python");
-    const systemPython = "/opt/local/bin/python3";
-    const pythonCmd = fs.existsSync(venvPython) ? venvPython : (fs.existsSync(systemPython) ? systemPython : "python3");
-
     const pidFile = path.join(scraperDir, "enrichment.pid");
     const lockState = assertScraperLockFree(pidFile);
     if (!lockState.ok) {
@@ -45,6 +41,15 @@ export async function POST(request: Request) {
     const launchSequenceId = typeof sequenceId === "number" && sequenceId > 0 ? sequenceId : null;
 
     const senderDir = path.join(repoRoot, "workers", "sender");
+    if (!fs.existsSync(senderDir)) {
+      logger.error("Sender directory not found", { correlationId }, undefined, { senderDir });
+      return NextResponse.json({ ok: false, error: "Sender directory not found" }, { status: 500 });
+    }
+
+    const venvPython = path.join(senderDir, "venv", "bin", "python");
+    const systemPython = "/opt/local/bin/python3";
+    const pythonCmd = fs.existsSync(venvPython) ? venvPython : (fs.existsSync(systemPython) ? systemPython : "python3");
+
     const args = ["sender.py", "--send-invites", ...batchArg];
     logger.workerSpawn("sender", args, { correlationId, batchId, sequenceId: launchSequenceId });
 
