@@ -477,6 +477,14 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertTrue(direct_thread_text_matches_lead("Elise Lebossé", lead))
 
+    def test_direct_thread_text_matches_german_umlaut_transliteration(self):
+        lead = {
+            "first_name": "Alexandra",
+            "last_name": "Jülich",
+        }
+
+        self.assertTrue(direct_thread_text_matches_lead("Status: offline Alexandra Juelich", lead))
+
     def test_resolve_followup_batch_limit_respects_env_and_daily_remainder(self):
         from unittest.mock import patch
 
@@ -1688,6 +1696,71 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
         mocks["mark_followup_sent"].assert_called_once()
         mocks["mark_followup_skipped"].assert_not_called()
         mocks["_record_reply_at_send_time"].assert_not_called()
+
+    async def test_reply_followup_skips_when_latest_bubble_is_from_us(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from sender import process_followup_one, SURFACE_MESSAGE
+
+        page = self._build_mock_page()
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        client = MagicMock()
+        followup = self._build_followup()
+        followup["followup_type"] = "REPLY"
+
+        stack, mocks = self._patches(
+            surface_result=(page, SURFACE_MESSAGE),
+        )
+        mocks["extract_last_bubble"].return_value = {
+            "sender": "Katharina Hoffmann",
+            "text": "Passt, vollkommen verständlich.",
+            "is_outbound": True,
+        }
+        mocks["classify_last_sender"].return_value = "us"
+        with stack:
+            result = await process_followup_one(context, client, followup)
+
+        self.assertEqual(result, "skipped")
+        mocks["send_message"].assert_not_awaited()
+        mocks["send_sales_navigator_message"].assert_not_awaited()
+        mocks["message_send_start"].assert_not_called()
+        mocks["mark_followup_sent"].assert_not_called()
+        mocks["mark_followup_skipped"].assert_called_once_with(
+            client,
+            followup["id"],
+            "latest_thread_message_from_us",
+        )
+
+    async def test_reply_followup_retries_when_latest_bubble_sender_unknown(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from sender import process_followup_one, SURFACE_MESSAGE
+
+        page = self._build_mock_page()
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        client = MagicMock()
+        followup = self._build_followup()
+        followup["followup_type"] = "REPLY"
+
+        stack, mocks = self._patches(
+            surface_result=(page, SURFACE_MESSAGE),
+        )
+        mocks["extract_last_bubble"].return_value = {
+            "sender": "Sabrina Lem",
+            "text": "Wrong open thread.",
+            "is_outbound": False,
+        }
+        mocks["classify_last_sender"].return_value = "unknown"
+        with stack:
+            result = await process_followup_one(context, client, followup)
+
+        self.assertEqual(result, "retry")
+        mocks["send_message"].assert_not_awaited()
+        mocks["send_sales_navigator_message"].assert_not_awaited()
+        mocks["message_send_start"].assert_not_called()
+        mocks["mark_followup_sent"].assert_not_called()
+        mocks["mark_followup_failed"].assert_called_once()
+        self.assertIn("sender='Sabrina Lem'", mocks["mark_followup_failed"].call_args.args[2])
 
     async def test_nudge_reply_skip_does_not_log_send_start(self):
         from unittest.mock import AsyncMock, MagicMock

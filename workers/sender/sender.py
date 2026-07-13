@@ -154,7 +154,13 @@ def lead_display_name(lead: Dict[str, Any]) -> str:
 
 def normalize_direct_identity_match_text(value: Any) -> str:
     normalized = normalize_linkedin_person_name(value)
-    folded = unicodedata.normalize("NFKD", normalized.replace("ß", "ss"))
+    normalized = (
+        normalized.replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace("ß", "ss")
+    )
+    folded = unicodedata.normalize("NFKD", normalized)
     return "".join(ch for ch in folded if not unicodedata.combining(ch)).strip()
 
 
@@ -4446,8 +4452,44 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
 
         message_page, surface = await open_followup_message_surface(page)
 
-        # --- Just-in-time nudge guard (Sales Navigator surface deliberately skipped) ---
+        # --- Just-in-time thread guard (Sales Navigator surface deliberately skipped) ---
         followup_type = str(followup.get("followup_type") or "").upper()
+        if followup_type == "REPLY" and surface != SURFACE_SALES_NAVIGATOR:
+            try:
+                bubble = await extract_last_bubble(message_page)
+            except Exception as bubble_exc:
+                raise RuntimeError("Latest direct-message thread sender could not be verified.") from bubble_exc
+
+            if bubble is None:
+                raise RuntimeError("Latest direct-message thread sender could not be verified.")
+
+            lead_full = " ".join(
+                p for p in [(lead.get("first_name") or ""), (lead.get("last_name") or "")] if p
+            ).strip()
+            verdict = classify_last_sender(bubble, lead_full, (lead.get("first_name") or ""))
+            sender_name = (bubble.get("sender") or "").strip()
+            if sender_name_is_own_account(sender_name):
+                verdict = "us"
+
+            if verdict == "us":
+                logger.info(
+                    "Latest reply thread message is already from us; skipping send",
+                    {
+                        "followupId": followup_id,
+                        "leadId": lead_id,
+                        "sender": sender_name[:80],
+                        "preview": (bubble.get("text") or "")[:120],
+                    },
+                )
+                mark_followup_skipped(client, followup_id, "latest_thread_message_from_us")
+                return "skipped"
+
+            if verdict != "lead":
+                raise RuntimeError(
+                    "Latest direct-message thread sender did not match lead "
+                    f"(sender={sender_name[:80]!r}, expected={lead_display_name(lead)!r})."
+                )
+
         if followup_type == "NUDGE" and surface != SURFACE_SALES_NAVIGATOR:
             try:
                 bubble = await extract_last_bubble(message_page)
