@@ -4,6 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 const actionsSource = readFileSync(join(process.cwd(), "app/actions.ts"), "utf8");
+const followupsPageSource = readFileSync(join(process.cwd(), "app/followups/page.tsx"), "utf8");
 
 test("approveFollowup starts the sender in targeted followup-id mode", () => {
   const approveFollowupBody = actionsSource.match(
@@ -22,4 +23,11 @@ test("bulk trigger keeps the queue-wide followup sender mode", () => {
 
   assert.ok(triggerFollowupSenderBody, "triggerFollowupSender body should be present");
   assert.match(triggerFollowupSenderBody, /const args = \[senderPath, "--followup"\]/);
+});
+
+test("followups page fetches retryable failure statuses", () => {
+  assert.match(
+    followupsPageSource,
+    /fetchFollowups\(\["PENDING_REVIEW", "APPROVED", "FAILED", "RETRY_LATER"\], 100\)/
+  );
 });

@@ -64,7 +64,7 @@ export default function FollowupsList({ initial }: Props) {
         const { data, error } = await supabase
           .from("followups")
           .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, status, sent_at, connection_accepted_at, sequence_step, sequence_last_sent_at, last_reply_at, followup_count, profile_data)")
-          .in("status", ["PENDING_REVIEW", "APPROVED"])
+          .in("status", ["PENDING_REVIEW", "APPROVED", "FAILED", "RETRY_LATER"])
           .order("updated_at", { ascending: false })
           .limit(100);
         if (error) {

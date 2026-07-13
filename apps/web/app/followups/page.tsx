@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 export default async function FollowupsPage() {
   await requireServerSession("/followups");
-  const initial = await fetchFollowups(["PENDING_REVIEW", "APPROVED"], 100);
+  const initial = await fetchFollowups(["PENDING_REVIEW", "APPROVED", "FAILED", "RETRY_LATER"], 100);
   return (
     <main className="container">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, gap: 0 }}>
