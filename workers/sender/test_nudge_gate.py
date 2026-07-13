@@ -1,12 +1,19 @@
 """Unit tests for the NUDGE lead-state gate."""
 
 import sys
+import inspect
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sender import _nudge_lead_state_valid
+from sender import (
+    _next_due_nudge_for_lead,
+    _nudge_lead_state_valid,
+    _pick_existing_nudge_for_schedule,
+    schedule_nudge_followup,
+)
 
 
 def _lead(**overrides):
@@ -86,15 +93,15 @@ def test_connect_only_with_no_connection_sent_at_is_invalid():
     assert "connect_only_invite_not_sent" in reason
 
 
-def test_connect_only_with_accepted_but_no_sent_is_invalid():
-    # Benedikt/Kálmán/Yanis shape: incoming invite accepted, no outbound connect.
-    # We did not initiate sequenced outreach → no NUDGE basis.
+def test_connect_only_with_accepted_but_no_connection_sent_at_is_valid():
+    # Some accepted connect-only leads have no connection_sent_at even though the
+    # initial sequence message was sent and sent_at/connection_accepted_at are set.
     ok, reason = _nudge_lead_state_valid(_lead(
         connection_sent_at=None,
         connection_accepted_at="2026-04-26T15:00:00Z",
     ))
-    assert ok is False
-    assert "connect_only_invite_not_sent" in reason
+    assert ok is True
+    assert reason == ""
 
 
 def test_connect_only_invite_sent_but_not_accepted_is_invalid():
@@ -117,3 +124,90 @@ def test_outreach_mode_case_insensitive():
     ok, reason = _nudge_lead_state_valid(_lead(outreach_mode="CONNECT_ONLY"))
     assert ok is True
     assert reason == ""
+
+
+def test_legacy_sent_nudge_does_not_block_next_schedule():
+    row = _pick_existing_nudge_for_schedule(
+        [{"id": "fu-1", "status": "SENT"}],
+        precise_attempt=False,
+    )
+    assert row is None
+
+
+def test_legacy_active_nudge_blocks_duplicate_schedule():
+    row = _pick_existing_nudge_for_schedule(
+        [{"id": "fu-1", "status": "APPROVED"}],
+        precise_attempt=False,
+    )
+    assert row["id"] == "fu-1"
+
+
+def test_precise_attempt_returns_existing_failed_row_for_scheduler_decision():
+    row = _pick_existing_nudge_for_schedule(
+        [{"id": "fu-1", "status": "FAILED"}],
+        precise_attempt=True,
+    )
+    assert row["id"] == "fu-1"
+
+
+def test_missing_nudge_scheduler_does_not_reactivate_failed_rows():
+    source = inspect.getsource(schedule_nudge_followup)
+
+    assert 'existing_status in {"SKIPPED", "RETRY_LATER"}' in source
+    assert 'existing_status == "FAILED"' in source
+
+
+def test_due_step_two_lead_schedules_third_followup():
+    now = datetime(2026, 6, 16, 22, tzinfo=timezone.utc)
+    lead = _lead(
+        sequence_step=2,
+        sequence_last_sent_at=(now - timedelta(days=4)).isoformat(),
+    )
+    sequence = {
+        "second_message": "second",
+        "third_message": "third",
+        "followup_interval_days": 3,
+    }
+
+    attempt, base_time, reason = _next_due_nudge_for_lead(lead, sequence, now)
+
+    assert attempt == 2
+    assert base_time is not None
+    assert reason == "due"
+
+
+def test_not_due_step_one_lead_does_not_schedule_second_followup():
+    now = datetime(2026, 6, 16, 22, tzinfo=timezone.utc)
+    lead = _lead(
+        sequence_step=1,
+        sequence_last_sent_at=(now - timedelta(days=1)).isoformat(),
+    )
+    sequence = {
+        "second_message": "second",
+        "third_message": "third",
+        "followup_interval_days": 3,
+    }
+
+    attempt, _base_time, reason = _next_due_nudge_for_lead(lead, sequence, now)
+
+    assert attempt is None
+    assert reason == "not_due"
+
+
+def test_replied_lead_does_not_schedule_missing_nudge():
+    now = datetime(2026, 6, 16, 22, tzinfo=timezone.utc)
+    lead = _lead(
+        sequence_step=2,
+        sequence_last_sent_at=(now - timedelta(days=4)).isoformat(),
+        last_reply_at=(now - timedelta(hours=2)).isoformat(),
+    )
+    sequence = {
+        "second_message": "second",
+        "third_message": "third",
+        "followup_interval_days": 3,
+    }
+
+    attempt, _base_time, reason = _next_due_nudge_for_lead(lead, sequence, now)
+
+    assert attempt is None
+    assert reason == "lead_replied"
