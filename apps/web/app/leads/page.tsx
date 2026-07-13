@@ -23,8 +23,7 @@ export default async function LeadsPage({
     name: (searchParams?.name || "").trim(),
     linkedin: (searchParams?.linkedin || "").trim(),
   };
-  // Slightly larger slice makes the batch dashboard more useful without adding new endpoints.
-  const leads = await fetchLeadList(currentPage, 150, filters);
+  const leads = await fetchLeadList(currentPage, 50, filters);
 
   return (
     <div className="page">

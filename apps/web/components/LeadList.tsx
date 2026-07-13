@@ -413,7 +413,7 @@ export function LeadList({
     };
   }, []);
 
-  // Subscribe to realtime lead updates so status bar and enrichment details stay fresh
+  // Subscribe to realtime lead updates so status bar and enrichment details stay fresh.
   useEffect(() => {
     if (!isSupabaseBrowserConfigured()) {
       return;
@@ -448,7 +448,6 @@ export function LeadList({
             // Keep newest first by createdAt if available
             return next.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
           });
-          router.refresh();
         }
       )
       .subscribe();
@@ -456,14 +455,15 @@ export function LeadList({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [maxRows, router, showPagination]);
+  }, [maxRows, showPagination]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
 
     const interval = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
       router.refresh();
-    }, 5_000);
+    }, 60_000);
 
     return () => window.clearInterval(interval);
   }, [router]);

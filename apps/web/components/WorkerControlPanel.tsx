@@ -41,7 +41,7 @@ type WorkerControlPanelProps = {
   stopLabel: string;
 };
 
-const POLL_INTERVAL_MS = 5000;
+const POLL_INTERVAL_MS = 15000;
 
 const formatStartedAt = (value: string) => {
   const date = new Date(value);
@@ -102,6 +102,7 @@ export function WorkerControlPanel({
 
   useEffect(() => {
     const interval = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
       refresh({ silent: true }).catch(() => undefined);
     }, POLL_INTERVAL_MS);
     return () => clearInterval(interval);

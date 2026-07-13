@@ -21,7 +21,7 @@ type HealthResponse = {
   error?: string;
 };
 
-const POLL_INTERVAL_MS = 5000;
+const POLL_INTERVAL_MS = 15000;
 
 const formatClock = (value: string | null): string => {
   if (!value) return "—";
@@ -79,6 +79,7 @@ export function SenderMessageOnlyControl() {
 
   useEffect(() => {
     const interval = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
       if (acting) return;
       refresh({ silent: true }).catch(() => undefined);
     }, POLL_INTERVAL_MS);
