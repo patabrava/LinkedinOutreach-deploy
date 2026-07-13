@@ -6,6 +6,7 @@ export function buildConversionFunnel(analytics: OutreachAnalytics): FunnelStats
   const connAccepted = analytics.connectionsAccepted;
   const msgSent = analytics.messagesSent;
   const replyCount = analytics.repliesReceived;
+  const positiveReplyCount = analytics.positiveReplies;
 
   return {
     stages: [
@@ -33,6 +34,11 @@ export function buildConversionFunnel(analytics: OutreachAnalytics): FunnelStats
         name: "Replied",
         count: replyCount,
         percentage: msgSent > 0 ? Math.round((replyCount / msgSent) * 1000) / 10 : 0,
+      },
+      {
+        name: "Positive Replies",
+        count: positiveReplyCount,
+        percentage: replyCount > 0 ? Math.round((positiveReplyCount / replyCount) * 1000) / 10 : 0,
       },
     ],
   };

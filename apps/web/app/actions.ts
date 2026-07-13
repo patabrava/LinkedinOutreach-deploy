@@ -1851,10 +1851,12 @@ export type OutreachAnalytics = {
   connectionsAccepted: number;
   messagesSent: number;
   repliesReceived: number;
+  positiveReplies: number;
   followupsSent: number;
   followupReplies: number;
   connectionAcceptanceRate: number;
   messageResponseRate: number;
+  positiveReplyRate: number;
   overallConversionRate: number;
   statusCounts: Record<string, number>;
 };
@@ -1865,6 +1867,7 @@ export type DailyMetrics = {
   connectionsAccepted: number;
   messagesSent: number;
   replies: number;
+  positiveReplies: number;
   followupsSent: number;
 };
 
@@ -1878,7 +1881,7 @@ export type FunnelStats = {
   stages: FunnelStage[];
 };
 
-type DailyMetricKey = "connectionsSent" | "connectionsAccepted" | "messagesSent" | "replies";
+type DailyMetricKey = "connectionsSent" | "connectionsAccepted" | "messagesSent" | "replies" | "positiveReplies";
 type AnalyticsWindow = {
   startDate: Date;
   endDate: Date;
@@ -1928,6 +1931,13 @@ function isInAnalyticsWindow(
   if (!timestamp) return false;
   const value = new Date(timestamp);
   return value >= window.startDate && value < window.endDate;
+}
+
+function positiveReplyTimestamp(row: {
+  reply_timestamp?: string | null;
+  created_at?: string | null;
+}): string | null {
+  return row.reply_timestamp || row.created_at || null;
 }
 
 async function fetchPagedAnalyticsRows<Row>(
@@ -2035,11 +2045,30 @@ export async function fetchOutreachAnalytics(days: number = 7): Promise<Outreach
       .gte("sent_at", window.startIso)
       .lt("sent_at", window.endIso);
 
+    const positiveReplyRows = await fetchPagedAnalyticsRows<{
+      reply_timestamp?: string | null;
+      created_at?: string | null;
+    }>(
+      () =>
+        client
+          .from("followups")
+          .select("reply_timestamp, created_at")
+          .eq("followup_type", "REPLY")
+          .eq("reply_intent", "positive")
+          .or(`reply_timestamp.gte.${window.startIso},created_at.gte.${window.startIso}`),
+      correlationId,
+      "Failed to fetch positive reply analytics",
+    );
+
     const fuSent = followupsSent ?? 0;
     const fuReplies = followupReplies ?? 0;
+    const positiveReplies = positiveReplyRows.filter((row) =>
+      isInAnalyticsWindow(positiveReplyTimestamp(row), window)
+    ).length;
 
     const connectionAcceptanceRate = connReqSent > 0 ? (connAccepted / connReqSent) * 100 : 0;
     const messageResponseRate = msgSent > 0 ? (repliesReceived / msgSent) * 100 : 0;
+    const positiveReplyRate = msgSent > 0 ? (positiveReplies / msgSent) * 100 : 0;
     const overallConversionRate = totalLeads > 0 ? (repliesReceived / totalLeads) * 100 : 0;
 
     const result: OutreachAnalytics = {
@@ -2048,10 +2077,12 @@ export async function fetchOutreachAnalytics(days: number = 7): Promise<Outreach
       connectionsAccepted: connAccepted,
       messagesSent: msgSent,
       repliesReceived,
+      positiveReplies,
       followupsSent: fuSent,
       followupReplies: fuReplies,
       connectionAcceptanceRate: Math.round(connectionAcceptanceRate * 10) / 10,
       messageResponseRate: Math.round(messageResponseRate * 10) / 10,
+      positiveReplyRate: Math.round(positiveReplyRate * 10) / 10,
       overallConversionRate: Math.round(overallConversionRate * 10) / 10,
       statusCounts,
     };
@@ -2098,6 +2129,7 @@ export async function fetchDailyMetrics(days: number = 7): Promise<DailyMetrics[
         connectionsAccepted: 0,
         messagesSent: 0,
         replies: 0,
+        positiveReplies: 0,
         followupsSent: 0,
       };
       byDate.set(dateStr, row);
@@ -2150,6 +2182,25 @@ export async function fetchDailyMetrics(days: number = 7): Promise<DailyMetrics[
       const key = new Date(sentAt).toISOString().split("T")[0];
       const row = byDate.get(key);
       if (row) row.followupsSent += 1;
+    }
+
+    const positiveReplyMetrics = await fetchPagedAnalyticsRows<{
+      reply_timestamp?: string | null;
+      created_at?: string | null;
+    }>(
+      () =>
+        client
+          .from("followups")
+          .select("reply_timestamp, created_at")
+          .eq("followup_type", "REPLY")
+          .eq("reply_intent", "positive")
+          .or(`reply_timestamp.gte.${window.startIso},created_at.gte.${window.startIso}`),
+      correlationId,
+      "Failed to fetch positive reply daily metrics",
+    );
+
+    for (const followup of positiveReplyMetrics) {
+      incrementMetric(positiveReplyTimestamp(followup), "positiveReplies");
     }
 
     logger.actionComplete("fetchDailyMetrics", { correlationId }, { count: results.length });

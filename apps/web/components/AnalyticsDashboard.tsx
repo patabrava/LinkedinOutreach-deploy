@@ -51,7 +51,7 @@ function ConversionFunnel({ stages }: { stages: FunnelStats["stages"] }) {
 
     // Calculate overall conversion rate (replied / outreach sent)
     const outreachSent = stages[1]?.count || 0;
-    const replied = stages[stages.length - 1]?.count || 0;
+    const replied = stages.find((stage) => stage.name === "Replied")?.count || 0;
     const overallConversion = outreachSent > 0 ? (replied / outreachSent) * 100 : 0;
 
     // Labels for what each percentage means
@@ -61,6 +61,7 @@ function ConversionFunnel({ stages }: { stages: FunnelStats["stages"] }) {
         "OF LEADS",  // Connection Requests
         "OF REQUESTS",  // Connections Accepted
         "REPLY RATE",  // Replied
+        "OF REPLIES",  // Positive Replies
     ];
 
     return (
@@ -198,6 +199,7 @@ export function AnalyticsDashboard({ analytics, dailyMetrics, funnel, days }: Pr
     const today = dailyMetrics[dailyMetrics.length - 1];
     const todayMessages = today?.messagesSent || 0;
     const todayReplies = today?.replies || 0;
+    const todayPositiveReplies = today?.positiveReplies || 0;
 
     return (
         <div className="analytics-dashboard">
@@ -232,6 +234,11 @@ export function AnalyticsDashboard({ analytics, dailyMetrics, funnel, days }: Pr
                     subtext={`+${todayReplies} TODAY`}
                 />
                 <MetricCard
+                    label="POSITIVE REPLIES"
+                    value={formatNumber(analytics.positiveReplies)}
+                    subtext={`+${todayPositiveReplies} TODAY`}
+                />
+                <MetricCard
                     label="RESPONSE RATE"
                     value={formatPercent(analytics.messageResponseRate)}
                     highlight={analytics.messageResponseRate > 10}
@@ -248,6 +255,12 @@ export function AnalyticsDashboard({ analytics, dailyMetrics, funnel, days }: Pr
                     label="CONNECTIONS ACCEPTED"
                     value={formatNumber(analytics.connectionsAccepted)}
                     subtext={formatPercent(analytics.connectionAcceptanceRate) + " ACCEPT RATE"}
+                />
+                <MetricCard
+                    label="POSITIVE RATE"
+                    value={formatPercent(analytics.positiveReplyRate)}
+                    subtext="OF MESSAGES SENT"
+                    highlight={analytics.positiveReplyRate > 5}
                 />
                 <MetricCard
                     label="FOLLOW-UPS SENT"
@@ -270,6 +283,7 @@ export function AnalyticsDashboard({ analytics, dailyMetrics, funnel, days }: Pr
                 <div className="charts-grid">
                     <DailyChart data={dailyMetrics} metric="messagesSent" label="MESSAGES SENT" days={days} />
                     <DailyChart data={dailyMetrics} metric="replies" label="REPLIES" days={days} />
+                    <DailyChart data={dailyMetrics} metric="positiveReplies" label="POSITIVE REPLIES" days={days} />
                     <DailyChart data={dailyMetrics} metric="connectionsSent" label="CONNECTIONS SENT" days={days} />
                 </div>
             </div>
