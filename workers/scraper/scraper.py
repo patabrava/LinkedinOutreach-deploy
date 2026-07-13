@@ -567,7 +567,11 @@ async def open_invite_dialog_from_anchor(page: Page, anchor, base_url: str) -> b
     except Exception as exc:
         logger.warn("connect-only: invite anchor force click failed", error=exc)
 
-    if href:
+    is_direct_invite_href = bool(href and "/preload/custom-invite/" in href)
+    if href and not is_direct_invite_href:
+        logger.debug("connect-only: skipping non-invite anchor href", data={"href": href})
+
+    if is_direct_invite_href:
         invite_url = urljoin(base_url, href)
         logger.debug("connect-only: navigating to invite URL", data={"inviteUrl": invite_url})
         try:
@@ -1143,7 +1147,7 @@ async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str,
     return results[:5]
 
 
-async def send_connection_request(page: Page, lead: Lead) -> bool:
+async def send_connection_request(page: Page, lead: Lead) -> str:
     """Send a no-note connection request. Mirrors sender.py open_message_surface flow exactly.
     
     CRITICAL: This function assumes the page is already on the profile (after enrichment).
@@ -1162,7 +1166,7 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
         logger.element_search("main", 1, context={"phase": "connect_profile_load"})
     except Exception as exc:
         logger.connection_flow("navigate", "FAILED", data={"url": normalized, "error": str(exc)})
-        return False
+        return "profile_failed"
 
     await wiggle_mouse(page)
     
@@ -1190,7 +1194,7 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
 
     if await profile_has_pending_invite(page, profile_container):
         logger.connection_flow("pending_invite", "ALREADY_SENT", data={"url": normalized})
-        return True
+        return "sent"
     
     # PATH 1: Direct invite link inside profile container (Invite <Name> to ...)
     invite_link = profile_container.get_by_role("link", name=re.compile(r"(Invite .+ to|Einladen .+ zu)", re.I))
@@ -1204,7 +1208,7 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
                 logger.element_click("Invite link", success=True)
                 logger.dialog_detected("connection_invite", context={"path": 1})
                 logger.path_attempt("Invite link", 1, success=True)
-                return await _click_send_without_note(page, normalized, lead.id)
+                return "sent" if await _click_send_without_note(page, normalized, lead.id) else "send_failed"
         except WeeklyInviteLimitReached:
             raise
         except Exception as e:
@@ -1213,9 +1217,9 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
     
     # PATH 2: Direct Vernetzen / Als Kontakt button on profile card
     direct_connect_anchor_selectors = [
-        "a[aria-label*='Vernetzen']",
-        "a[aria-label*='Einladen']",
         "a[href*='/preload/custom-invite/']",
+        "a[aria-label*='Vernetzen'][href*='/preload/custom-invite/']",
+        "a[aria-label*='Einladen'][href*='/preload/custom-invite/']",
     ]
     for css in direct_connect_anchor_selectors:
         direct_connect_anchor = profile_container.locator(css)
@@ -1230,7 +1234,7 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
                     logger.element_click(f"Connect anchor: {css}", success=True)
                     logger.dialog_detected("connection_direct_anchor", context={"path": 2, "selector": css})
                     logger.path_attempt(f"Direct Connect anchor ({css})", 2, success=True)
-                    return await _click_send_without_note(page, normalized, lead.id)
+                    return "sent" if await _click_send_without_note(page, normalized, lead.id) else "send_failed"
             except WeeklyInviteLimitReached:
                 raise
             except Exception as e:
@@ -1253,7 +1257,7 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
             await random_pause()
             logger.dialog_detected("connection_direct", context={"path": 2})
             logger.path_attempt("Direct Connect button", 2, success=True)
-            return await _click_send_without_note(page, normalized, lead.id)
+            return "sent" if await _click_send_without_note(page, normalized, lead.id) else "send_failed"
         except WeeklyInviteLimitReached:
             raise
         except Exception as e:
@@ -1294,7 +1298,7 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
                 await random_pause()
                 logger.dialog_detected("connection_more_menu", context={"path": 3})
                 logger.path_attempt("More -> Invite", 3, success=True)
-                return await _click_send_without_note(page, normalized, lead.id)
+                return "sent" if await _click_send_without_note(page, normalized, lead.id) else "send_failed"
             else:
                 logger.path_attempt("More -> Invite", 3, success=False)
         except WeeklyInviteLimitReached:
@@ -1303,13 +1307,13 @@ async def send_connection_request(page: Page, lead: Lead) -> bool:
             if await connection_dialog_is_visible(page):
                 logger.dialog_detected("connection_more_menu_late", context={"path": 3})
                 logger.path_attempt("More -> Invite", 3, success=True)
-                return await _click_send_without_note(page, normalized, lead.id)
+                return "sent" if await _click_send_without_note(page, normalized, lead.id) else "send_failed"
             logger.element_click("More button flow", success=False)
             logger.path_attempt("More -> Invite", 3, success=False)
     
     screenshot_path = await capture_connect_failure_screenshot(page, "all_paths_exhausted", lead.id)
     logger.connection_flow("all_paths", "EXHAUSTED", data={"url": normalized, "screenshot": screenshot_path})
-    return False
+    return "no_invite_path"
 
 
 async def _click_send_without_note(page: Page, url: str, lead_id: Optional[str] = None) -> bool:

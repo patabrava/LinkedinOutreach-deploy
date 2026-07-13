@@ -851,10 +851,12 @@ def update_invite_failure_streak(
     threshold: int = CONNECT_ONLY_CONSECUTIVE_FAILURE_LIMIT,
 ) -> tuple[int, bool]:
     """Track consecutive invite send failures and signal a probable weekly cap."""
-    if result == "failed":
+    if result == "send_failed":
         next_streak = current_streak + 1
         return next_streak, next_streak >= threshold
-    return 0, False
+    if result in {"sent", "connected", "limit_reached", "paused"}:
+        return 0, False
+    return current_streak, False
 
 
 def _is_invite_candidate(lead: Dict[str, Any]) -> bool:
@@ -4948,11 +4950,14 @@ async def process_invite_one(
                     )
                     return "paused"
             try:
-                ok = await send_connection_request(page, scraper_lead)
+                invite_result = await send_connection_request(page, scraper_lead)
             except WeeklyInviteLimitReached:
                 outcome = "limit_reached"
             else:
-                outcome = "sent" if ok else "failed"
+                if isinstance(invite_result, str):
+                    outcome = invite_result
+                else:
+                    outcome = "sent" if invite_result else "send_failed"
     finally:
         try:
             await page.close()
@@ -4971,10 +4976,10 @@ async def process_invite_one(
 
     client.table("leads").update({
         "status": "FAILED",
-        "error_message": "invite_send_failed",
+        "error_message": outcome,
         "updated_at": datetime.utcnow().isoformat(),
     }).eq("id", lead_id).execute()
-    return "failed"
+    return outcome
 
 
 # ------------------------- MESSAGE-ONLY FLOW -------------------------

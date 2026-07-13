@@ -1157,21 +1157,30 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         self.assertIn("connect_only_limit_at", client.lead["profile_data"]["meta"])
         self.assertTrue(client.lead["profile_data"]["meta"]["existing"])
 
-    def test_invite_failure_streak_stops_after_three_consecutive_failures(self):
-        streak, stop = update_invite_failure_streak("failed", 0)
+    def test_invite_failure_streak_stops_after_three_consecutive_send_failures(self):
+        streak, stop = update_invite_failure_streak("send_failed", 0)
         self.assertEqual(streak, 1)
         self.assertFalse(stop)
 
-        streak, stop = update_invite_failure_streak("failed", streak)
+        streak, stop = update_invite_failure_streak("send_failed", streak)
         self.assertEqual(streak, 2)
         self.assertFalse(stop)
 
-        streak, stop = update_invite_failure_streak("failed", streak)
+        streak, stop = update_invite_failure_streak("send_failed", streak)
         self.assertEqual(streak, CONNECT_ONLY_CONSECUTIVE_FAILURE_LIMIT)
         self.assertTrue(stop)
 
+    def test_invite_failure_streak_ignores_profile_and_selector_failures(self):
+        streak, stop = update_invite_failure_streak("profile_failed", 2)
+        self.assertEqual(streak, 2)
+        self.assertFalse(stop)
+
+        streak, stop = update_invite_failure_streak("no_invite_path", streak)
+        self.assertEqual(streak, 2)
+        self.assertFalse(stop)
+
     def test_invite_failure_streak_resets_after_successful_invite_state(self):
-        streak, stop = update_invite_failure_streak("failed", 2)
+        streak, stop = update_invite_failure_streak("send_failed", 2)
         self.assertTrue(stop)
 
         streak, stop = update_invite_failure_streak("sent", streak)
