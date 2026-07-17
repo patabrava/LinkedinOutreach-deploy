@@ -1471,6 +1471,93 @@ label {
   padding-left: 12px;
 }
 
+.report-section--tracking {
+  background: var(--bg);
+}
+
+.report-period-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+}
+
+.report-period-grid--monthly {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.report-period {
+  border: 2px solid var(--border-color);
+  margin: -2px 0 0 -2px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 360px;
+}
+
+.report-period__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 2px solid var(--border-color);
+  padding-bottom: 12px;
+}
+
+.report-period__header h3 {
+  margin: 0 0 4px;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.report-period__header span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.report-period__header > strong {
+  align-self: flex-start;
+  background: var(--highlight);
+  border: 2px solid var(--border-color);
+  padding: 6px 8px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.report-period__metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.report-period__metrics span {
+  border: 2px solid var(--border-color);
+  padding: 8px;
+  min-height: 64px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.report-period__metrics strong {
+  display: block;
+  font-size: 24px;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+
+.report-period p {
+  margin-top: auto;
+  border-top: 2px solid var(--border-color);
+  padding-top: 12px;
+  font-weight: 700;
+}
+
 .report-two-column {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -1557,7 +1644,9 @@ label {
   .report-signal-list,
   .report-call-grid,
   .report-volume-grid,
-  .report-conversation__grid {
+  .report-conversation__grid,
+  .report-period-grid,
+  .report-period-grid--monthly {
     grid-template-columns: 1fr;
   }
 
