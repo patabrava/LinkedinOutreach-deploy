@@ -4,7 +4,7 @@ import { getDeguraPerformanceReport } from "../../../lib/deguraPerformanceReport
 
 export const metadata: Metadata = {
   title: "Degura Outreach Performance",
-  description: "Deutschsprachiger Performance-Report zur Degura LinkedIn-Outreach-Strecke.",
+  description: "Einfacher Performance-Report zur Degura LinkedIn-Outreach-Strecke.",
 };
 
 const numberFormatter = new Intl.NumberFormat("de-DE");
@@ -34,11 +34,11 @@ export default function DeguraPerformanceReportPage() {
             <h1 className="report-title">{report.hero.title}</h1>
             <p className="report-summary">{report.hero.summary}</p>
           </div>
-          <aside className="report-callout report-callout--red" aria-label="Zentrale Empfehlung">
-            <div className="report-callout__label">Empfehlung</div>
-            <strong>Volumen kontrolliert erhöhen</strong>
+          <aside className="report-callout report-callout--red" aria-label="Zentrale Lesart">
+            <div className="report-callout__label">Kurzfassung</div>
+            <strong>Follow-ups jetzt sauber tracken</strong>
             <p>
-              Mehr qualifizierte Kontakte, eine klarere Kontextzeile und wöchentliche Gesprächsauswertung. So wird aus den Reply-Signalen eine belastbare Marketingentscheidung.
+              Das operative Reporting trennt ab jetzt Anfragevolumen, Antworten und gesendete Follow-ups auf Tages-, Wochen- und Monatsbasis.
             </p>
           </aside>
         </div>
@@ -58,14 +58,101 @@ export default function DeguraPerformanceReportPage() {
         ))}
       </section>
 
+      <section className="report-section report-section--today">
+        <div className="report-section__header">
+          <div>
+            <span className="pill status-sent">Heute</span>
+            <h2 className="section-title">17. Juli: was wirklich passiert ist</h2>
+          </div>
+          <p>
+            Der wichtigste Fix im Report: Follow-ups werden nach <strong>sent_at</strong> gezählt und nicht mehr nur als Reply-Follow-ups gelesen.
+          </p>
+        </div>
+        <div className="report-today-grid">
+          {report.todayMetrics.map((metric) => (
+            <article key={metric.label} className={`report-today-card report-today-card--${metric.accent || "default"}`}>
+              <div className="metric-card__label">{metric.label}</div>
+              <strong>{metric.value}</strong>
+              <p>{metric.detail}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="report-section report-section--tracking">
+        <div className="report-section__header">
+          <div>
+            <span className="pill">Wochen-Tracking</span>
+            <h2 className="section-title">Wöchentlich steuerbar</h2>
+          </div>
+          <p>
+            Diese Ansicht ist für operative Steuerung: Wo entsteht Volumen, wo entstehen Annahmen, und wann werden Follow-ups wirklich gesendet?
+          </p>
+        </div>
+        <div className="report-period-grid">
+          {report.weeklyTracking.map((period) => (
+            <article key={period.label} className="report-period">
+              <div className="report-period__header">
+                <div>
+                  <h3>{period.label}</h3>
+                  <span>{period.range}</span>
+                </div>
+                <strong>{formatNumber(period.followupsSent)} Follow-ups</strong>
+              </div>
+              <div className="report-period__metrics">
+                <span><strong>{formatNumber(period.connectionRequests)}</strong>Anfragen</span>
+                <span><strong>{formatNumber(period.acceptedContacts)}</strong>Angenommen</span>
+                <span><strong>{formatNumber(period.replySignals)}</strong>Reply-Signale</span>
+                <span><strong>{formatNumber(period.positiveReplies)}</strong>Positiv</span>
+                <span><strong>{formatNumber(period.nudgeFollowupsSent)}</strong>Nudges</span>
+                <span><strong>{formatNumber(period.replyFollowupsSent)}</strong>Reply-FU</span>
+              </div>
+              <p>{period.note}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="report-section report-section--tracking">
+        <div className="report-section__header">
+          <div>
+            <span className="pill">Monats-Tracking</span>
+            <h2 className="section-title">Monatlich reportbar</h2>
+          </div>
+          <p>{report.planningAssumption}</p>
+        </div>
+        <div className="report-period-grid report-period-grid--monthly">
+          {report.monthlyTracking.map((period) => (
+            <article key={period.label} className="report-period">
+              <div className="report-period__header">
+                <div>
+                  <h3>{period.label}</h3>
+                  <span>{period.range}</span>
+                </div>
+                <strong>{formatRate(period.positiveReplies, period.readableReplies)} Positiv</strong>
+              </div>
+              <div className="report-period__metrics">
+                <span><strong>{formatNumber(period.connectionRequests)}</strong>Anfragen</span>
+                <span><strong>{formatNumber(period.firstMessages)}</strong>Nachrichten</span>
+                <span><strong>{formatNumber(period.replySignals)}</strong>Reply-Signale</span>
+                <span><strong>{formatNumber(period.followupsSent)}</strong>Follow-ups</span>
+                <span><strong>{formatNumber(period.nudgeFollowupsSent)}</strong>Nudges</span>
+                <span><strong>{formatNumber(period.replyFollowupsSent)}</strong>Reply-FU</span>
+              </div>
+              <p>{period.note}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
       <section className="report-section report-section--funnel">
         <div className="report-section__header">
           <div>
             <span className="pill">Funnel</span>
-            <h2 className="section-title">Vom Kontakt zur positiven Antwort</h2>
+            <h2 className="section-title">Einfacher Funnel</h2>
           </div>
           <p>
-            Die Raten zeigen jeweils den relevanten Nenner. Antwortsignale kommen aus Lead-Status und Inbox-Erkennung; lesbare Reply-Snippets sind die Grundlage der qualitativen Gesprächsauswertung.
+            Die Funnel-Ansicht bleibt bewusst kurz. Für Reporting-Entscheidungen sind die Follow-up- und Periodenblöcke wichtiger.
           </p>
         </div>
         <div className="report-funnel">
@@ -87,152 +174,36 @@ export default function DeguraPerformanceReportPage() {
         </div>
       </section>
 
-      <section className="report-section report-section--tracking">
-        <div className="report-section__header">
-          <div>
-            <span className="pill">Wochen-Tracking</span>
-            <h2 className="section-title">Wie sich Volumen und Antworten pro Woche entwickeln</h2>
-          </div>
-          <p>
-            Die Wochenansicht trennt Anfragevolumen, angenommene Kontakte, erste Nachrichten, Reply-Signale und positive Gespräche. Dadurch wird sichtbar, ob ein schwacher Zeitraum an wenig Volumen, wenigen Annahmen oder an der Nachricht selbst liegt.
-          </p>
-        </div>
-        <div className="report-period-grid">
-          {report.weeklyTracking.map((period) => (
-            <article key={period.label} className="report-period">
-              <div className="report-period__header">
-                <div>
-                  <h3>{period.label}</h3>
-                  <span>{period.range}</span>
-                </div>
-                <strong>{formatRate(period.replySignals, period.firstMessages)} Reply</strong>
-              </div>
-              <div className="report-period__metrics">
-                <span><strong>{formatNumber(period.connectionRequests)}</strong>Anfragen</span>
-                <span><strong>{formatNumber(period.acceptedContacts)}</strong>Angenommen</span>
-                <span><strong>{formatNumber(period.firstMessages)}</strong>Nachrichten</span>
-                <span><strong>{formatNumber(period.replySignals)}</strong>Reply-Signale</span>
-                <span><strong>{formatNumber(period.positiveReplies)}</strong>Positiv</span>
-                <span><strong>{formatNumber(period.followupsSent)}</strong>Follow-ups</span>
-              </div>
-              <p>{period.note}</p>
-            </article>
-          ))}
-        </div>
-      </section>
+      <section className="report-two-column">
+        <article className="report-section">
+          <span className="pill">Lesart</span>
+          <h2 className="section-title">Was jetzt zählt</h2>
+          <ul className="report-list">
+            {report.keyLearnings.map((learning) => (
+              <li key={learning}>{learning}</li>
+            ))}
+          </ul>
+        </article>
 
-      <section className="report-section report-section--tracking">
-        <div className="report-section__header">
-          <div>
-            <span className="pill">Monats-Tracking</span>
-            <h2 className="section-title">Monatliche Steuerung für Reporting und Planung</h2>
-          </div>
-          <p>
-            Die Monatsansicht ist die bessere Reporting-Ebene für Management und Budget: sie glättet LinkedIn-Wochenlimits, Annahmeverzug und nachgelagerte Follow-ups.
-          </p>
-        </div>
-        <div className="report-period-grid report-period-grid--monthly">
-          {report.monthlyTracking.map((period) => (
-            <article key={period.label} className="report-period">
-              <div className="report-period__header">
-                <div>
-                  <h3>{period.label}</h3>
-                  <span>{period.range}</span>
-                </div>
-                <strong>{formatRate(period.positiveReplies, period.readableReplies)} Positiv</strong>
-              </div>
-              <div className="report-period__metrics">
-                <span><strong>{formatNumber(period.connectionRequests)}</strong>Anfragen</span>
-                <span><strong>{formatNumber(period.acceptedContacts)}</strong>Angenommen</span>
-                <span><strong>{formatNumber(period.firstMessages)}</strong>Nachrichten</span>
-                <span><strong>{formatNumber(period.replySignals)}</strong>Reply-Signale</span>
-                <span><strong>{formatNumber(period.readableReplies)}</strong>Lesbar</span>
-                <span><strong>{formatNumber(period.positiveReplies)}</strong>Positiv</span>
-              </div>
-              <p>{period.note}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="report-section">
-        <div className="report-section__header">
-          <div>
-            <span className="pill">Antwortanalyse</span>
-            <h2 className="section-title">Was die Antworten wirklich zeigen</h2>
-          </div>
-          <p>
-            Die Cluster verdichten echte Antwortmuster. Sie trennen Interesse, Rückfragen, Sprachhürden und Zielgruppenfehler, damit die nächste Kampagne nicht aus Einzelbeispielen abgeleitet wird.
-          </p>
-        </div>
-        <div className="report-cluster-grid">
-          {report.responseClusters.map((cluster) => (
-            <article key={cluster.title} className="report-cluster">
-              <div className="report-cluster__numbers">
-                <span>{cluster.count} Antworten</span>
-                <strong>{cluster.positive} positiv</strong>
-              </div>
-              <h3>{cluster.title}</h3>
-              <p>{cluster.interpretation}</p>
-              <div className="report-cluster__implication">{cluster.implication}</div>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="report-section report-section--signals">
-        <div className="report-section__header">
-          <div>
-            <span className="pill">Positive Signale</span>
-            <h2 className="section-title">Welche Antworten weiterverfolgt werden sollten</h2>
-          </div>
-          <p>
-            Die Beispiele sind bewusst verdichtet. Entscheidend ist nicht der einzelne Wortlaut, sondern das Muster für Marketing und Follow-up.
-          </p>
-        </div>
-        <div className="report-signal-list">
-          {report.positiveSignals.map((signal) => (
-            <article key={signal.label} className="report-signal">
-              <div className="status-chip status-approved">{signal.label}</div>
-              <p className="report-signal__example">{signal.example}</p>
-              <p><strong>Bedeutung:</strong> {signal.meaning}</p>
-              <p><strong>Follow-up:</strong> {signal.followUp}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="report-section report-section--call-potential">
-        <div className="report-section__header">
-          <div>
-            <span className="pill status-approved">Call-Potenzial</span>
-            <h2 className="section-title">{report.callPotential.title}</h2>
-          </div>
-          <p>{report.callPotential.summary}</p>
-        </div>
-        <div className="report-call-grid">
-          {report.callPotential.items.map((item) => (
-            <article
-              key={item.label}
-              className={`report-call-card${item.emphasis ? " report-call-card--emphasis" : ""}`}
-            >
-              <div className="report-call-card__label">{item.label}</div>
-              <div className="report-call-card__value">{item.value}</div>
-              <p>{item.detail}</p>
-            </article>
-          ))}
-        </div>
-        <p className="report-call-note">{report.callPotential.note}</p>
+        <article className="report-section">
+          <span className="pill">Methodik</span>
+          <h2 className="section-title">Wie gezählt wird</h2>
+          <ul className="report-list">
+            {report.methodology.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </article>
       </section>
 
       <section className="report-section report-section--conversations">
         <div className="report-section__header">
           <div>
-            <span className="pill status-sent">Gesprächsbeispiele</span>
-            <h2 className="section-title">Welche Konversationen besonders wichtig sind</h2>
+            <span className="pill status-sent">Beispiele</span>
+            <h2 className="section-title">Nur die Gespräche, die das Reporting erklären</h2>
           </div>
           <p>
-            Diese Fälle zeigen die Spannweite der Kampagne: harter Meeting-Intent, qualifizierte Unsicherheit, bestätigter Zuschuss, Kontextreibung und ein vollständiges Outbound-Nurture-Beispiel wie Dennis Proll.
+            Einzelgespräche bleiben im Report, aber nur als Kontext für die Zahlen. Dennis Proll ist als Beispiel für vollständige Nurture-Abdeckung bewusst hervorgehoben.
           </p>
         </div>
         <div className="report-conversation-list">
@@ -248,81 +219,10 @@ export default function DeguraPerformanceReportPage() {
                 </div>
                 <strong>{conversation.category}</strong>
               </div>
-              <div className="report-conversation__timeline">{conversation.timeline}</div>
-              <div className="report-conversation__grid">
-                <p><strong>Signal:</strong> {conversation.inbound}</p>
-                <p><strong>Handling:</strong> {conversation.handling}</p>
-                <p><strong>Warum wichtig:</strong> {conversation.whyItMatters}</p>
-              </div>
+              <p>{conversation.note}</p>
             </article>
           ))}
         </div>
-      </section>
-
-      <section className="report-two-column">
-        <article className="report-section">
-          <span className="pill">Nachrichten-Learning</span>
-          <h2 className="section-title">Was wir für die nächste Nachricht lernen</h2>
-          <ul className="report-list">
-            {report.copyLearnings.map((learning) => (
-              <li key={learning}>{learning}</li>
-            ))}
-          </ul>
-        </article>
-
-        <article className="report-section report-section--cta">
-          <span className="pill status-sent">Nächster Schritt</span>
-          <h2 className="section-title">Warum mehr kontrolliertes Volumen nötig ist</h2>
-          <p>
-            Die bisherigen Antworten zeigen echtes Interesse, vor allem bei Personen, die ihre aktuelle bAV-Situation nicht genau einschätzen können, nach einem Arbeitgeberwechsel unsicher sind oder ihren bestehenden Zuschuss prüfen möchten.
-          </p>
-          <p>
-            Der limitierende Faktor ist aktuell die verfügbare Kontaktmenge. Für die operative Planung rechnen wir konservativ mit etwa 50 Kontaktanfragen pro LinkedIn-Account und Woche.
-          </p>
-          <strong>Degura sollte den nächsten Test mit höherem, aber sauber begrenztem Volumen fahren.</strong>
-        </article>
-      </section>
-
-      <section className="report-section">
-        <div className="report-section__header">
-          <div>
-            <span className="pill">Volumenmodell</span>
-            <h2 className="section-title">Konservativer Wochenplan</h2>
-          </div>
-          <p>{report.planningAssumption}</p>
-        </div>
-        <div className="report-volume-grid">
-          {report.volumeScenarios.map((scenario) => (
-            <article key={scenario.label} className="report-volume">
-              <div className="report-volume__label">{scenario.label}</div>
-              <div className="report-volume__value">{formatNumber(scenario.weeklyInvites)}</div>
-              <div className="metric-card__subtext">Kontaktanfragen pro Woche</div>
-              <p>{scenario.note}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="report-two-column">
-        <article className="report-section">
-          <span className="pill">Testplan</span>
-          <h2 className="section-title">Empfohlene nächste Aktionen</h2>
-          <ol className="report-list report-list--ordered">
-            {report.nextActions.map((action) => (
-              <li key={action}>{action}</li>
-            ))}
-          </ol>
-        </article>
-
-        <article className="report-section">
-          <span className="pill">Methodik</span>
-          <h2 className="section-title">Wie die Zahlen gelesen werden</h2>
-          <ul className="report-list">
-            {report.methodology.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
-        </article>
       </section>
     </div>
   );

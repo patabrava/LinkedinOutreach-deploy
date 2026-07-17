@@ -1201,6 +1201,55 @@ label {
   line-height: 1;
 }
 
+.report-today-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+}
+
+.report-today-card {
+  border: 2px solid var(--border-color);
+  margin: -2px 0 0 -2px;
+  min-height: 190px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.report-today-card strong {
+  display: block;
+  font-size: 58px;
+  line-height: 0.9;
+}
+
+.report-today-card p {
+  font-weight: 700;
+}
+
+.report-today-card--yellow {
+  background: var(--highlight);
+}
+
+.report-today-card--black {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.report-today-card--black .metric-card__label {
+  color: var(--bg);
+}
+
+.report-today-card--red {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+.report-today-card--red .metric-card__label {
+  color: var(--bg);
+}
+
 .report-section,
 .report-two-column > .report-section {
   border: var(--border-width) var(--border-style) var(--border-color);
@@ -1637,7 +1686,8 @@ label {
   }
 
   .report-kpi-grid,
-  .report-cluster-grid {
+  .report-cluster-grid,
+  .report-today-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1679,7 +1729,8 @@ label {
   }
 
   .report-kpi-grid,
-  .report-cluster-grid {
+  .report-cluster-grid,
+  .report-today-grid {
     grid-template-columns: 1fr;
   }
 
