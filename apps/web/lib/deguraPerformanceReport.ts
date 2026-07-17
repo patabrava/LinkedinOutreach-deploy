@@ -33,6 +33,19 @@ export type VolumeScenario = {
   note: string;
 };
 
+export type PeriodMetric = {
+  label: string;
+  range: string;
+  connectionRequests: number;
+  acceptedContacts: number;
+  firstMessages: number;
+  replySignals: number;
+  readableReplies: number;
+  positiveReplies: number;
+  followupsSent: number;
+  note: string;
+};
+
 export type CallPotentialItem = {
   label: string;
   value: string;
@@ -73,6 +86,8 @@ export type DeguraPerformanceReport = {
   };
   copyLearnings: string[];
   conversationHighlights: ConversationHighlight[];
+  weeklyTracking: PeriodMetric[];
+  monthlyTracking: PeriodMetric[];
   volumeScenarios: VolumeScenario[];
   nextActions: string[];
   methodology: string[];
@@ -89,15 +104,15 @@ const funnel = [
   },
   {
     label: "Kontaktanfragen gesendet",
-    count: 863,
-    rateLabel: `${formatPercent(27.1)} der Testkontakte`,
-    rate: 27.1,
+    count: 1077,
+    rateLabel: `${formatPercent(33.8)} der Testkontakte`,
+    rate: 33.8,
   },
   {
     label: "Angenommene Kontakte",
-    count: 310,
-    rateLabel: `${formatPercent(35.9)} der Anfragen`,
-    rate: 35.9,
+    count: 311,
+    rateLabel: `${formatPercent(28.9)} der Anfragen`,
+    rate: 28.9,
   },
   {
     label: "Erste Nachrichten gesendet",
@@ -107,15 +122,15 @@ const funnel = [
   },
   {
     label: "Antwortsignale",
-    count: 59,
-    rateLabel: `${formatPercent(19.2)} der Nachrichten`,
-    rate: 19.2,
+    count: 61,
+    rateLabel: `${formatPercent(19.9)} der Nachrichten`,
+    rate: 19.9,
   },
   {
     label: "Lesbare Reply-Snippets",
-    count: 53,
+    count: 55,
     rateLabel: "Qualitative Gesprächsanalyse",
-    rate: 89.8,
+    rate: 90.2,
   },
   {
     label: "Positive Gespräche",
@@ -127,25 +142,25 @@ const funnel = [
 
 export function getDeguraPerformanceReport(): DeguraPerformanceReport {
   return {
-    snapshotAt: "9. Juli 2026, 07:47 Uhr MESZ",
+    snapshotAt: "17. Juli 2026, 14:02 Uhr MESZ",
     campaignWindow: "Seit Start des Degura LinkedIn-Outreach-Prozesses",
-    sourceLabel: "Auswertung aus dem LinkedIn-Outreach-System, Snapshot 2026-07-09",
+    sourceLabel: "Auswertung aus dem LinkedIn-Outreach-System, Snapshot 2026-07-17",
     planningAssumption:
       "Für die operative Planung rechnen wir konservativ mit ca. 50 Kontaktanfragen pro LinkedIn-Account und Woche. LinkedIn veröffentlicht kein fixes Limit; das tatsächliche Limit hängt vom Account und vom Verhalten ab.",
     hero: {
       eyebrow: "Degura Marketing-Auswertung",
       title: "DEGURA OUTREACH PERFORMANCE",
       summary:
-        "Die aktualisierte Auswertung zeigt mehr Volumen und weiterhin verwertbare Gesprächssignale: 59 Leads haben geantwortet oder ein Reply-Signal erzeugt, 53 Gespräche enthalten lesbare Antworttexte und 12 davon sind positiv oder qualifiziert anschlussfähig.",
+        "Die aktualisierte Auswertung zeigt mehr Top-of-Funnel-Volumen und eine stabilere Reporting-Basis: 1.077 Kontaktanfragen, 307 erste Nachrichten, 61 Antwortsignale und 55 lesbare Gespräche. Die neue Wochen- und Monatsansicht macht sichtbar, wann Volumen entsteht und wann daraus Antworten werden.",
     },
     kpis: [
       { label: "Leads im System", value: "3.186", detail: "Gesamter Datenbestand" },
       { label: "Hauptsequenz", value: "3.184", detail: "Kontakte in SEQUENZ B", accent: "black" },
-      { label: "Kontaktanfragen", value: "863", detail: "Gesendet im Haupttest" },
-      { label: "Angenommen", value: "310", detail: "35,9% der Anfragen", accent: "yellow" },
+      { label: "Kontaktanfragen", value: "1.077", detail: "Gesendet im Haupttest" },
+      { label: "Angenommen", value: "311", detail: "28,9% der Anfragen", accent: "yellow" },
       { label: "Nachrichten", value: "307", detail: "Erste Nachrichten gesendet" },
-      { label: "Antwortsignale", value: "59", detail: "19,2% der Nachrichten", accent: "yellow" },
-      { label: "Positive Gespräche", value: "12", detail: "22,6% der lesbaren Snippets", accent: "red" },
+      { label: "Antwortsignale", value: "61", detail: "19,9% der Nachrichten", accent: "yellow" },
+      { label: "Positive Gespräche", value: "12", detail: "21,8% der lesbaren Snippets", accent: "red" },
       { label: "Call-Potenzial", value: "1 + 6", detail: "1 explizit, 6 qualifiziert", accent: "red" },
     ],
     funnel,
@@ -188,10 +203,10 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
       },
       {
         title: "Nicht relevant oder Zielgruppen-Mismatch",
-        count: 19,
+        count: 21,
         positive: 0,
         interpretation:
-          "Viele negative Antworten kommen aus Auslandswechsel, Selbstständigkeit, Arbeitslosigkeit, falschem Arbeitgeberkontext oder nicht mehr passender Zielgruppe.",
+          "Viele negative Antworten kommen aus Auslandswechsel, Selbstständigkeit, fehlendem Arbeitgeber, Arbeitslosigkeit, falschem Arbeitgeberkontext oder nicht mehr passender Zielgruppe.",
         implication:
           "Vor Skalierung sollten Land, aktueller Beschäftigungsstatus, Arbeitgeberkontext und Sonderfälle wie Selbstständigkeit besser gefiltert werden.",
       },
@@ -342,13 +357,137 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
         name: "Daniel Wolde-Selassie",
         company: "BRITA Group",
         category: "Kontextkritische Rückfrage",
-        timeline: "Reply am 9. Juli 2026; Antwortentwurf erstellt, Versand steht auf Retry.",
+        timeline: "Reply am 9. Juli 2026; Antwort wurde anschließend gesendet.",
         inbound:
           "Er fragt nach der Einladung, ob man sich kennt.",
         handling:
           "Der Entwurf erklärt knapp, dass noch kein persönlicher Kontakt bestand und dass der Anlass ein kurzer bAV-Check nach Arbeitgeberwechsel ist.",
         whyItMatters:
           "Das neueste Reply-Signal zeigt, dass Kontext und Beziehungserklärung in der Erstnachricht noch stärker sein müssen.",
+      },
+      {
+        name: "Gal Schkolnik",
+        company: "Mondly by Pearson",
+        category: "Kein Arbeitgeber",
+        timeline: "Reply am 17. Juli 2026; steht zur manuellen Prüfung an.",
+        inbound:
+          "Er weist darauf hin, dass er keinen Arbeitgeber hat und dass dies im Profil sichtbar gewesen wäre.",
+        handling:
+          "Der Fall gehört nicht in das positive Potenzial, sondern in die Zielgruppen- und Datenqualitätsauswertung.",
+        whyItMatters:
+          "Das Beispiel zeigt, warum wöchentlich nicht nur Volumen, sondern auch Ausschlussgründe getrackt werden sollten.",
+      },
+      {
+        name: "Matthias Weiss",
+        company: "Text: van Laak",
+        category: "Selbstständigkeit",
+        timeline: "Reply am 17. Juli 2026; steht zur manuellen Prüfung an.",
+        inbound:
+          "Er erklärt, dass er selbstständig ist und die Ansprache durch bessere Profilrecherche vermeidbar gewesen wäre.",
+        handling:
+          "Der Fall wird als Zielgruppen-Mismatch gelesen, nicht als Verkaufschance.",
+        whyItMatters:
+          "Das ist ein klares Signal für bessere Vorfilterung vor zusätzlichem Skalierungsvolumen.",
+      },
+    ],
+    weeklyTracking: [
+      {
+        label: "KW 26",
+        range: "22.-28. Juni",
+        connectionRequests: 18,
+        acceptedContacts: 22,
+        firstMessages: 22,
+        replySignals: 9,
+        readableReplies: 9,
+        positiveReplies: 3,
+        followupsSent: 0,
+        note: "Antwortqualität war hoch, aber das neue Anfragevolumen war niedrig.",
+      },
+      {
+        label: "KW 27",
+        range: "29. Juni-5. Juli",
+        connectionRequests: 217,
+        acceptedContacts: 61,
+        firstMessages: 61,
+        replySignals: 9,
+        readableReplies: 9,
+        positiveReplies: 1,
+        followupsSent: 46,
+        note: "Stärkste Follow-up-Woche: viele Booking- und Reply-Follow-ups wurden nachgezogen.",
+      },
+      {
+        label: "KW 28",
+        range: "6.-12. Juli",
+        connectionRequests: 237,
+        acceptedContacts: 4,
+        firstMessages: 0,
+        replySignals: 5,
+        readableReplies: 1,
+        positiveReplies: 0,
+        followupsSent: 1,
+        note: "Viel Top-of-Funnel, aber kaum neue Annahmen und dadurch keine neuen ersten Nachrichten.",
+      },
+      {
+        label: "KW 29",
+        range: "13.-17. Juli",
+        connectionRequests: 214,
+        acceptedContacts: 1,
+        firstMessages: 0,
+        replySignals: 2,
+        readableReplies: 2,
+        positiveReplies: 0,
+        followupsSent: 0,
+        note: "Aktuelle Woche ist ein Teilzeitraum; beide neuen Antworten zeigen Zielgruppen-Mismatch.",
+      },
+    ],
+    monthlyTracking: [
+      {
+        label: "April",
+        range: "1.-30. April",
+        connectionRequests: 17,
+        acceptedContacts: 11,
+        firstMessages: 12,
+        replySignals: 0,
+        readableReplies: 0,
+        positiveReplies: 0,
+        followupsSent: 0,
+        note: "Setup- und Startphase mit kleinem Volumen.",
+      },
+      {
+        label: "Mai",
+        range: "1.-31. Mai",
+        connectionRequests: 217,
+        acceptedContacts: 95,
+        firstMessages: 95,
+        replySignals: 9,
+        readableReplies: 9,
+        positiveReplies: 1,
+        followupsSent: 4,
+        note: "Erste belastbare Antwortbasis; Annahmen und erste Nachrichten liefen noch eng zusammen.",
+      },
+      {
+        label: "Juni",
+        range: "1.-30. Juni",
+        connectionRequests: 392,
+        acceptedContacts: 200,
+        firstMessages: 200,
+        replySignals: 36,
+        readableReplies: 34,
+        positiveReplies: 10,
+        followupsSent: 1,
+        note: "Bester Monat für qualifizierte Antworten und Call-Potenzial.",
+      },
+      {
+        label: "Juli MTD",
+        range: "1.-17. Juli",
+        connectionRequests: 451,
+        acceptedContacts: 5,
+        firstMessages: 0,
+        replySignals: 16,
+        readableReplies: 12,
+        positiveReplies: 1,
+        followupsSent: 47,
+        note: "Juli zeigt viel neues Anfragevolumen, aber die Wirkung liegt zeitversetzt in Annahmen und Antworten.",
       },
     ],
     volumeScenarios: [

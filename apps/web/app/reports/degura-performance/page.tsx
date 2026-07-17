@@ -13,6 +13,11 @@ function formatNumber(value: number): string {
   return numberFormatter.format(value);
 }
 
+function formatRate(numerator: number, denominator: number): string {
+  if (denominator <= 0) return "0,0%";
+  return `${((numerator / denominator) * 100).toFixed(1).replace(".", ",")}%`;
+}
+
 export default function DeguraPerformanceReportPage() {
   const report = getDeguraPerformanceReport();
   const maxCount = Math.max(...report.funnel.map((step) => step.count), 1);
@@ -79,6 +84,74 @@ export default function DeguraPerformanceReportPage() {
               </article>
             );
           })}
+        </div>
+      </section>
+
+      <section className="report-section report-section--tracking">
+        <div className="report-section__header">
+          <div>
+            <span className="pill">Wochen-Tracking</span>
+            <h2 className="section-title">Wie sich Volumen und Antworten pro Woche entwickeln</h2>
+          </div>
+          <p>
+            Die Wochenansicht trennt Anfragevolumen, angenommene Kontakte, erste Nachrichten, Reply-Signale und positive Gespräche. Dadurch wird sichtbar, ob ein schwacher Zeitraum an wenig Volumen, wenigen Annahmen oder an der Nachricht selbst liegt.
+          </p>
+        </div>
+        <div className="report-period-grid">
+          {report.weeklyTracking.map((period) => (
+            <article key={period.label} className="report-period">
+              <div className="report-period__header">
+                <div>
+                  <h3>{period.label}</h3>
+                  <span>{period.range}</span>
+                </div>
+                <strong>{formatRate(period.replySignals, period.firstMessages)} Reply</strong>
+              </div>
+              <div className="report-period__metrics">
+                <span><strong>{formatNumber(period.connectionRequests)}</strong>Anfragen</span>
+                <span><strong>{formatNumber(period.acceptedContacts)}</strong>Angenommen</span>
+                <span><strong>{formatNumber(period.firstMessages)}</strong>Nachrichten</span>
+                <span><strong>{formatNumber(period.replySignals)}</strong>Reply-Signale</span>
+                <span><strong>{formatNumber(period.positiveReplies)}</strong>Positiv</span>
+                <span><strong>{formatNumber(period.followupsSent)}</strong>Follow-ups</span>
+              </div>
+              <p>{period.note}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="report-section report-section--tracking">
+        <div className="report-section__header">
+          <div>
+            <span className="pill">Monats-Tracking</span>
+            <h2 className="section-title">Monatliche Steuerung für Reporting und Planung</h2>
+          </div>
+          <p>
+            Die Monatsansicht ist die bessere Reporting-Ebene für Management und Budget: sie glättet LinkedIn-Wochenlimits, Annahmeverzug und nachgelagerte Follow-ups.
+          </p>
+        </div>
+        <div className="report-period-grid report-period-grid--monthly">
+          {report.monthlyTracking.map((period) => (
+            <article key={period.label} className="report-period">
+              <div className="report-period__header">
+                <div>
+                  <h3>{period.label}</h3>
+                  <span>{period.range}</span>
+                </div>
+                <strong>{formatRate(period.positiveReplies, period.readableReplies)} Positiv</strong>
+              </div>
+              <div className="report-period__metrics">
+                <span><strong>{formatNumber(period.connectionRequests)}</strong>Anfragen</span>
+                <span><strong>{formatNumber(period.acceptedContacts)}</strong>Angenommen</span>
+                <span><strong>{formatNumber(period.firstMessages)}</strong>Nachrichten</span>
+                <span><strong>{formatNumber(period.replySignals)}</strong>Reply-Signale</span>
+                <span><strong>{formatNumber(period.readableReplies)}</strong>Lesbar</span>
+                <span><strong>{formatNumber(period.positiveReplies)}</strong>Positiv</span>
+              </div>
+              <p>{period.note}</p>
+            </article>
+          ))}
         </div>
       </section>
 
