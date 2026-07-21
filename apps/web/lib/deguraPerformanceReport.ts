@@ -105,16 +105,16 @@ const funnel = [
 
 export function getDeguraPerformanceReport(): DeguraPerformanceReport {
   return {
-    snapshotAt: "17. Juli 2026, 14:02 Uhr MESZ",
+    snapshotAt: "21. Juli 2026, 14:02 Uhr MESZ",
     campaignWindow: "Degura LinkedIn-Outreach, SEQUENZ B / Batch 21",
-    sourceLabel: "Live-Auswertung aus leads und followups, Snapshot 2026-07-17",
+    sourceLabel: "Live-Auswertung aus leads und followups, Snapshot 2026-07-21",
     planningAssumption:
       "Für die Planung ist Wochen- und Monats-Tracking die sauberste Ebene: Follow-ups wirken zeitversetzt, während Kontaktanfragen und Annahmen oft in unterschiedlichen Wochen liegen.",
     hero: {
       eyebrow: "Degura Reporting",
       title: "DEGURA OUTREACH",
       summary:
-        "Die einfache Lesart: 1.077 Kontaktanfragen, 307 erste Nachrichten, 61 Antwortsignale, 12 positive Gespräche und 532 gesendete Follow-ups. Heute wurden 48 Follow-ups verschickt; diese Aktivität war im alten Report nicht sichtbar genug.",
+        "Die einfache Lesart: 1.077 Kontaktanfragen, 307 erste Nachrichten, 61 Antwortsignale, 12 positive Gespräche und 532 gesendete Follow-ups. Heute, am 21. Juli, wurden keine neuen Follow-ups, ersten Nachrichten oder Kontaktanfragen gesendet.",
     },
     kpis: [
       { label: "Leads in Sequenz B", value: "3.184", detail: "Reporting-Basis", accent: "black" },
@@ -124,30 +124,16 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
       { label: "Antwortsignale", value: "61", detail: "19,9% der ersten Nachrichten", accent: "yellow" },
       { label: "Positive Gespräche", value: "12", detail: "21,8% der lesbaren Antworten", accent: "red" },
       { label: "Follow-ups gesendet", value: "532", detail: "480 Nudges, 52 Reply-Follow-ups", accent: "red" },
-      { label: "Juli MTD Follow-ups", value: "192", detail: "145 Nudges, 47 Reply-Follow-ups" },
+      { label: "Juli MTD Follow-ups", value: "192", detail: "1.-21. Juli: 145 Nudges, 47 Reply-Follow-ups" },
     ],
     todayMetrics: [
-      { label: "Follow-ups heute", value: "48", detail: "Alle heute gesendeten Follow-ups", accent: "red" },
-      { label: "Davon Nudges", value: "48", detail: "Zweite Nurture-Nachricht / Attempt 2", accent: "black" },
-      { label: "Neue Replies heute", value: "2", detail: "Gal Schkolnik und Matthias Weiss" },
-      { label: "Positive Replies heute", value: "0", detail: "Beide neuen Replies sind Zielgruppen-Mismatch", accent: "yellow" },
+      { label: "Follow-ups heute", value: "0", detail: "Keine Follow-ups am 21. Juli gesendet", accent: "red" },
+      { label: "Davon Nudges", value: "0", detail: "Keine zweite Nurture-Nachricht heute", accent: "black" },
+      { label: "Neue Replies heute", value: "0", detail: "Keine neuen lesbaren Replies heute" },
+      { label: "Positive Replies heute", value: "0", detail: "Keine positiven Replies am 21. Juli", accent: "yellow" },
     ],
     funnel,
     weeklyTracking: [
-      {
-        label: "KW 26",
-        range: "22.-28. Juni",
-        connectionRequests: 18,
-        acceptedContacts: 22,
-        firstMessages: 22,
-        replySignals: 9,
-        readableReplies: 9,
-        positiveReplies: 3,
-        followupsSent: 101,
-        nudgeFollowupsSent: 101,
-        replyFollowupsSent: 0,
-        note: "Gute Antwortqualität; Follow-up-Aktivität lag komplett auf Nudge-Sequenzen.",
-      },
       {
         label: "KW 27",
         range: "29. Juni-5. Juli",
@@ -178,7 +164,7 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
       },
       {
         label: "KW 29",
-        range: "13.-17. Juli",
+        range: "13.-19. Juli",
         connectionRequests: 214,
         acceptedContacts: 1,
         firstMessages: 0,
@@ -188,7 +174,21 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
         followupsSent: 48,
         nudgeFollowupsSent: 48,
         replyFollowupsSent: 0,
-        note: "Aktuelle Woche ist ein Teilzeitraum; heute wurden 48 Nudge-Follow-ups gesendet.",
+        note: "Die Woche brachte 48 Nudge-Follow-ups und zwei neue Zielgruppen-Mismatch-Replies.",
+      },
+      {
+        label: "KW 30",
+        range: "20.-21. Juli",
+        connectionRequests: 0,
+        acceptedContacts: 0,
+        firstMessages: 0,
+        replySignals: 0,
+        readableReplies: 0,
+        positiveReplies: 0,
+        followupsSent: 0,
+        nudgeFollowupsSent: 0,
+        replyFollowupsSent: 0,
+        note: "Aktuelle Woche zeigt bis zum 21. Juli noch keine neue Outreach-Aktivität.",
       },
     ],
     monthlyTracking: [
@@ -236,7 +236,7 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
       },
       {
         label: "Juli MTD",
-        range: "1.-17. Juli",
+        range: "1.-21. Juli",
         connectionRequests: 451,
         acceptedContacts: 5,
         firstMessages: 0,
@@ -246,14 +246,14 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
         followupsSent: 192,
         nudgeFollowupsSent: 145,
         replyFollowupsSent: 47,
-        note: "Juli zeigt hohes Anfrage- und Follow-up-Volumen; Wirkung kommt zeitversetzt.",
+        note: "Juli bleibt unverändert seit dem letzten Snapshot: hohes Anfrage- und Follow-up-Volumen, aber keine neue Aktivität am 21. Juli.",
       },
     ],
     keyLearnings: [
       "Follow-ups müssen als eigener Reporting-Block sichtbar sein; insgesamt wurden bereits 532 Follow-ups gesendet.",
       "Für Management-Reporting sind Monat und Woche besser als einzelne Inbox-Beispiele.",
-      "Heute war ein Nudge-Tag: 48 zweite Follow-ups, keine Reply-Follow-ups.",
-      "Neue Antworten von Gal Schkolnik und Matthias Weiss zeigen Zielgruppen-Mismatch, nicht Sales-Potenzial.",
+      "Heute, am 21. Juli, gab es keine neuen Sends und keine neuen lesbaren Replies.",
+      "Die letzten neuen Antworten von Gal Schkolnik und Matthias Weiss zeigen Zielgruppen-Mismatch, nicht Sales-Potenzial.",
       "Die nächste Optimierung liegt in Lead-Filterung und klarerer Kontextzeile, nicht nur in mehr Volumen.",
     ],
     conversationHighlights: [

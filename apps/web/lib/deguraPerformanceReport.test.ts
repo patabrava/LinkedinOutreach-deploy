@@ -7,16 +7,17 @@ test("degura report exposes a simple tracking-focused snapshot", () => {
   const report = getDeguraPerformanceReport();
 
   assert.equal(report.hero.title, "DEGURA OUTREACH");
-  assert.equal(report.snapshotAt, "17. Juli 2026, 14:02 Uhr MESZ");
+  assert.equal(report.snapshotAt, "21. Juli 2026, 14:02 Uhr MESZ");
   assert.equal(report.kpis.find((item) => item.label === "Kontaktanfragen")?.value, "1.077");
   assert.equal(report.kpis.find((item) => item.label === "Antwortsignale")?.value, "61");
   assert.equal(report.kpis.find((item) => item.label === "Follow-ups gesendet")?.value, "532");
-  assert.equal(report.todayMetrics.find((item) => item.label === "Follow-ups heute")?.value, "48");
-  assert.equal(report.todayMetrics.find((item) => item.label === "Davon Nudges")?.value, "48");
+  assert.equal(report.todayMetrics.find((item) => item.label === "Follow-ups heute")?.value, "0");
+  assert.equal(report.todayMetrics.find((item) => item.label === "Davon Nudges")?.value, "0");
   assert.equal(report.weeklyTracking.length, 4);
   assert.equal(report.monthlyTracking.length, 4);
   assert.equal(report.weeklyTracking.find((item) => item.label === "KW 29")?.followupsSent, 48);
   assert.equal(report.weeklyTracking.find((item) => item.label === "KW 29")?.nudgeFollowupsSent, 48);
+  assert.equal(report.weeklyTracking.find((item) => item.label === "KW 30")?.followupsSent, 0);
   assert.equal(report.monthlyTracking.find((item) => item.label === "Juli MTD")?.followupsSent, 192);
   assert.equal(report.monthlyTracking.find((item) => item.label === "Juli MTD")?.replyFollowupsSent, 47);
   assert.ok(report.funnel.length >= 6);
