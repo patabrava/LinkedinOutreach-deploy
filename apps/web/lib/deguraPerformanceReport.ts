@@ -12,6 +12,8 @@ export type ReportFunnelStep = {
   rate: number;
 };
 
+export type TrackingMode = "daily" | "weekly" | "monthly";
+
 export type PeriodMetric = {
   label: string;
   range: string;
@@ -25,13 +27,6 @@ export type PeriodMetric = {
   nudgeFollowupsSent: number;
   replyFollowupsSent: number;
   note: string;
-};
-
-export type TodayMetric = {
-  label: string;
-  value: string;
-  detail: string;
-  accent?: "red" | "yellow" | "black";
 };
 
 export type ConversationHighlight = {
@@ -53,10 +48,8 @@ export type DeguraPerformanceReport = {
     summary: string;
   };
   kpis: ReportKpi[];
-  todayMetrics: TodayMetric[];
+  periodFilters: Record<TrackingMode, PeriodMetric>;
   funnel: ReportFunnelStep[];
-  weeklyTracking: PeriodMetric[];
-  monthlyTracking: PeriodMetric[];
   keyLearnings: string[];
   conversationHighlights: ConversationHighlight[];
   methodology: string[];
@@ -73,225 +66,164 @@ const funnel = [
   },
   {
     label: "Kontaktanfragen gesendet",
-    count: 1077,
-    rateLabel: `${formatPercent(33.8)} der Kontakte`,
-    rate: 33.8,
+    count: 1095,
+    rateLabel: `${formatPercent(34.4)} der Kontakte`,
+    rate: 34.4,
   },
   {
     label: "Angenommene Kontakte",
-    count: 311,
-    rateLabel: `${formatPercent(28.9)} der Anfragen`,
-    rate: 28.9,
+    count: 521,
+    rateLabel: `${formatPercent(47.6)} der Anfragen`,
+    rate: 47.6,
   },
   {
     label: "Erste Nachrichten gesendet",
-    count: 307,
-    rateLabel: `${formatPercent(98.7)} der angenommenen Kontakte`,
-    rate: 98.7,
+    count: 521,
+    rateLabel: `${formatPercent(100)} der angenommenen Kontakte`,
+    rate: 100,
   },
   {
     label: "Antwortsignale",
-    count: 61,
-    rateLabel: `${formatPercent(19.9)} der ersten Nachrichten`,
-    rate: 19.9,
+    count: 81,
+    rateLabel: `${formatPercent(15.5)} der ersten Nachrichten`,
+    rate: 15.5,
   },
   {
-    label: "Positive Gespräche",
-    count: 12,
-    rateLabel: `${formatPercent(21.8)} der lesbaren Antworten`,
-    rate: 21.8,
+    label: "Interessierte Replies",
+    count: 15,
+    rateLabel: `${formatPercent(18.1)} der lesbaren Antworten`,
+    rate: 18.1,
   },
 ];
 
 export function getDeguraPerformanceReport(): DeguraPerformanceReport {
   return {
-    snapshotAt: "21. Juli 2026, 14:02 Uhr MESZ",
+    snapshotAt: "28. Juli 2026, 11:17 Uhr MESZ",
     campaignWindow: "Degura LinkedIn-Outreach, SEQUENZ B / Batch 21",
-    sourceLabel: "Live-Auswertung aus leads und followups, Snapshot 2026-07-21",
+    sourceLabel: "Live-Auswertung aus leads und followups, Snapshot 2026-07-28",
     planningAssumption:
-      "Für die Planung ist Wochen- und Monats-Tracking die sauberste Ebene: Follow-ups wirken zeitversetzt, während Kontaktanfragen und Annahmen oft in unterschiedlichen Wochen liegen.",
+      "Der Filter schaltet die Hauptansicht zwischen Tages-, Wochen- und Monatszahlen. So bleibt der Report kurz, ohne Daily-, Weekly- oder Monthly-Blöcke untereinander zu stapeln.",
     hero: {
       eyebrow: "Degura Reporting",
       title: "DEGURA OUTREACH",
       summary:
-        "Die einfache Lesart: 1.077 Kontaktanfragen, 307 erste Nachrichten, 61 Antwortsignale, 12 positive Gespräche und 532 gesendete Follow-ups. Heute, am 21. Juli, wurden keine neuen Follow-ups, ersten Nachrichten oder Kontaktanfragen gesendet.",
+        "Die einfache Lesart bis 28. Juli: 1.095 Kontaktanfragen, 521 erste Nachrichten, 81 Antwortsignale, 15 interessierte Replies und 563 gesendete Follow-ups. Heute kamen 20 lesbare Replies rein; 2 davon zeigen echtes Interesse.",
     },
     kpis: [
       { label: "Leads in Sequenz B", value: "3.184", detail: "Reporting-Basis", accent: "black" },
-      { label: "Kontaktanfragen", value: "1.077", detail: "33,8% der Sequenz" },
-      { label: "Angenommen", value: "311", detail: "28,9% der Anfragen", accent: "yellow" },
-      { label: "Erste Nachrichten", value: "307", detail: "98,7% der angenommenen Kontakte" },
-      { label: "Antwortsignale", value: "61", detail: "19,9% der ersten Nachrichten", accent: "yellow" },
-      { label: "Positive Gespräche", value: "12", detail: "21,8% der lesbaren Antworten", accent: "red" },
-      { label: "Follow-ups gesendet", value: "532", detail: "480 Nudges, 52 Reply-Follow-ups", accent: "red" },
-      { label: "Juli MTD Follow-ups", value: "192", detail: "1.-21. Juli: 145 Nudges, 47 Reply-Follow-ups" },
+      { label: "Kontaktanfragen", value: "1.095", detail: "34,4% der Sequenz" },
+      { label: "Angenommen", value: "521", detail: "47,6% der Anfragen", accent: "yellow" },
+      { label: "Erste Nachrichten", value: "521", detail: "100,0% der angenommenen Kontakte" },
+      { label: "Antwortsignale", value: "81", detail: "15,5% der ersten Nachrichten", accent: "yellow" },
+      { label: "Interessierte Replies", value: "15", detail: "18,1% der lesbaren Replies", accent: "red" },
+      { label: "Follow-ups gesendet", value: "563", detail: "480 Nudges, 83 Reply-Follow-ups", accent: "red" },
+      { label: "Juli MTD Follow-ups", value: "223", detail: "1.-28. Juli: 145 Nudges, 78 Reply-Follow-ups" },
     ],
-    todayMetrics: [
-      { label: "Follow-ups heute", value: "0", detail: "Keine Follow-ups am 21. Juli gesendet", accent: "red" },
-      { label: "Davon Nudges", value: "0", detail: "Keine zweite Nurture-Nachricht heute", accent: "black" },
-      { label: "Neue Replies heute", value: "0", detail: "Keine neuen lesbaren Replies heute" },
-      { label: "Positive Replies heute", value: "0", detail: "Keine positiven Replies am 21. Juli", accent: "yellow" },
-    ],
-    funnel,
-    weeklyTracking: [
-      {
-        label: "KW 27",
-        range: "29. Juni-5. Juli",
-        connectionRequests: 217,
-        acceptedContacts: 61,
-        firstMessages: 61,
-        replySignals: 9,
-        readableReplies: 9,
-        positiveReplies: 1,
-        followupsSent: 46,
-        nudgeFollowupsSent: 0,
-        replyFollowupsSent: 46,
-        note: "Viele Reply-Follow-ups wurden nachgezogen; gut für Call- und Booking-Tracking.",
-      },
-      {
-        label: "KW 28",
-        range: "6.-12. Juli",
-        connectionRequests: 237,
-        acceptedContacts: 4,
-        firstMessages: 0,
-        replySignals: 5,
-        readableReplies: 1,
-        positiveReplies: 0,
-        followupsSent: 98,
-        nudgeFollowupsSent: 97,
-        replyFollowupsSent: 1,
-        note: "Viel Top-of-Funnel und viele Nudges, aber kaum neue Annahmen.",
-      },
-      {
-        label: "KW 29",
-        range: "13.-19. Juli",
-        connectionRequests: 214,
-        acceptedContacts: 1,
-        firstMessages: 0,
-        replySignals: 2,
-        readableReplies: 2,
-        positiveReplies: 0,
-        followupsSent: 48,
-        nudgeFollowupsSent: 48,
-        replyFollowupsSent: 0,
-        note: "Die Woche brachte 48 Nudge-Follow-ups und zwei neue Zielgruppen-Mismatch-Replies.",
-      },
-      {
-        label: "KW 30",
-        range: "20.-21. Juli",
+    periodFilters: {
+      daily: {
+        label: "28. Juli",
+        range: "Heute",
         connectionRequests: 0,
         acceptedContacts: 0,
         firstMessages: 0,
-        replySignals: 0,
-        readableReplies: 0,
-        positiveReplies: 0,
-        followupsSent: 0,
+        replySignals: 20,
+        readableReplies: 20,
+        positiveReplies: 2,
+        followupsSent: 31,
         nudgeFollowupsSent: 0,
-        replyFollowupsSent: 0,
-        note: "Aktuelle Woche zeigt bis zum 21. Juli noch keine neue Outreach-Aktivität.",
+        replyFollowupsSent: 31,
+        note: "Heute wurden 31 Reply-Follow-ups gesendet. 20 lesbare Replies kamen rein; Elias und Disha zeigen echtes Interesse.",
       },
-    ],
-    monthlyTracking: [
-      {
-        label: "April",
-        range: "1.-30. April",
-        connectionRequests: 17,
-        acceptedContacts: 11,
-        firstMessages: 12,
-        replySignals: 0,
-        readableReplies: 0,
-        positiveReplies: 0,
-        followupsSent: 0,
+      weekly: {
+        label: "KW 31",
+        range: "27.-28. Juli",
+        connectionRequests: 0,
+        acceptedContacts: 8,
+        firstMessages: 8,
+        replySignals: 20,
+        readableReplies: 20,
+        positiveReplies: 2,
+        followupsSent: 31,
         nudgeFollowupsSent: 0,
-        replyFollowupsSent: 0,
-        note: "Startphase mit kleinem Volumen.",
+        replyFollowupsSent: 31,
+        note: "Die aktuelle Woche ist reply-lastig: keine neuen Kontaktanfragen, aber 20 lesbare Replies und 31 gesendete Reply-Follow-ups.",
       },
-      {
-        label: "Mai",
-        range: "1.-31. Mai",
-        connectionRequests: 217,
-        acceptedContacts: 95,
-        firstMessages: 95,
-        replySignals: 9,
-        readableReplies: 9,
-        positiveReplies: 1,
-        followupsSent: 40,
-        nudgeFollowupsSent: 36,
-        replyFollowupsSent: 4,
-        note: "Erste belastbare Antwortbasis.",
-      },
-      {
-        label: "Juni",
-        range: "1.-30. Juni",
-        connectionRequests: 392,
-        acceptedContacts: 200,
-        firstMessages: 200,
-        replySignals: 36,
-        readableReplies: 34,
-        positiveReplies: 10,
-        followupsSent: 300,
-        nudgeFollowupsSent: 299,
-        replyFollowupsSent: 1,
-        note: "Bester Monat für qualifizierte Antworten und Follow-up-Volumen.",
-      },
-      {
+      monthly: {
         label: "Juli MTD",
-        range: "1.-21. Juli",
-        connectionRequests: 451,
-        acceptedContacts: 5,
-        firstMessages: 0,
-        replySignals: 16,
-        readableReplies: 12,
-        positiveReplies: 1,
-        followupsSent: 192,
+        range: "1.-28. Juli",
+        connectionRequests: 469,
+        acceptedContacts: 215,
+        firstMessages: 214,
+        replySignals: 36,
+        readableReplies: 37,
+        positiveReplies: 4,
+        followupsSent: 223,
         nudgeFollowupsSent: 145,
-        replyFollowupsSent: 47,
-        note: "Juli bleibt unverändert seit dem letzten Snapshot: hohes Anfrage- und Follow-up-Volumen, aber keine neue Aktivität am 21. Juli.",
+        replyFollowupsSent: 78,
+        note: "Juli hat 469 Kontaktanfragen, 214 erste Nachrichten, 37 lesbare Replies und 4 interessierte Replies geliefert.",
       },
-    ],
+    },
+    funnel,
     keyLearnings: [
-      "Follow-ups müssen als eigener Reporting-Block sichtbar sein; insgesamt wurden bereits 532 Follow-ups gesendet.",
-      "Für Management-Reporting sind Monat und Woche besser als einzelne Inbox-Beispiele.",
-      "Heute, am 21. Juli, gab es keine neuen Sends und keine neuen lesbaren Replies.",
-      "Die letzten neuen Antworten von Gal Schkolnik und Matthias Weiss zeigen Zielgruppen-Mismatch, nicht Sales-Potenzial.",
-      "Die nächste Optimierung liegt in Lead-Filterung und klarerer Kontextzeile, nicht nur in mehr Volumen.",
+      "Der Report fokussiert jetzt interessierte Replies statt langer Daily- oder Weekly-Blöcke.",
+      "Am 28. Juli wurden 31 Reply-Follow-ups gesendet; der aktuelle Gesamtstand liegt damit bei 563 Follow-ups.",
+      "Die aktuelle Antwortqualität ist gemischt: 20 lesbare Replies heute, 2 davon klar interessant.",
+      "Juli MTD steht bei 223 Follow-ups und 4 interessierten Replies; die beste aktuelle Follow-up-Arbeit liegt in den positiven Antworten von Elias, Disha und Daniel.",
+      "Weiteres Volumen lohnt sich nur mit sauberer Zielgruppenfilterung, weil viele neue Replies weiterhin Selbstständigkeit, Ausland oder fehlenden Bedarf signalisieren.",
     ],
     conversationHighlights: [
       {
-        name: "Dennis Proll",
-        company: "Microsoft",
-        category: "Vollständige Nurture-Sequenz",
+        name: "Elias Constantino Gil Morel",
+        company: "Preply",
+        category: "Interessiert heute: konkreter Beratungsbedarf",
         note:
-          "Kein Inbound-Reply gespeichert, aber die Sequenz ist vollständig ausgespielt: Erstnachricht, Follow-up und finale Nudge-Nachricht. Genau solche Verläufe gehören in Follow-up-Tracking, nicht in Reply-Tracking.",
+          "Fragt, ob die Regelung nach Arbeitgeber- und Länderwechsel in seinem Fall greift. Das ist einer der klarsten aktuellen Beratungsanlässe.",
         emphasis: true,
       },
       {
-        name: "Gal Schkolnik",
-        company: "Mondly by Pearson",
-        category: "Reply heute: Zielgruppen-Mismatch",
+        name: "Disha Devidas",
+        company: "Exasol",
+        category: "Interessiert heute: HR-Check",
         note:
-          "Antwort vom 17. Juli: kein Arbeitgeber. Für Reporting zählt das als Datenqualitäts- und Zielgruppenhinweis, nicht als positives Gespräch.",
+          "Hat die bAV-Leistung beim aktuellen Arbeitgeber noch nicht geprüft und will mit HR nachsehen. Gute Gelegenheit für eine klare, hilfreiche Nachfassnachricht.",
+        emphasis: true,
       },
       {
-        name: "Matthias Weiss",
-        company: "Text: van Laak",
-        category: "Reply heute: selbstständig",
+        name: "Daniel Wolde-Selassie",
+        company: "BRITA Group",
+        category: "Interessiert: Links oder kurzer Call",
         note:
-          "Antwort vom 17. Juli: selbstständig. Wichtig für Filterung vor weiterer Skalierung.",
+          "Bittet um hilfreiche Links und ist alternativ offen für einen kurzen Call. Diese Antwort sollte im Report klar vor Zielgruppen-Mismatch-Replies stehen.",
+        emphasis: true,
       },
       {
         name: "Thomas Rolfsmeyer-Wicklein",
         company: "Aginode",
-        category: "Explizite Terminbereitschaft",
+        category: "Interessiert: Terminbereitschaft",
         note:
           "Klarster Meeting-Intent im Datensatz: konkrete Gesprächsbereitschaft mit Terminvorschlag.",
+        emphasis: true,
+      },
+      {
+        name: "Tommy Nieminen",
+        company: "Munich Electrification",
+        category: "Interessiert: Zuschuss vorhanden",
+        note:
+          "Bestätigt einen monatlichen Zuschuss in die Altersvorsorge. Relevanter Fall für Prüfung, ob der Zuschuss sauber genutzt wird.",
+      },
+      {
+        name: "Mariia Khristina",
+        company: "Taxfix",
+        category: "Interessiert: bAV-Klärung im Juli",
+        note:
+          "Hat ein Jobangebot erhalten und will das bAV-Thema im Juli klären. Das ist ein gutes Timing-Signal für Follow-up und Terminlink.",
       },
     ],
     methodology: [
       "Funnel-Zahlen kommen aus leads: Verbindung gesendet, angenommen, Erstnachricht und Reply-Signal.",
       "Follow-up-Zahlen kommen aus followups.sent_at und zählen alle Typen: NUDGE und REPLY.",
-      "Positive Gespräche zählen lesbare Reply-Snippets mit positiver Klassifizierung.",
-      "Wochen- und Monatswerte sind nach UTC-Zeitstempeln aggregiert; der Report ist als operatives Tracking gedacht.",
+      "Interessierte Replies zählen eindeutige lesbare Reply-Snippets mit reply_intent=positive; reine Link-Nachfasszeilen werden nicht als neuer Interessens-Reply gezählt.",
+      "Daily, Weekly und Monthly nutzen Berlin-Kalendertage; der aktuelle Snapshot schließt den 28. Juli bis 11:17 Uhr MESZ ein.",
     ],
   };
 }
