@@ -98,7 +98,7 @@ const funnel = [
 
 export function getDeguraPerformanceReport(): DeguraPerformanceReport {
   return {
-    snapshotAt: "28. Juli 2026, 11:17 Uhr MESZ",
+    snapshotAt: "28. Juli 2026, 14:41 Uhr MESZ",
     campaignWindow: "Degura LinkedIn-Outreach, SEQUENZ B / Batch 21",
     sourceLabel: "Live-Auswertung aus leads und followups, Snapshot 2026-07-28",
     planningAssumption:
@@ -107,7 +107,7 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
       eyebrow: "Degura Reporting",
       title: "DEGURA OUTREACH",
       summary:
-        "Die einfache Lesart bis 28. Juli: 1.095 Kontaktanfragen, 521 erste Nachrichten, 81 Antwortsignale, 15 interessierte Replies und 563 gesendete Follow-ups. Heute kamen 20 lesbare Replies rein; 2 davon zeigen echtes Interesse.",
+        "Die einfache Lesart bis 28. Juli: 1.095 Kontaktanfragen, 521 erste Nachrichten, 81 Antwortsignale, 15 interessierte Replies und 563 gesendete Follow-ups. Heute kamen 20 lesbare Replies rein; Elias und Disha zeigen echtes Interesse.",
     },
     kpis: [
       { label: "Leads in Sequenz B", value: "3.184", detail: "Reporting-Basis", accent: "black" },
@@ -115,7 +115,7 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
       { label: "Angenommen", value: "521", detail: "47,6% der Anfragen", accent: "yellow" },
       { label: "Erste Nachrichten", value: "521", detail: "100,0% der angenommenen Kontakte" },
       { label: "Antwortsignale", value: "81", detail: "15,5% der ersten Nachrichten", accent: "yellow" },
-      { label: "Interessierte Replies", value: "15", detail: "18,1% der lesbaren Replies", accent: "red" },
+      { label: "Interessierte Replies", value: "15", detail: "18,1% der 83 lesbaren Replies", accent: "red" },
       { label: "Follow-ups gesendet", value: "563", detail: "480 Nudges, 83 Reply-Follow-ups", accent: "red" },
       { label: "Juli MTD Follow-ups", value: "223", detail: "1.-28. Juli: 145 Nudges, 78 Reply-Follow-ups" },
     ],
@@ -166,7 +166,7 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
     funnel,
     keyLearnings: [
       "Der Report fokussiert jetzt interessierte Replies statt langer Daily- oder Weekly-Blöcke.",
-      "Am 28. Juli wurden 31 Reply-Follow-ups gesendet; der aktuelle Gesamtstand liegt damit bei 563 Follow-ups.",
+      "Am 28. Juli wurden 31 Reply-Follow-ups gesendet; der aktuelle Gesamtstand liegt damit bei 563 Follow-ups. Der letzte gespeicherte Follow-up liegt um 10:24 Uhr MESZ.",
       "Die aktuelle Antwortqualität ist gemischt: 20 lesbare Replies heute, 2 davon klar interessant.",
       "Juli MTD steht bei 223 Follow-ups und 4 interessierten Replies; die beste aktuelle Follow-up-Arbeit liegt in den positiven Antworten von Elias, Disha und Daniel.",
       "Weiteres Volumen lohnt sich nur mit sauberer Zielgruppenfilterung, weil viele neue Replies weiterhin Selbstständigkeit, Ausland oder fehlenden Bedarf signalisieren.",
@@ -223,7 +223,7 @@ export function getDeguraPerformanceReport(): DeguraPerformanceReport {
       "Funnel-Zahlen kommen aus leads: Verbindung gesendet, angenommen, Erstnachricht und Reply-Signal.",
       "Follow-up-Zahlen kommen aus followups.sent_at und zählen alle Typen: NUDGE und REPLY.",
       "Interessierte Replies zählen eindeutige lesbare Reply-Snippets mit reply_intent=positive; reine Link-Nachfasszeilen werden nicht als neuer Interessens-Reply gezählt.",
-      "Daily, Weekly und Monthly nutzen Berlin-Kalendertage; der aktuelle Snapshot schließt den 28. Juli bis 11:17 Uhr MESZ ein.",
+      "Daily, Weekly und Monthly nutzen Berlin-Kalendertage; der aktuelle Snapshot wurde am 28. Juli um 14:41 Uhr MESZ frisch gegen Supabase geprüft.",
     ],
   };
 }
