@@ -23,7 +23,9 @@ export async function middleware(request: NextRequest) {
   const host = request.headers.get("host")?.split(":")[0]?.toLowerCase() || "";
 
   if (host === "report.deguraleads.de" && pathname === "/") {
-    return NextResponse.rewrite(new URL("/reports/degura-performance", request.url));
+    const reportUrl = request.nextUrl.clone();
+    reportUrl.pathname = "/reports/degura-performance";
+    return NextResponse.rewrite(reportUrl);
   }
 
   const response = NextResponse.next();
