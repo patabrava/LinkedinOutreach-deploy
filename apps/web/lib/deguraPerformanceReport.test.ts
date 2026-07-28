@@ -7,10 +7,11 @@ test("degura report exposes a simple tracking-focused snapshot", () => {
   const report = getDeguraPerformanceReport();
 
   assert.equal(report.hero.title, "DEGURA OUTREACH");
-  assert.equal(report.snapshotAt, "28. Juli 2026, 11:17 Uhr MESZ");
+  assert.equal(report.snapshotAt, "28. Juli 2026, 14:41 Uhr MESZ");
   assert.equal(report.kpis.find((item) => item.label === "Kontaktanfragen")?.value, "1.095");
   assert.equal(report.kpis.find((item) => item.label === "Antwortsignale")?.value, "81");
   assert.equal(report.kpis.find((item) => item.label === "Interessierte Replies")?.value, "15");
+  assert.equal(report.kpis.find((item) => item.label === "Interessierte Replies")?.detail, "18,1% der 83 lesbaren Replies");
   assert.equal(report.kpis.find((item) => item.label === "Follow-ups gesendet")?.value, "563");
   assert.equal(report.periodFilters.daily.label, "28. Juli");
   assert.equal(report.periodFilters.daily.readableReplies, 20);
