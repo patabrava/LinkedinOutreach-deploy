@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 
 import { getDeguraPerformanceReport } from "../../../lib/deguraPerformanceReport";
+import type { PeriodMetric, ReportKpi, TrackingMode } from "../../../lib/deguraPerformanceReport";
 
 export const metadata: Metadata = {
   title: "Degura Outreach Performance",
@@ -18,9 +20,47 @@ function formatRate(numerator: number, denominator: number): string {
   return `${((numerator / denominator) * 100).toFixed(1).replace(".", ",")}%`;
 }
 
-export default function DeguraPerformanceReportPage() {
+const trackingModeLabels: Record<TrackingMode, string> = {
+  daily: "Daily",
+  weekly: "Weekly",
+  monthly: "Monthly",
+};
+
+function normalizeTrackingMode(value: string | string[] | undefined): TrackingMode {
+  const mode = Array.isArray(value) ? value[0] : value;
+
+  if (mode === "weekly" || mode === "monthly") return mode;
+  return "daily";
+}
+
+function buildPeriodKpis(period: PeriodMetric): ReportKpi[] {
+  return [
+    { label: "Kontaktanfragen", value: formatNumber(period.connectionRequests), detail: period.range },
+    { label: "Angenommen", value: formatNumber(period.acceptedContacts), detail: "im gewählten Zeitraum", accent: "yellow" },
+    { label: "Erste Nachrichten", value: formatNumber(period.firstMessages), detail: "nach Annahme gesendet" },
+    { label: "Lesbare Replies", value: formatNumber(period.readableReplies), detail: `${formatNumber(period.replySignals)} Reply-Signale`, accent: "yellow" },
+    {
+      label: "Interessierte Replies",
+      value: formatNumber(period.positiveReplies),
+      detail: `${formatRate(period.positiveReplies, period.readableReplies)} der lesbaren Replies`,
+      accent: "red",
+    },
+    { label: "Follow-ups", value: formatNumber(period.followupsSent), detail: "gesamt gesendet", accent: "red" },
+    { label: "Nudges", value: formatNumber(period.nudgeFollowupsSent), detail: "zweite/dritte Sequenznachricht" },
+    { label: "Reply-Follow-ups", value: formatNumber(period.replyFollowupsSent), detail: "Antworten nachgefasst" },
+  ];
+}
+
+export default function DeguraPerformanceReportPage({
+  searchParams,
+}: {
+  searchParams?: { period?: string | string[] };
+}) {
   const report = getDeguraPerformanceReport();
   const maxCount = Math.max(...report.funnel.map((step) => step.count), 1);
+  const selectedMode = normalizeTrackingMode(searchParams?.period);
+  const selectedPeriod = report.periodFilters[selectedMode];
+  const periodKpis = buildPeriodKpis(selectedPeriod);
 
   return (
     <div className="report-page">
@@ -36,9 +76,9 @@ export default function DeguraPerformanceReportPage() {
           </div>
           <aside className="report-callout report-callout--red" aria-label="Zentrale Lesart">
             <div className="report-callout__label">Kurzfassung</div>
-            <strong>Follow-ups jetzt sauber tracken</strong>
+            <strong>20 Replies heute, 2 interessiert</strong>
             <p>
-              Das operative Reporting trennt ab jetzt Anfragevolumen, Antworten und gesendete Follow-ups auf Tages-, Wochen- und Monatsbasis.
+              Die separaten Daily- und Weekly-Blöcke sind raus. Die Hauptansicht wird direkt über Daily, Weekly oder Monthly gefiltert.
             </p>
           </aside>
         </div>
@@ -48,98 +88,57 @@ export default function DeguraPerformanceReportPage() {
         </div>
       </header>
 
-      <section className="report-kpi-grid" aria-label="Kernzahlen">
-        {report.kpis.map((kpi) => (
-          <article key={kpi.label} className={`report-kpi report-kpi--${kpi.accent || "default"}`}>
-            <div className="metric-card__label">{kpi.label}</div>
-            <div className="report-kpi__value">{kpi.value}</div>
-            <div className="metric-card__subtext">{kpi.detail}</div>
-          </article>
-        ))}
-      </section>
-
-      <section className="report-section report-section--today">
+      <section className="report-section report-section--main-view">
         <div className="report-section__header">
           <div>
-            <span className="pill status-sent">Heute</span>
-            <h2 className="section-title">17. Juli: was wirklich passiert ist</h2>
+            <span className="pill">Hauptansicht</span>
+            <h2 className="section-title">{selectedPeriod.label}</h2>
           </div>
-          <p>
-            Der wichtigste Fix im Report: Follow-ups werden nach <strong>sent_at</strong> gezählt und nicht mehr nur als Reply-Follow-ups gelesen.
-          </p>
+          <p>{selectedPeriod.note}</p>
         </div>
-        <div className="report-today-grid">
-          {report.todayMetrics.map((metric) => (
-            <article key={metric.label} className={`report-today-card report-today-card--${metric.accent || "default"}`}>
-              <div className="metric-card__label">{metric.label}</div>
-              <strong>{metric.value}</strong>
-              <p>{metric.detail}</p>
+        <div className="report-filter-tabs" aria-label="Tracking-Zeitraum">
+          {(Object.keys(trackingModeLabels) as TrackingMode[]).map((mode) => (
+            <Link
+              key={mode}
+              className={`report-filter-tab${selectedMode === mode ? " report-filter-tab--active" : ""}`}
+              href={`?period=${mode}`}
+              aria-current={selectedMode === mode ? "page" : undefined}
+            >
+              {trackingModeLabels[mode]}
+            </Link>
+          ))}
+        </div>
+        <div className="report-main-view__meta">
+          <span>{selectedPeriod.range}</span>
+          <strong>
+            {formatNumber(selectedPeriod.positiveReplies)} interessiert / {formatNumber(selectedPeriod.readableReplies)} lesbare Replies
+          </strong>
+        </div>
+        <div className="report-kpi-grid report-kpi-grid--period" aria-label={`${trackingModeLabels[selectedMode]} Kernzahlen`}>
+          {periodKpis.map((kpi) => (
+            <article key={kpi.label} className={`report-kpi report-kpi--${kpi.accent || "default"}`}>
+              <div className="metric-card__label">{kpi.label}</div>
+              <div className="report-kpi__value">{kpi.value}</div>
+              <div className="metric-card__subtext">{kpi.detail}</div>
             </article>
           ))}
         </div>
       </section>
 
-      <section className="report-section report-section--tracking">
+      <section className="report-section report-section--totals">
         <div className="report-section__header">
           <div>
-            <span className="pill">Wochen-Tracking</span>
-            <h2 className="section-title">Wöchentlich steuerbar</h2>
-          </div>
-          <p>
-            Diese Ansicht ist für operative Steuerung: Wo entsteht Volumen, wo entstehen Annahmen, und wann werden Follow-ups wirklich gesendet?
-          </p>
-        </div>
-        <div className="report-period-grid">
-          {report.weeklyTracking.map((period) => (
-            <article key={period.label} className="report-period">
-              <div className="report-period__header">
-                <div>
-                  <h3>{period.label}</h3>
-                  <span>{period.range}</span>
-                </div>
-                <strong>{formatNumber(period.followupsSent)} Follow-ups</strong>
-              </div>
-              <div className="report-period__metrics">
-                <span><strong>{formatNumber(period.connectionRequests)}</strong>Anfragen</span>
-                <span><strong>{formatNumber(period.acceptedContacts)}</strong>Angenommen</span>
-                <span><strong>{formatNumber(period.replySignals)}</strong>Reply-Signale</span>
-                <span><strong>{formatNumber(period.positiveReplies)}</strong>Positiv</span>
-                <span><strong>{formatNumber(period.nudgeFollowupsSent)}</strong>Nudges</span>
-                <span><strong>{formatNumber(period.replyFollowupsSent)}</strong>Reply-FU</span>
-              </div>
-              <p>{period.note}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="report-section report-section--tracking">
-        <div className="report-section__header">
-          <div>
-            <span className="pill">Monats-Tracking</span>
-            <h2 className="section-title">Monatlich reportbar</h2>
+            <span className="pill">Gesamtstand</span>
+            <h2 className="section-title">Bis 28. Juli</h2>
           </div>
           <p>{report.planningAssumption}</p>
         </div>
-        <div className="report-period-grid report-period-grid--monthly">
-          {report.monthlyTracking.map((period) => (
-            <article key={period.label} className="report-period">
-              <div className="report-period__header">
-                <div>
-                  <h3>{period.label}</h3>
-                  <span>{period.range}</span>
-                </div>
-                <strong>{formatRate(period.positiveReplies, period.readableReplies)} Positiv</strong>
-              </div>
-              <div className="report-period__metrics">
-                <span><strong>{formatNumber(period.connectionRequests)}</strong>Anfragen</span>
-                <span><strong>{formatNumber(period.firstMessages)}</strong>Nachrichten</span>
-                <span><strong>{formatNumber(period.replySignals)}</strong>Reply-Signale</span>
-                <span><strong>{formatNumber(period.followupsSent)}</strong>Follow-ups</span>
-                <span><strong>{formatNumber(period.nudgeFollowupsSent)}</strong>Nudges</span>
-                <span><strong>{formatNumber(period.replyFollowupsSent)}</strong>Reply-FU</span>
-              </div>
-              <p>{period.note}</p>
+        <div className="report-kpi-grid" aria-label="Gesamtzahlen">
+          {report.kpis.map((kpi) => (
+            <article key={kpi.label} className={`report-kpi report-kpi--${kpi.accent || "default"}`}>
+              <div className="metric-card__label">{kpi.label}</div>
+              <div className="report-kpi__value">{kpi.value}</div>
+              <div className="metric-card__subtext">{kpi.detail}</div>
             </article>
           ))}
         </div>
@@ -152,7 +151,7 @@ export default function DeguraPerformanceReportPage() {
             <h2 className="section-title">Einfacher Funnel</h2>
           </div>
           <p>
-            Die Funnel-Ansicht bleibt bewusst kurz. Für Reporting-Entscheidungen sind die Follow-up- und Periodenblöcke wichtiger.
+            Die Funnel-Ansicht bleibt bewusst kurz. Für Reporting-Entscheidungen zählen vor allem interessierte Replies und gesendete Follow-ups.
           </p>
         </div>
         <div className="report-funnel">
@@ -200,10 +199,10 @@ export default function DeguraPerformanceReportPage() {
         <div className="report-section__header">
           <div>
             <span className="pill status-sent">Beispiele</span>
-            <h2 className="section-title">Nur die Gespräche, die das Reporting erklären</h2>
+            <h2 className="section-title">Replies mit echtem Interesse</h2>
           </div>
           <p>
-            Einzelgespräche bleiben im Report, aber nur als Kontext für die Zahlen. Dennis Proll ist als Beispiel für vollständige Nurture-Abdeckung bewusst hervorgehoben.
+            Nur positive, lesbare Reply-Signale. Zielgruppen-Mismatch und reine Nurture-Verläufe sind aus diesem Abschnitt entfernt.
           </p>
         </div>
         <div className="report-conversation-list">

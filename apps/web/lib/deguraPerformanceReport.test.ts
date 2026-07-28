@@ -7,24 +7,27 @@ test("degura report exposes a simple tracking-focused snapshot", () => {
   const report = getDeguraPerformanceReport();
 
   assert.equal(report.hero.title, "DEGURA OUTREACH");
-  assert.equal(report.snapshotAt, "21. Juli 2026, 14:02 Uhr MESZ");
-  assert.equal(report.kpis.find((item) => item.label === "Kontaktanfragen")?.value, "1.077");
-  assert.equal(report.kpis.find((item) => item.label === "Antwortsignale")?.value, "61");
-  assert.equal(report.kpis.find((item) => item.label === "Follow-ups gesendet")?.value, "532");
-  assert.equal(report.todayMetrics.find((item) => item.label === "Follow-ups heute")?.value, "0");
-  assert.equal(report.todayMetrics.find((item) => item.label === "Davon Nudges")?.value, "0");
-  assert.equal(report.weeklyTracking.length, 4);
-  assert.equal(report.monthlyTracking.length, 4);
-  assert.equal(report.weeklyTracking.find((item) => item.label === "KW 29")?.followupsSent, 48);
-  assert.equal(report.weeklyTracking.find((item) => item.label === "KW 29")?.nudgeFollowupsSent, 48);
-  assert.equal(report.weeklyTracking.find((item) => item.label === "KW 30")?.followupsSent, 0);
-  assert.equal(report.monthlyTracking.find((item) => item.label === "Juli MTD")?.followupsSent, 192);
-  assert.equal(report.monthlyTracking.find((item) => item.label === "Juli MTD")?.replyFollowupsSent, 47);
+  assert.equal(report.snapshotAt, "28. Juli 2026, 11:17 Uhr MESZ");
+  assert.equal(report.kpis.find((item) => item.label === "Kontaktanfragen")?.value, "1.095");
+  assert.equal(report.kpis.find((item) => item.label === "Antwortsignale")?.value, "81");
+  assert.equal(report.kpis.find((item) => item.label === "Interessierte Replies")?.value, "15");
+  assert.equal(report.kpis.find((item) => item.label === "Follow-ups gesendet")?.value, "563");
+  assert.equal(report.periodFilters.daily.label, "28. Juli");
+  assert.equal(report.periodFilters.daily.readableReplies, 20);
+  assert.equal(report.periodFilters.daily.positiveReplies, 2);
+  assert.equal(report.periodFilters.daily.followupsSent, 31);
+  assert.equal(report.periodFilters.weekly.label, "KW 31");
+  assert.equal(report.periodFilters.weekly.acceptedContacts, 8);
+  assert.equal(report.periodFilters.monthly.label, "Juli MTD");
+  assert.equal(report.periodFilters.monthly.followupsSent, 223);
+  assert.equal(report.periodFilters.monthly.replyFollowupsSent, 78);
   assert.ok(report.funnel.length >= 6);
   assert.ok(report.keyLearnings.length >= 5);
   assert.ok(report.methodology.length >= 4);
-  assert.ok(report.conversationHighlights.some((item) => item.name === "Dennis Proll" && item.emphasis));
-  assert.ok(report.conversationHighlights.some((item) => item.name === "Gal Schkolnik"));
+  assert.ok(report.conversationHighlights.some((item) => item.name === "Elias Constantino Gil Morel" && item.emphasis));
+  assert.ok(report.conversationHighlights.some((item) => item.name === "Disha Devidas" && item.emphasis));
+  assert.ok(!report.conversationHighlights.some((item) => item.name === "Dennis Proll"));
+  assert.ok(!report.conversationHighlights.some((item) => item.name === "Gal Schkolnik"));
 });
 
 test("degura report snapshot does not expose raw lead identifiers", () => {
