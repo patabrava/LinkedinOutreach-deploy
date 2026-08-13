@@ -4,7 +4,7 @@ import { SenderMessageOnlyControl } from "../../components/SenderMessageOnlyCont
 import { TriggerButton } from "../../components/TriggerButton";
 import { WorkerControlPanel } from "../../components/WorkerControlPanel";
 import { requireServerSession } from "../../lib/auth";
-import { fetchLeadList, fetchOutreachSequences, triggerFollowupSender } from "../actions";
+import { fetchLeadList, fetchLinkedinAccounts, fetchOutreachSequences, triggerFollowupSender } from "../actions";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -15,7 +15,7 @@ export default async function LeadsPage({
   searchParams?: { page?: string; status?: string; company?: string; name?: string; linkedin?: string };
 }) {
   await requireServerSession("/leads");
-  const sequences = await fetchOutreachSequences();
+  const [sequences, accounts] = await Promise.all([fetchOutreachSequences(), fetchLinkedinAccounts()]);
   const currentPage = Math.max(1, Number(searchParams?.page) || 1);
   const filters = {
     status: (searchParams?.status || "").trim(),
@@ -43,7 +43,7 @@ export default async function LeadsPage({
             </a>
           </div>
         </div>
-        <LeadRunControls sequences={sequences} />
+        <LeadRunControls sequences={sequences} accounts={accounts} />
 
         <div className="card" style={{ padding: 20, borderLeft: "none", borderTop: "none", borderBottom: "none" }}>
           <div className="pill">Follow-Ups</div>
@@ -60,7 +60,7 @@ export default async function LeadsPage({
           </div>
         </div>
 
-        <SenderMessageOnlyControl />
+        <SenderMessageOnlyControl accounts={accounts} />
       </div>
 
       <div style={{ marginTop: 20 }}>

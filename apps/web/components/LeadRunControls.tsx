@@ -3,10 +3,12 @@
 import { useMemo, useState } from "react";
 
 import type { OutreachSequenceRow } from "../app/actions";
+import type { LinkedinAccountSummary } from "../lib/linkedinAccounts";
 import { StartEnrichmentButton } from "./StartEnrichmentButton";
 
 type Props = {
   sequences: OutreachSequenceRow[];
+  accounts: LinkedinAccountSummary[];
 };
 
 const getDefaultSequenceId = (sequences: OutreachSequenceRow[]): number | null => {
@@ -14,9 +16,15 @@ const getDefaultSequenceId = (sequences: OutreachSequenceRow[]): number | null =
   return activeSequence?.id ?? sequences[0]?.id ?? null;
 };
 
-export function LeadRunControls({ sequences }: Props) {
-  const defaultSequenceId = useMemo(() => getDefaultSequenceId(sequences), [sequences]);
+export function LeadRunControls({ sequences, accounts }: Props) {
+  const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
+  const accountSequences = useMemo(() => sequences.filter((sequence) => sequence.linkedin_account_id === accountId), [sequences, accountId]);
+  const defaultSequenceId = useMemo(() => getDefaultSequenceId(accountSequences), [accountSequences]);
   const [sequenceId, setSequenceId] = useState<number | null>(defaultSequenceId);
+  const changeAccount = (nextAccountId: string) => {
+    setAccountId(nextAccountId);
+    setSequenceId(getDefaultSequenceId(sequences.filter((sequence) => sequence.linkedin_account_id === nextAccountId)));
+  };
 
   return (
     <div className="card" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16, borderLeft: "none", borderTop: "none", borderBottom: "none" }}>
@@ -27,6 +35,10 @@ export function LeadRunControls({ sequences }: Props) {
       </div>
 
       <div style={{ display: "grid", gap: 8 }}>
+        <label htmlFor="lead-run-account" className="muted" style={{ fontSize: 12 }}>Sender</label>
+        <select id="lead-run-account" className="input" value={accountId} onChange={(event) => changeAccount(event.target.value)}>
+          {accounts.map((account) => <option key={account.id} value={account.id}>{account.label} · {account.email}</option>)}
+        </select>
         <label htmlFor="lead-run-sequence" className="muted" style={{ fontSize: 12 }}>
           Sequence
         </label>
@@ -37,7 +49,7 @@ export function LeadRunControls({ sequences }: Props) {
           onChange={(event) => setSequenceId(event.target.value ? Number(event.target.value) : null)}
         >
           <option value="">No sequence selected</option>
-          {sequences.map((sequence) => (
+          {accountSequences.map((sequence) => (
             <option key={sequence.id} value={sequence.id}>
               {sequence.name}
               {sequence.is_active ? "" : " (inactive)"}
@@ -55,7 +67,7 @@ export function LeadRunControls({ sequences }: Props) {
             <strong>CONNECT + MESSAGE</strong>
             <div className="muted">Step 1: Send the connection request for this batch, then message after acceptance.</div>
           </div>
-          <StartEnrichmentButton mode="message" variant="dashboard" sequenceId={sequenceId} />
+          <StartEnrichmentButton mode="message" variant="dashboard" sequenceId={sequenceId} accountId={accountId} />
         </div>
 
         <div className="action-stack__row">
@@ -63,7 +75,7 @@ export function LeadRunControls({ sequences }: Props) {
             <strong>CONNECT ONLY</strong>
             <div className="muted">Send connection requests without a note for connect-only batches.</div>
           </div>
-          <StartEnrichmentButton mode="connect_only" variant="dashboard" sequenceId={sequenceId} />
+          <StartEnrichmentButton mode="connect_only" variant="dashboard" sequenceId={sequenceId} accountId={accountId} />
         </div>
       </div>
     </div>

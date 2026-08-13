@@ -6,6 +6,7 @@ import { requireOperatorAccess } from "../../../../../lib/apiGuard";
 import { logger } from "../../../../../lib/logger";
 import { listActiveWorkers } from "../../../../../lib/workerControl";
 import { parseSenderMessageOnlyTail } from "../../../../../lib/senderMessageOnlyHealth";
+import { getLinkedinAccountRuntime } from "../../../../../lib/linkedinAccountServer";
 
 const DAEMON_LOG_FILENAME = "sender-message-only-daemon.log";
 const TAIL_BYTES = 32 * 1024;
@@ -49,14 +50,16 @@ export async function GET(request: Request) {
   if (guardResponse) return guardResponse;
 
   try {
+    const url = new URL(request.url);
+    const account = await getLinkedinAccountRuntime(url.searchParams.get("accountId"));
     const webDir = process.cwd();
     const repoRoot = path.resolve(webDir, "..", "..");
-    const logPath = path.join(repoRoot, ".logs", DAEMON_LOG_FILENAME);
+    const logPath = path.join(repoRoot, ".logs", `${account.id}-${DAEMON_LOG_FILENAME}`);
 
     const intervalSec = resolveIntervalSec();
     const stuckThresholdSec = 2 * intervalSec;
 
-    const workers = listActiveWorkers({ kinds: ["sender_message_only"] });
+    const workers = listActiveWorkers({ kinds: ["sender_message_only"], accountId: account.id });
     const worker = workers[0] || null;
 
     // Always parse the log tail — operators triaging a stop/crash need the last

@@ -30,6 +30,7 @@ type StatusResponse = {
 };
 
 const POLL_INTERVAL_MS = 5_000;
+const errorMessage = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 
 type EnrichmentMode = "message" | "connect_only";
 
@@ -39,6 +40,7 @@ type StartEnrichmentButtonProps = {
   mode?: EnrichmentMode;
   variant?: ButtonVariant;
   sequenceId?: number | null;
+  accountId: string;
 };
 
 const MODE_CONFIG: Record<EnrichmentMode, {
@@ -67,7 +69,7 @@ const MODE_CONFIG: Record<EnrichmentMode, {
   },
 };
 
-export function StartEnrichmentButton({ mode = "message", variant = "details", sequenceId }: StartEnrichmentButtonProps) {
+export function StartEnrichmentButton({ mode = "message", variant = "details", sequenceId, accountId }: StartEnrichmentButtonProps) {
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
@@ -83,7 +85,8 @@ export function StartEnrichmentButton({ mode = "message", variant = "details", s
       setStatusLoading(true);
     }
     try {
-      const res = await fetch(modeConfig.statusUrl, {
+      const separator = modeConfig.statusUrl.includes("?") ? "&" : "?";
+      const res = await fetch(`${modeConfig.statusUrl}${separator}accountId=${encodeURIComponent(accountId)}`, {
         cache: "no-store",
         headers: getOperatorApiHeaders(),
       });
@@ -101,14 +104,14 @@ export function StartEnrichmentButton({ mode = "message", variant = "details", s
       } else {
         setPolling(false);
       }
-    } catch (err: any) {
-      setError(err?.message || "Unable to load workflow status.");
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Unable to load workflow status."));
     } finally {
       if (!silent) {
         setStatusLoading(false);
       }
     }
-  }, [modeConfig.statusUrl]);
+  }, [modeConfig.statusUrl, accountId]);
 
   useEffect(() => {
     refreshStatus();
@@ -207,6 +210,7 @@ export function StartEnrichmentButton({ mode = "message", variant = "details", s
         headers: getOperatorApiHeaders(),
         body: JSON.stringify({
           sequenceId,
+          accountId,
         }),
       });
       const data = await res.json();
@@ -216,8 +220,8 @@ export function StartEnrichmentButton({ mode = "message", variant = "details", s
       setMessage(data?.message || modeConfig.defaultStartMessage);
       setPolling(true);
       await refreshStatus();
-    } catch (e: any) {
-      setError(e?.message || "Network error");
+    } catch (error: unknown) {
+      setError(errorMessage(error, "Network error"));
     } finally {
       setRunning(false);
     }
@@ -229,7 +233,8 @@ export function StartEnrichmentButton({ mode = "message", variant = "details", s
     try {
       const res = await fetch("/api/enrich/stop", {
         method: "POST",
-        headers: getOperatorApiHeaders(),
+        headers: { "Content-Type": "application/json", ...getOperatorApiHeaders() },
+        body: JSON.stringify({ accountId }),
       });
       const data = await res.json();
       if (!res.ok || data?.ok === false) {
@@ -239,8 +244,8 @@ export function StartEnrichmentButton({ mode = "message", variant = "details", s
       setPolling(false);
       setRunning(false);
       await refreshStatus({ silent: true });
-    } catch (e: any) {
-      setError(e?.message || "Unable to stop workflow.");
+    } catch (error: unknown) {
+      setError(errorMessage(error, "Unable to stop workflow."));
     } finally {
       setStopping(false);
     }
@@ -252,15 +257,15 @@ export function StartEnrichmentButton({ mode = "message", variant = "details", s
     setError("");
     setMessage("");
     try {
-      const result = await sendAllApproved("connect_only");
+      const result = await sendAllApproved("connect_only", accountId);
       if (!result?.senderTriggered) {
         throw new Error("Failed to trigger message sender.");
       }
       setMessage("Message sender triggered for accepted friend requests.");
       setPolling(true);
       await refreshStatus({ silent: true });
-    } catch (e: any) {
-      setError(e?.message || "Unable to trigger message sender.");
+    } catch (error: unknown) {
+      setError(errorMessage(error, "Unable to trigger message sender."));
     } finally {
       setMessageOnlySending(false);
     }

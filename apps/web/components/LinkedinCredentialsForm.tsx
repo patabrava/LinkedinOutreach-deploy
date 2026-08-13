@@ -2,12 +2,13 @@
 
 import { useFormState, useFormStatus } from "react-dom";
 
-import { saveLinkedinCredentials } from "../app/actions";
+import { saveLinkedinAccount } from "../app/actions";
 import type { LinkedinCredentialSummary, LinkedinCredentialState } from "../app/actions";
 
 type Props = {
   existing: LinkedinCredentialSummary;
   useCard?: boolean;
+  accountId?: string;
 };
 
 const initialState: LinkedinCredentialState = { success: false };
@@ -21,23 +22,48 @@ function SubmitButton() {
   );
 }
 
-export function LinkedinCredentialsForm({ existing, useCard = true }: Props) {
-  const [state, formAction] = useFormState(saveLinkedinCredentials, initialState);
+export function LinkedinCredentialsForm({ existing, useCard = true, accountId }: Props) {
+  const [state, formAction] = useFormState(saveLinkedinAccount, initialState);
+  const fieldPrefix = accountId || "new-linkedin-account";
 
   const content = (
     <>
-      <div className="pill">LinkedIn Auth</div>
-      <h3 className="section-title-tight">CREDENTIALS</h3>
+      <input type="hidden" name="account_id" value={accountId || ""} />
+      <input type="hidden" name="is_active" value={existing.is_active === false ? "false" : "true"} />
+      <div className="pill">LinkedIn Account</div>
+      <h3 className="section-title-tight">{accountId ? "ACCOUNT DETAILS" : "ADD ACCOUNT"}</h3>
       <div className="muted" style={{ marginBottom: 16 }}>
-        Stored securely in Supabase settings. These credentials are separate from the cached LinkedIn session on the worker, so saving them alone does not mean the scraper is ready.
+        Credentials are encrypted in Supabase. Browser sessions and worker limits are isolated for this sender.
       </div>
 
-      <label htmlFor="email">
+      <label htmlFor={`${fieldPrefix}-label`}>ACCOUNT LABEL</label>
+      <input
+        className="input"
+        id={`${fieldPrefix}-label`}
+        name="label"
+        defaultValue={existing.label || ""}
+        placeholder="Sales account 1"
+        required
+        style={{ marginBottom: 16 }}
+      />
+
+      <label htmlFor={`${fieldPrefix}-display-name`}>SENDER DISPLAY NAME</label>
+      <input
+        className="input"
+        id={`${fieldPrefix}-display-name`}
+        name="display_name"
+        defaultValue={existing.display_name || ""}
+        placeholder="Full name shown on LinkedIn"
+        required
+        style={{ marginBottom: 16 }}
+      />
+
+      <label htmlFor={`${fieldPrefix}-email`}>
         EMAIL
       </label>
       <input
         className="input"
-        id="email"
+        id={`${fieldPrefix}-email`}
         name="email"
         type="email"
         defaultValue={existing.email || ""}
@@ -47,19 +73,30 @@ export function LinkedinCredentialsForm({ existing, useCard = true }: Props) {
         style={{ marginBottom: 16 }}
       />
 
-      <label htmlFor="password">
+      <label htmlFor={`${fieldPrefix}-password`}>
         PASSWORD
       </label>
       <input
         className="input"
-        id="password"
+        id={`${fieldPrefix}-password`}
         name="password"
         type="password"
         placeholder={existing.hasPassword ? "Password stored. Enter to replace." : "LinkedIn password"}
         required={!existing.hasPassword}
         autoComplete="current-password"
-        style={{ marginBottom: 20 }}
+        style={{ marginBottom: 16 }}
       />
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12, marginBottom: 20 }}>
+        <div>
+          <label htmlFor={`${fieldPrefix}-invite-limit`}>DAILY INVITE LIMIT</label>
+          <input className="input" id={`${fieldPrefix}-invite-limit`} name="daily_invite_limit" type="number" min="1" defaultValue={existing.daily_invite_limit || 50} required />
+        </div>
+        <div>
+          <label htmlFor={`${fieldPrefix}-message-limit`}>DAILY MESSAGE LIMIT</label>
+          <input className="input" id={`${fieldPrefix}-message-limit`} name="daily_message_limit" type="number" min="1" defaultValue={existing.daily_message_limit || 50} required />
+        </div>
+      </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
         <SubmitButton />

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
 import type { LeadBatchRow, OutreachSequenceRow } from "../app/actions";
+import type { LinkedinAccountSummary } from "../lib/linkedinAccounts";
 import { assignBatchToSequence, saveOutreachSequence } from "../app/actions";
 import * as sequencePlaceholderUtils from "../lib/sequencePlaceholders";
 import { CONNECT_NOTE_MAX, validateConnectNote } from "../lib/sequenceConnectNote";
@@ -11,6 +12,7 @@ import { CONNECT_NOTE_MAX, validateConnectNote } from "../lib/sequenceConnectNot
 type Props = {
   sequences: OutreachSequenceRow[];
   batches: LeadBatchRow[];
+  accounts: LinkedinAccountSummary[];
 };
 
 type Draft = {
@@ -210,12 +212,14 @@ const extractServerValidationErrors = (error: unknown): {
   return { topLevel: fallbackMessage, fieldErrors };
 };
 
-export function SequenceEditor({ sequences, batches }: Props) {
+export function SequenceEditor({ sequences, batches, accounts }: Props) {
   const router = useRouter();
   const placeholderResolver = useMemo(() => createPlaceholderResolver(), []);
+  const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
+  const initialSequences = sequences.filter((sequence) => sequence.linkedin_account_id === accounts[0]?.id);
   const [localSequences, setLocalSequences] = useState<OutreachSequenceRow[]>(() => sequences);
   const [draft, setDraft] = useState<Draft>(() => {
-    const first = sequences[0];
+    const first = initialSequences[0];
     return first
       ? {
           name: first.name,
@@ -227,7 +231,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
         }
       : emptyDraft();
   });
-  const [selectedSequenceId, setSelectedSequenceId] = useState<number | null>(sequences[0]?.id ?? null);
+  const [selectedSequenceId, setSelectedSequenceId] = useState<number | null>(initialSequences[0]?.id ?? null);
   const [pending, startTransition] = useTransition();
   const [focusedMessageField, setFocusedMessageField] = useState<MessageFieldKey>("first_message");
   const [serverFieldErrors, setServerFieldErrors] = useState<ValidationErrorsByField>({ ...EMPTY_FIELD_ERRORS });
@@ -244,20 +248,32 @@ export function SequenceEditor({ sequences, batches }: Props) {
     setLocalSequences(sequences);
   }, [sequences]);
 
+  const accountSequences = useMemo(
+    () => localSequences.filter((sequence) => sequence.linkedin_account_id === accountId),
+    [localSequences, accountId]
+  );
+
+  const changeAccount = (nextAccountId: string) => {
+    setAccountId(nextAccountId);
+    const first = localSequences.find((sequence) => sequence.linkedin_account_id === nextAccountId) || null;
+    setSelectedSequenceId(first?.id ?? null);
+    syncDraft(first);
+  };
+
   const selectedSequence = useMemo(
     () => localSequences.find((sequence) => sequence.id === selectedSequenceId) || null,
     [localSequences, selectedSequenceId]
   );
   const sequenceById = useMemo(() => {
-    return new Map(localSequences.map((sequence) => [sequence.id, sequence]));
-  }, [localSequences]);
+    return new Map(accountSequences.map((sequence) => [sequence.id, sequence]));
+  }, [accountSequences]);
 
   const batchRows = useMemo(
     () =>
       batches
-        .filter((batch) => batch.source === "csv_upload" && batch.batch_intent !== "custom_outreach")
+        .filter((batch) => batch.linkedin_account_id === accountId && batch.source === "csv_upload" && batch.batch_intent !== "custom_outreach")
         .map((batch) => ({ ...batch })),
-    [batches]
+    [batches, accountId]
   );
 
   const localFieldErrors = useMemo(
@@ -366,7 +382,8 @@ export function SequenceEditor({ sequences, batches }: Props) {
       try {
         const saved = await saveOutreachSequence({
           id: selectedSequenceId || undefined,
-          name: draft.name || `Sequence ${localSequences.length + 1}`,
+          linkedin_account_id: accountId,
+          name: draft.name || `Sequence ${accountSequences.length + 1}`,
           connect_note: draft.connect_note,
           first_message: draft.first_message,
           second_message: draft.second_message,
@@ -410,6 +427,12 @@ export function SequenceEditor({ sequences, batches }: Props) {
       <div className="muted" style={{ marginBottom: 16 }}>
         Sequences are used only after a connection is accepted. Invite notes live here too, and the assigned sequence controls the invite message for Connect + Message batches.
       </div>
+      <label htmlFor="sequence-account">LinkedIn sender</label>
+      <select id="sequence-account" className="input" value={accountId} onChange={(event) => changeAccount(event.target.value)}>
+        {accounts.map((account) => (
+          <option key={account.id} value={account.id}>{account.label} · {account.email}</option>
+        ))}
+      </select>
 
       <div className="seq-grid">
         <div className="seq-panel">
@@ -420,7 +443,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
             </button>
           </div>
           <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
-            {localSequences.map((sequence) => (
+            {accountSequences.map((sequence) => (
               <button
                 key={sequence.id}
                 className={`btn ${selectedSequenceId === sequence.id ? "warn" : "secondary"}`}
@@ -652,7 +675,7 @@ export function SequenceEditor({ sequences, batches }: Props) {
                         onChange={(event) => onAssign(batch.id, Number(event.target.value))}
                       >
                         <option value="">No sequence</option>
-                        {localSequences.map((sequence) => (
+                        {accountSequences.map((sequence) => (
                           <option key={sequence.id} value={sequence.id}>
                             {sequence.name}
                           </option>

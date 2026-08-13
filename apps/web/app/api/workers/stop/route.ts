@@ -10,9 +10,10 @@ export async function POST(request: Request) {
   if (guardResponse) return guardResponse;
 
   try {
-    const payload = (await request.json().catch(() => ({}))) as { kinds?: WorkerKind[] };
+    const payload = (await request.json().catch(() => ({}))) as { kinds?: WorkerKind[]; accountId?: string };
     const kinds = Array.isArray(payload.kinds) && payload.kinds.length ? payload.kinds : undefined;
-    const result = stopWorkers({ kinds });
+    const accountId = typeof payload.accountId === "string" ? payload.accountId : undefined;
+    const result = stopWorkers({ kinds, accountId });
 
     logger.info("Worker stop requested", { correlationId }, {
       kinds,

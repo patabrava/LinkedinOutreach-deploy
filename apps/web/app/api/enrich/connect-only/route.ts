@@ -5,6 +5,8 @@ import { NextResponse } from "next/server";
 
 import { requireOperatorAccess } from "../../../../lib/apiGuard";
 import { logger } from "../../../../lib/logger";
+import { getLinkedinAccountForBatch } from "../../../../lib/linkedinAccountServer";
+import { getLinkedinAccountLockPath } from "../../../../lib/linkedinAccounts";
 import { trackWorkerChild } from "../../../../lib/workerControl";
 import { assertScraperLockFree, persistScraperPid } from "../scraperLock";
 
@@ -54,7 +56,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: false, error: "Scraper directory not found" }, { status: 500 });
     }
 
-    const pidFile = path.join(scraperDir, "enrichment.pid");
+    const body = (await request.json().catch(() => ({}))) as { batchId?: number; sequenceId?: number; accountId?: string };
+    const account = await getLinkedinAccountForBatch(body.batchId, body.accountId);
+    const pidFile = getLinkedinAccountLockPath(account.id, "sender-invites");
     const lockState = assertScraperLockFree(pidFile);
     if (!lockState.ok) {
       logger.warn("Connect-only scraper already running", { correlationId }, { pid: lockState.activePid, pidFile });
@@ -67,7 +71,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const { batchId, sequenceId } = (await request.json().catch(() => ({}))) as { batchId?: number; sequenceId?: number };
+    const { batchId, sequenceId } = body;
     const batchArg = typeof batchId === "number" && batchId > 0 ? ["--batch-id", String(batchId)] : [];
     const launchSequenceId = typeof sequenceId === "number" && sequenceId > 0 ? sequenceId : null;
 
@@ -81,7 +85,7 @@ export async function POST(request: Request) {
     const systemPython = "/opt/local/bin/python3";
     const pythonCmd = fs.existsSync(venvPython) ? venvPython : (fs.existsSync(systemPython) ? systemPython : "python3");
 
-    const args = ["sender.py", "--send-invites", ...batchArg];
+    const args = ["sender.py", "--send-invites", "--account-id", account.id, ...batchArg];
     logger.workerSpawn("sender", args, { correlationId, batchId, mode: "connect_only", sequenceId: launchSequenceId });
 
     const logPath = path.join(repoRoot, ".logs", "sender-spawn.log");
@@ -90,6 +94,7 @@ export async function POST(request: Request) {
       env: {
         ...process.env,
         CORRELATION_ID: correlationId,
+        LINKEDIN_ACCOUNT_ID: account.id,
         ...(launchSequenceId ? { OUTREACH_SEQUENCE_ID: String(launchSequenceId) } : {}),
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -113,6 +118,7 @@ export async function POST(request: Request) {
       kind: "scraper_outreach",
       label: "Invitation outreach",
       args,
+      accountId: account.id,
     });
 
     logger.info("Connect-only sender started successfully", { correlationId, pid: child.pid });

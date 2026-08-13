@@ -304,6 +304,7 @@ def build_reply_generation_prompt(context: Dict[str, Any]) -> str:
     original_message = context.get("original_message") or ""
     sequence_messages = context.get("sequence_messages") or {}
     sequence_lines = _reply_sequence_style_lines(sequence_messages)
+    sender_display_name = (context.get("sender_display_name") or "der ausgewählte Absender").strip()
 
     lines = [
         "Du klassifizierst eine LinkedIn Antwort und formulierst eine sehr kurze Antwort.",
@@ -311,7 +312,7 @@ def build_reply_generation_prompt(context: Dict[str, Any]) -> str:
         "Wenn die Antwort unklar, ablehnend, vertröstend oder ohne klares Interesse ist, wähle negative.",
         "Wenn die Person Interesse zeigt, ein Gespräch will oder mehr wissen möchte, wähle positive.",
         "Wenn die Person stattdessen ihre eigene Leistung anbietet, eine Gegenfrage zu Degura als Kunde stellt oder ein Verkaufsgespräch für ihr Produkt startet, wähle negative.",
-        "Schreibe wie Katharina in einer echten kurzen LinkedIn DM: freundlich, locker, knapp, nicht corporate.",
+        f"Schreibe als {sender_display_name} in einer echten kurzen LinkedIn DM: freundlich, locker, knapp, nicht corporate.",
         "Wenn der Kontakt auf Englisch schreibt, antworte auf Englisch. Sonst Deutsch.",
         "Die Antwort darf warm klingen, aber nicht überschwänglich. Nutze natürliche Formulierungen wie 'Alles gut', 'Danke dir', 'macht Sinn', 'schicke ich dir'.",
         "Niemals mit dem Vornamen oder einer Anrede beginnen. Den Namen des Kontakts nicht wiederholen.",
@@ -427,6 +428,7 @@ def build_followup_prompt(context: Dict[str, Any], prompt_text: str) -> str:
     previous_messages = context.get("previous_messages", [])
     profile_data = context.get("profile_data", {})
     sequence_messages = context.get("sequence_messages") or {}
+    sender_display_name = (context.get("sender_display_name") or "der ausgewählte Absender").strip()
     
     # New: last message tracking for proper sender attribution
     last_message_text = context.get("last_message_text") or ""
@@ -453,6 +455,7 @@ def build_followup_prompt(context: Dict[str, Any], prompt_text: str) -> str:
         f"- Nachname: {last_name or 'Unbekannt'}",
         f"- Firma: {company_name or 'Unbekannt'}",
         f"- Followup Versuch: {attempt}",
+        f"- Absender: {sender_display_name}",
         f"",
         f"SZENARIO: {scenario}",
     ]

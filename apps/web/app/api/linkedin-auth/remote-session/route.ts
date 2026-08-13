@@ -6,6 +6,7 @@ import {
   spawnScraperCommand,
 } from "../../../../lib/linkedinBrowserControl";
 import { readLinkedinAuthStatus } from "../../../../lib/linkedinAuthSession";
+import { getLinkedinAccountRuntime } from "../../../../lib/linkedinAccountServer";
 import { logger } from "../../../../lib/logger";
 
 type RemoteSessionAction = "sync" | "reset";
@@ -41,14 +42,17 @@ export async function POST(request: Request) {
   );
   if (strictAuthResponse) return strictAuthResponse;
 
+  let resolvedAccountId: string | undefined;
   try {
-    const body = (await request.json().catch(() => ({}))) as { action?: string };
+    const body = (await request.json().catch(() => ({}))) as { action?: string; accountId?: string };
+    const account = await getLinkedinAccountRuntime(body.accountId);
+    resolvedAccountId = account.id;
     const action: RemoteSessionAction = body?.action === "reset" ? "reset" : "sync";
     const args = action === "reset" ? ["--reset-remote-session"] : ["--sync-remote-session"];
 
     logger.workerSpawn("scraper-remote-session", args, { correlationId, action });
 
-    const child = spawnScraperCommand(args, correlationId);
+    const child = spawnScraperCommand(args, correlationId, account.id, account.browserSlot);
     const [stdout, stderr, exitCode] = await Promise.all([
       collectOutput(child.stdout),
       collectOutput(child.stderr),
@@ -67,7 +71,7 @@ export async function POST(request: Request) {
     }
 
     if (exitCode !== 0) {
-      const status = readLinkedinAuthStatus();
+      const status = readLinkedinAuthStatus(account.id);
       const message =
         status.session_state === "login_required" || status.session_state === "session_expired"
           ? "Remote session sync failed. Complete LinkedIn login in the remote browser and retry sync."
@@ -97,7 +101,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const status = readLinkedinAuthStatus();
+    const status = readLinkedinAuthStatus(account.id);
     logger.apiResponse("POST", "/api/linkedin-auth/remote-session", 200, { correlationId });
     return NextResponse.json({
       ok: true,
@@ -109,7 +113,7 @@ export async function POST(request: Request) {
           : "Remote LinkedIn session captured. Recheck the session card for the latest state.",
     });
   } catch (err: unknown) {
-    const status = readLinkedinAuthStatus();
+    const status = resolvedAccountId ? readLinkedinAuthStatus(resolvedAccountId) : readLinkedinAuthStatus();
     logger.error(
       "Remote session command threw before completion",
       { correlationId },

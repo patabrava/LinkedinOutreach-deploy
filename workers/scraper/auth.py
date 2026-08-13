@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import uuid
 from typing import Literal, Optional, Tuple
 
 from playwright.async_api import Browser, BrowserContext, Playwright, TimeoutError, async_playwright
@@ -31,10 +32,27 @@ __all__ = [
     "reset_remote_login_state",
     "require_auth_state",
     "shutdown",
+    "configure_account",
 ]
 
-def _resolve_auth_dir() -> Path:
+def _validate_account_id(account_id: str) -> str:
+    try:
+        return str(uuid.UUID(account_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("A valid --account-id is required for account-scoped LinkedIn state.") from exc
+
+
+def _resolve_auth_dir(account_id: Optional[str] = None) -> Path:
     """Prefer the mounted runtime volume, then fall back to the repo-local worker dir."""
+    selected_account = account_id or os.getenv("LINKEDIN_ACCOUNT_ID", "").strip()
+    if selected_account:
+        safe_account_id = _validate_account_id(selected_account)
+        root = Path(os.getenv("LINKEDIN_ACCOUNTS_DIR", "/data/linkedin-accounts")).expanduser()
+        if str(root).startswith("/data") and not Path("/data").exists():
+            root = Path(__file__).resolve().parents[2] / ".linkedin-accounts"
+        account_dir = root / safe_account_id
+        account_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return account_dir.resolve()
     candidates = [
         os.getenv("LINKEDIN_SCRAPER_DIR", "").strip(),
         "/data/scraper",
@@ -55,6 +73,18 @@ AUTH_STATUS_PATH = AUTH_DIR / "auth_status.json"
 AUTH_STATUS_BACKUP_PATH = AUTH_DIR / "auth_status.json.bak"
 REMOTE_BROWSER_CDP_URL = os.getenv("LINKEDIN_BROWSER_CDP_URL", "http://linkedin-browser:9222")
 REMOTE_BROWSER_PROFILE_DIR = AUTH_DIR / "interactive-profile"
+
+
+def configure_account(account_id: str) -> Path:
+    """Switch all auth artifacts to one validated account directory before browser work starts."""
+    global AUTH_DIR, AUTH_STATE_PATH, AUTH_STATUS_PATH, AUTH_STATUS_BACKUP_PATH, REMOTE_BROWSER_PROFILE_DIR
+    os.environ["LINKEDIN_ACCOUNT_ID"] = _validate_account_id(account_id)
+    AUTH_DIR = _resolve_auth_dir(account_id)
+    AUTH_STATE_PATH = AUTH_DIR / "auth.json"
+    AUTH_STATUS_PATH = AUTH_DIR / "auth_status.json"
+    AUTH_STATUS_BACKUP_PATH = AUTH_DIR / "auth_status.json.bak"
+    REMOTE_BROWSER_PROFILE_DIR = AUTH_DIR / "interactive-profile"
+    return AUTH_DIR
 
 
 @dataclass

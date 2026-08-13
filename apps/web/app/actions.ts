@@ -7,6 +7,7 @@ import { revalidatePath } from "next/cache";
 
 import { logger } from "../lib/logger";
 import { encryptLinkedinPassword } from "../lib/credentialCrypto";
+import { requireLinkedinAccountId, type LinkedinAccountSummary } from "../lib/linkedinAccounts";
 import { isVisibleFollowup } from "../lib/followupVisibility";
 import type { BatchIntent, OutreachMode } from "../lib/outreachModes";
 import { BATCH_INTENT_LABELS, normalizeBatchIntent, normalizeOutreachMode, OUTREACH_MODE_TO_DB } from "../lib/outreachModes";
@@ -38,7 +39,14 @@ const CONNECT_ONLY_SEQUENCE_NAME = "SEQUENZ b ohne Vertrag";
 const DEFAULT_CONNECT_MESSAGE_SEQUENCE_NAME = "Default Sequence";
 
 export type LinkedinCredentialSummary = {
+  id?: string;
+  label?: string;
   email?: string;
+  display_name?: string;
+  browser_slot?: 1 | 2;
+  daily_invite_limit?: number;
+  daily_message_limit?: number;
+  is_active?: boolean;
   hasPassword: boolean;
 };
 
@@ -55,6 +63,7 @@ type SpawnTrackedWorkerInput = {
   stdio?: "ignore" | ["ignore", "inherit", "inherit"];
   kind: WorkerKind;
   label: string;
+  accountId?: string;
 };
 
 function spawnTrackedWorker({
@@ -65,6 +74,7 @@ function spawnTrackedWorker({
   stdio = "ignore",
   kind,
   label,
+  accountId,
 }: SpawnTrackedWorkerInput) {
   const proc = spawn(execPath, args, {
     cwd,
@@ -77,19 +87,35 @@ function spawnTrackedWorker({
     kind,
     label,
     args,
+    accountId,
   });
   proc.unref();
   return proc;
 }
 
+async function accountIdForLead(leadId: string): Promise<string> {
+  const { data, error } = await supabaseAdmin().from("leads").select("linkedin_account_id").eq("id", leadId).single();
+  if (error || !data?.linkedin_account_id) throw new Error("Lead has no sender account.");
+  return requireLinkedinAccountId(data.linkedin_account_id);
+}
+
+async function accountIdForBatch(batchId: number): Promise<string> {
+  const { data, error } = await supabaseAdmin().from("lead_batches").select("linkedin_account_id").eq("id", batchId).single();
+  if (error || !data?.linkedin_account_id) throw new Error("Batch has no sender account.");
+  return requireLinkedinAccountId(data.linkedin_account_id);
+}
+
 export async function resolveSequenceIdForBatchIntent(
   client: ReturnType<typeof supabaseAdmin>,
-  normalizedIntent: BatchIntent
+  normalizedIntent: BatchIntent,
+  accountId: string
 ): Promise<number> {
+  const linkedinAccountId = requireLinkedinAccountId(accountId);
   if (normalizedIntent === "connect_only") {
     const { data: seededSequence, error: seededSequenceError } = await client
       .from("outreach_sequences")
       .select("id")
+      .eq("linkedin_account_id", linkedinAccountId)
       .ilike("name", CONNECT_ONLY_SEQUENCE_NAME)
       .maybeSingle();
 
@@ -106,6 +132,7 @@ export async function resolveSequenceIdForBatchIntent(
   const { data: defaultSequence, error: defaultSequenceError } = await client
     .from("outreach_sequences")
     .select("id")
+    .eq("linkedin_account_id", linkedinAccountId)
     .eq("name", DEFAULT_CONNECT_MESSAGE_SEQUENCE_NAME)
     .maybeSingle();
 
@@ -453,6 +480,7 @@ export async function fetchLeadList(
 
 export type OutreachSequenceRow = {
   id: number;
+  linkedin_account_id: string;
   name: string;
   connect_note: string;
   first_message: string;
@@ -466,6 +494,7 @@ export type OutreachSequenceRow = {
 
 export type LeadBatchRow = {
   id: number;
+  linkedin_account_id: string;
   name: string;
   source: string;
   batch_intent: BatchIntent;
@@ -481,7 +510,7 @@ export async function fetchOutreachSequences(): Promise<OutreachSequenceRow[]> {
   const client = supabaseAdmin();
   const { data, error } = await client
     .from("outreach_sequences")
-    .select("id, name, connect_note, first_message, second_message, third_message, followup_interval_days, is_active, created_at, updated_at")
+    .select("id, linkedin_account_id, name, connect_note, first_message, second_message, third_message, followup_interval_days, is_active, created_at, updated_at")
     .order("created_at", { ascending: true });
   if (error) {
     throw error;
@@ -496,7 +525,7 @@ export async function fetchLeadBatches(): Promise<LeadBatchRow[]> {
   const client = supabaseAdmin();
   const { data, error } = await client
     .from("lead_batches")
-    .select("id, name, source, batch_intent, sequence_id, created_at, updated_at")
+    .select("id, linkedin_account_id, name, source, batch_intent, sequence_id, created_at, updated_at")
     .order("created_at", { ascending: true });
   if (error) {
     throw error;
@@ -621,6 +650,7 @@ export async function fetchCustomOutreachBatchSummaries(): Promise<CustomOutreac
 
 export async function saveOutreachSequence(input: {
   id?: number;
+  linkedin_account_id: string;
   name: string;
   connect_note: string;
   first_message: string;
@@ -628,7 +658,9 @@ export async function saveOutreachSequence(input: {
   third_message: string;
   followup_interval_days: number;
 }) {
+  const linkedinAccountId = requireLinkedinAccountId(input.linkedin_account_id);
   const payload = {
+    linkedin_account_id: linkedinAccountId,
     name: input.name.trim(),
     connect_note: input.connect_note.trim(),
     first_message: input.first_message.trim(),
@@ -675,7 +707,7 @@ export async function saveOutreachSequence(input: {
   const { data, error } = await client
     .from("outreach_sequences")
     .upsert(input.id ? { id: input.id, ...payload } : payload)
-    .select("id, name, connect_note, first_message, second_message, third_message, followup_interval_days, is_active, created_at, updated_at")
+    .select("id, linkedin_account_id, name, connect_note, first_message, second_message, third_message, followup_interval_days, is_active, created_at, updated_at")
     .single();
   if (error) throw error;
   revalidatePath("/");
@@ -685,11 +717,21 @@ export async function saveOutreachSequence(input: {
 
 export async function assignBatchToSequence(batchId: number, sequenceId: number) {
   const client = supabaseAdmin();
+  const [{ data: batch, error: batchFetchError }, { data: sequence, error: sequenceFetchError }] = await Promise.all([
+    client.from("lead_batches").select("id, linkedin_account_id").eq("id", batchId).single(),
+    client.from("outreach_sequences").select("id, linkedin_account_id").eq("id", sequenceId).single(),
+  ]);
+  if (batchFetchError || sequenceFetchError || !batch || !sequence) {
+    throw batchFetchError || sequenceFetchError || new Error("Batch or sequence was not found.");
+  }
+  if (batch.linkedin_account_id !== sequence.linkedin_account_id) {
+    throw new Error("A batch can only use a sequence owned by the same LinkedIn account.");
+  }
   const { data, error } = await client
     .from("lead_batches")
     .update({ sequence_id: sequenceId })
     .eq("id", batchId)
-    .select("id, name, source, sequence_id, created_at, updated_at")
+    .select("id, linkedin_account_id, name, source, sequence_id, created_at, updated_at")
     .single();
   if (error) throw error;
 
@@ -794,6 +836,8 @@ export async function approveFollowup(followupId: string, draftText: string) {
   }
   // Optionally trigger sender in follow-up mode (fire-and-forget)
   try {
+    const { data: followup } = await client.from("followups").select("linkedin_account_id").eq("id", followupId).single();
+    const accountId = requireLinkedinAccountId(followup?.linkedin_account_id);
     const repoRoot = path.resolve(process.cwd(), "..", "..");
     const senderDir = path.resolve(repoRoot, "workers", "sender");
     const senderPath = path.join(senderDir, "sender.py");
@@ -801,15 +845,16 @@ export async function approveFollowup(followupId: string, draftText: string) {
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-    const args = [senderPath, "--followup", "--followup-id", followupId];
+    const args = [senderPath, "--followup", "--followup-id", followupId, "--account-id", accountId];
     spawnTrackedWorker({
       execPath: execToUse,
       args,
       cwd: repoRoot,
       stdio: "ignore",
-      env: { ...process.env },
+      env: { ...process.env, LINKEDIN_ACCOUNT_ID: accountId },
       kind: "sender_followup",
       label: "Follow-up sender",
+      accountId,
     });
   } catch (err) {
     console.error("approveFollowup trigger sender error", err);
@@ -847,6 +892,11 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
       logger.error("Failed to fetch followup for draft generation", { correlationId, followupId }, fetchError || undefined);
       return { success: false, error: "Followup not found" };
     }
+    const { data: senderAccount } = await client
+      .from("linkedin_accounts")
+      .select("display_name, label")
+      .eq("id", followup.linkedin_account_id)
+      .single();
 
     // Get previous sent messages for context
     const { data: previousFollowups } = await client
@@ -886,6 +936,7 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
       first_name: followup.lead?.first_name || "",
       last_name: followup.lead?.last_name || "",
       company_name: followup.lead?.company_name || "",
+      sender_display_name: senderAccount?.display_name || senderAccount?.label || "",
       reply_snippet: followup.reply_snippet || null,
       followup_type: followup.followup_type || "REPLY",
       attempt: followup.attempt || 1,
@@ -1106,20 +1157,14 @@ export async function triggerInboxScan() {
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-    const args = [scraperPath, "--inbox", "--run"]; // reuse --run gate
-
-    // Minimal logging so we can see what is being spawned from the Followups tab
-    console.log("triggerInboxScan: spawning inbox scraper", { execToUse, args, cwd: repoRoot });
-
-    spawnTrackedWorker({
-      execPath: execToUse,
-      args,
-      cwd: repoRoot,
-      stdio: ["ignore", "inherit", "inherit"],
-      env: { ...process.env },
-      kind: "scraper_inbox",
-      label: "Inbox scan",
-    });
+    const { data: accounts, error } = await supabaseAdmin().from("linkedin_accounts").select("id").eq("is_active", true);
+    if (error) throw error;
+    for (const account of accounts || []) {
+      const accountId = requireLinkedinAccountId(account.id);
+      const args = [scraperPath, "--inbox", "--run", "--account-id", accountId];
+      console.log("triggerInboxScan: spawning inbox scraper", { execToUse, args, cwd: repoRoot });
+      spawnTrackedWorker({ execPath: execToUse, args, cwd: repoRoot, stdio: ["ignore", "inherit", "inherit"], env: { ...process.env, LINKEDIN_ACCOUNT_ID: accountId }, kind: "scraper_inbox", label: "Inbox scan", accountId });
+    }
   } catch (err) {
     console.error("triggerInboxScan error", err);
   }
@@ -1220,16 +1265,13 @@ export async function triggerFollowupSender() {
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-    const args = [senderPath, "--followup"]; // process approved followups
-    spawnTrackedWorker({
-      execPath: execToUse,
-      args,
-      cwd: repoRoot,
-      stdio: "ignore",
-      env: { ...process.env },
-      kind: "sender_followup",
-      label: "Follow-up sender",
-    });
+    const { data: accounts, error } = await supabaseAdmin().from("linkedin_accounts").select("id").eq("is_active", true);
+    if (error) throw error;
+    for (const account of accounts || []) {
+      const accountId = requireLinkedinAccountId(account.id);
+      const args = [senderPath, "--followup", "--account-id", accountId];
+      spawnTrackedWorker({ execPath: execToUse, args, cwd: repoRoot, stdio: "ignore", env: { ...process.env, LINKEDIN_ACCOUNT_ID: accountId }, kind: "sender_followup", label: "Follow-up sender", accountId });
+    }
   } catch (err) {
     console.error("triggerFollowupSender error", err);
   }
@@ -1238,6 +1280,7 @@ export async function triggerFollowupSender() {
 export async function sendLeadNow(leadId: string, outreachMode: OutreachMode = "connect_message") {
   const correlationId = logger.actionStart("sendLeadNow", { leadId }, { outreachMode });
   try {
+    const accountId = await accountIdForLead(leadId);
     const repoRoot = path.resolve(process.cwd(), "..", "..");
     const senderDir = path.resolve(repoRoot, "workers", "sender");
     const senderPath = path.join(senderDir, "sender.py");
@@ -1245,7 +1288,7 @@ export async function sendLeadNow(leadId: string, outreachMode: OutreachMode = "
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-    const args = [senderPath, "--lead-id", leadId];
+    const args = [senderPath, "--lead-id", leadId, "--account-id", accountId];
     if (outreachMode === "connect_only") {
       args.push("--message-only");
     }
@@ -1257,9 +1300,10 @@ export async function sendLeadNow(leadId: string, outreachMode: OutreachMode = "
       args,
       cwd: repoRoot,
       stdio: ["ignore", "inherit", "inherit"],
-      env: { ...process.env, CORRELATION_ID: correlationId },
+      env: { ...process.env, CORRELATION_ID: correlationId, LINKEDIN_ACCOUNT_ID: accountId },
       kind: "sender_outreach",
       label: "Messaging sender",
+      accountId,
     });
     logger.info("Sender worker triggered for single lead", { correlationId, leadId, pid: proc.pid, outreachMode });
   } catch (err: any) {
@@ -1271,7 +1315,7 @@ export async function sendLeadNow(leadId: string, outreachMode: OutreachMode = "
   }
 }
 
-export async function sendAllApproved(outreachMode: OutreachMode = "connect_message") {
+export async function sendAllApproved(outreachMode: OutreachMode = "connect_message", requestedAccountId?: string) {
   const correlationId = logger.actionStart("sendAllApproved", {}, { outreachMode });
   let senderTriggered = false;
   try {
@@ -1283,24 +1327,32 @@ export async function sendAllApproved(outreachMode: OutreachMode = "connect_mess
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
 
-    // connect_message uses the standard outreach path; connect_only remains the post-acceptance path.
-    const args = outreachMode === "connect_only"
-      ? [senderPath, "--message-only"]
-      : [senderPath];
-
-    logger.workerSpawn("sender", args, { correlationId, mode: outreachMode });
-
-    const proc = spawnTrackedWorker({
-      execPath: execToUse,
-      args,
-      cwd: repoRoot,
-      stdio: ["ignore", "inherit", "inherit"],
-      env: { ...process.env, CORRELATION_ID: correlationId },
-      kind: "sender_outreach",
-      label: "Messaging sender",
-    });
-    senderTriggered = true;
-    logger.info("Sender worker triggered for all approved", { correlationId, pid: proc.pid, outreachMode });
+    let accountIds: string[];
+    if (requestedAccountId) {
+      accountIds = [requireLinkedinAccountId(requestedAccountId)];
+    } else {
+      const { data, error } = await supabaseAdmin().from("linkedin_accounts").select("id").eq("is_active", true);
+      if (error) throw error;
+      accountIds = (data || []).map((account) => account.id);
+    }
+    for (const accountId of accountIds) {
+      const args = outreachMode === "connect_only"
+        ? [senderPath, "--message-only", "--account-id", accountId]
+        : [senderPath, "--account-id", accountId];
+      logger.workerSpawn("sender", args, { correlationId, mode: outreachMode, accountId });
+      const proc = spawnTrackedWorker({
+        execPath: execToUse,
+        args,
+        cwd: repoRoot,
+        stdio: ["ignore", "inherit", "inherit"],
+        env: { ...process.env, CORRELATION_ID: correlationId, LINKEDIN_ACCOUNT_ID: accountId },
+        kind: "sender_outreach",
+        label: "Messaging sender",
+        accountId,
+      });
+      senderTriggered = true;
+      logger.info("Sender worker triggered for all approved", { correlationId, pid: proc.pid, outreachMode, accountId });
+    }
   } catch (err: any) {
     logger.error("sendAllApproved error", { correlationId }, err);
   } finally {
@@ -1316,6 +1368,7 @@ export async function sendFirstMessagesForBatch(batchId: number) {
   let eligibleCount = 0;
 
   try {
+    const accountId = await accountIdForBatch(batchId);
     if (!Number.isFinite(batchId) || batchId <= 0) {
       throw new Error("Invalid batch id.");
     }
@@ -1342,7 +1395,7 @@ export async function sendFirstMessagesForBatch(batchId: number) {
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-    const args = [senderPath, "--message-only", "--batch-id", String(batchId)];
+    const args = [senderPath, "--message-only", "--batch-id", String(batchId), "--account-id", accountId];
 
     logger.workerSpawn("sender", args, { correlationId, batchId, eligibleCount, mode: "connect_only" });
 
@@ -1351,9 +1404,10 @@ export async function sendFirstMessagesForBatch(batchId: number) {
       args,
       cwd: repoRoot,
       stdio: ["ignore", "inherit", "inherit"],
-      env: { ...process.env, CORRELATION_ID: correlationId },
+      env: { ...process.env, CORRELATION_ID: correlationId, LINKEDIN_ACCOUNT_ID: accountId },
       kind: "sender_outreach",
       label: "Messaging sender",
+      accountId,
     });
     senderTriggered = true;
     logger.info("Sender worker triggered for batch first-messages", { correlationId, batchId, eligibleCount, pid: proc.pid });
@@ -1444,6 +1498,7 @@ export async function approveDraft(input: DraftInput) {
     // Fire-and-forget: trigger the sender worker for connect_message approvals only.
     if (mode === "connect_message" && !input.skipSend) {
       try {
+        const accountId = await accountIdForLead(input.leadId);
         const repoRoot = path.resolve(process.cwd(), "..", "..");
         const senderDir = path.resolve(repoRoot, "workers", "sender");
         const senderPath = path.join(senderDir, "sender.py");
@@ -1451,7 +1506,7 @@ export async function approveDraft(input: DraftInput) {
         const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
         const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
         const execToUse = pythonExec;
-        const args = [senderPath, "--lead-id", input.leadId];
+        const args = [senderPath, "--lead-id", input.leadId, "--account-id", accountId];
 
         logger.workerSpawn("sender", args, { correlationId, leadId: input.leadId });
 
@@ -1460,9 +1515,10 @@ export async function approveDraft(input: DraftInput) {
           args,
           cwd: repoRoot,
           stdio: ["ignore", "inherit", "inherit"],
-          env: { ...process.env, CORRELATION_ID: correlationId },
+          env: { ...process.env, CORRELATION_ID: correlationId, LINKEDIN_ACCOUNT_ID: accountId },
           kind: "sender_outreach",
           label: "Messaging sender",
+          accountId,
         });
 
         logger.info("Sender worker triggered", { correlationId, leadId: input.leadId, pid: proc.pid });
@@ -1578,6 +1634,9 @@ export async function approveAndSendAllDrafts(outreachMode: OutreachMode = "conn
     let senderTriggered = false;
     if (approvedCount > 0) {
       try {
+        const accountId = Number.isFinite(batchId) && (batchId || 0) > 0
+          ? await accountIdForBatch(Number(batchId))
+          : await accountIdForLead(leads[0]!.id);
         const repoRoot = path.resolve(process.cwd(), "..", "..");
         const senderDir = path.resolve(repoRoot, "workers", "sender");
         const senderPath = path.join(senderDir, "sender.py");
@@ -1586,6 +1645,7 @@ export async function approveAndSendAllDrafts(outreachMode: OutreachMode = "conn
         const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
         const execToUse = pythonExec;
         const args = outreachMode === "connect_only" ? [senderPath, "--message-only"] : [senderPath];
+        args.push("--account-id", accountId);
         if (Number.isFinite(batchId) && (batchId || 0) > 0) {
           args.push("--batch-id", String(batchId));
         }
@@ -1597,9 +1657,10 @@ export async function approveAndSendAllDrafts(outreachMode: OutreachMode = "conn
           args,
           cwd: repoRoot,
           stdio: ["ignore", "inherit", "inherit"],
-          env: { ...process.env, CORRELATION_ID: correlationId },
+          env: { ...process.env, CORRELATION_ID: correlationId, LINKEDIN_ACCOUNT_ID: accountId },
           kind: "sender_outreach",
           label: "Messaging sender",
+          accountId,
         });
         senderTriggered = true;
         logger.info("Sender worker triggered for bulk approval", { correlationId, pid: proc.pid });
@@ -1678,9 +1739,11 @@ type LeadCsvRow = {
 export async function importLeads(
   rows: LeadCsvRow[],
   fileName?: string,
-  batchIntent: BatchIntent = "connect_message"
+  batchIntent: BatchIntent = "connect_message",
+  accountId?: string
 ) {
   if (!rows?.length) return { inserted: 0 };
+  const linkedinAccountId = requireLinkedinAccountId(accountId);
   const normalizedIntent = normalizeBatchIntent(batchIntent);
   const normalizedMode = normalizedIntent === "custom_outreach" ? "connect_message" : normalizeOutreachMode(normalizedIntent);
   const dbOutreachMode = OUTREACH_MODE_TO_DB[normalizedMode];
@@ -1698,7 +1761,7 @@ export async function importLeads(
 
   const client = supabaseAdmin();
   const batchName = `${fileName?.trim() || "CSV batch"} (${BATCH_INTENT_LABELS[normalizedIntent]})`;
-  const sequenceId = await resolveSequenceIdForBatchIntent(client, normalizedIntent);
+  const sequenceId = await resolveSequenceIdForBatchIntent(client, normalizedIntent, linkedinAccountId);
 
   const { data: batchData, error: batchError } = await client
     .from("lead_batches")
@@ -1706,6 +1769,7 @@ export async function importLeads(
       name: batchName,
       source: "csv_upload",
       batch_intent: normalizedIntent,
+      linkedin_account_id: linkedinAccountId,
       // Repo rule: imported leads inherit `batch_id` and `sequence_id` together.
       // Even custom and connect-only batches carry a sequence_id so the lead record is consistent.
       sequence_id: sequenceId,
@@ -1721,13 +1785,14 @@ export async function importLeads(
   const batchId = batchData.id;
   const batched = sanitized.map((row) => ({
     ...row,
+    linkedin_account_id: linkedinAccountId,
     batch_id: batchId,
     sequence_id: sequenceId,
     outreach_mode: dbOutreachMode,
   }));
 
   const { error, count } = await client.from("leads").upsert(batched, {
-    onConflict: "linkedin_url",
+    onConflict: "linkedin_account_id,linkedin_url",
     ignoreDuplicates: true,
     count: "exact",
   });
@@ -1739,7 +1804,7 @@ export async function importLeads(
     batch_id: batchId,
     sequence_id: sequenceId,
     outreach_mode: dbOutreachMode,
-  }).in(
+  }).eq("linkedin_account_id", linkedinAccountId).in(
     "linkedin_url",
     sanitized.map((row) => row.linkedin_url)
   );
@@ -1771,6 +1836,123 @@ export async function fetchLinkedinCredentials(): Promise<LinkedinCredentialSumm
     email: value.email || "",
     hasPassword: Boolean(value.password || value.password_encrypted),
   };
+}
+
+export async function fetchLinkedinAccounts(): Promise<LinkedinAccountSummary[]> {
+  if (!isSupabaseAdminConfigured()) return [];
+  const client = supabaseAdmin();
+  const { data, error } = await client
+    .from("linkedin_accounts")
+    .select("id, label, email, credentials, display_name, browser_slot, daily_invite_limit, daily_message_limit, is_active, created_at")
+    .order("created_at", { ascending: true });
+
+  if (error) throw error;
+  return (data || []).map((row: any, index: number) => ({
+    id: row.id,
+    label: row.label,
+    email: row.email || "",
+    display_name: row.display_name || "",
+    browser_slot: row.browser_slot === 2 ? 2 : 1,
+    daily_invite_limit: row.daily_invite_limit || 50,
+    daily_message_limit: row.daily_message_limit || 50,
+    is_active: row.is_active !== false,
+    hasPassword: Boolean(row.credentials?.password || row.credentials?.password_encrypted),
+    isPrimary: index === 0,
+  }));
+}
+
+export async function saveLinkedinAccount(
+  _prev: LinkedinCredentialState,
+  formData: FormData
+): Promise<LinkedinCredentialState> {
+  const rawAccountId = String(formData.get("account_id") || "").trim();
+  const label = String(formData.get("label") || "").trim();
+  const email = String(formData.get("email") || "").trim();
+  const displayName = String(formData.get("display_name") || "").trim();
+  const password = String(formData.get("password") || "").trim();
+  const dailyInviteLimit = Number(formData.get("daily_invite_limit") || 50);
+  const dailyMessageLimit = Number(formData.get("daily_message_limit") || 50);
+  const isActive = formData.get("is_active") !== "false";
+
+  if (!label || !email || !displayName) {
+    return { success: false, error: "Label, email, and sender display name are required." };
+  }
+  if (!Number.isInteger(dailyInviteLimit) || dailyInviteLimit < 1 || !Number.isInteger(dailyMessageLimit) || dailyMessageLimit < 1) {
+    return { success: false, error: "Daily limits must be positive whole numbers." };
+  }
+
+  const client = supabaseAdmin();
+  const accountId = rawAccountId ? requireLinkedinAccountId(rawAccountId) : null;
+  let credentials: Record<string, unknown> = {};
+
+  if (password) {
+    try {
+      credentials = encryptLinkedinPassword(password);
+    } catch (cryptoError) {
+      logger.error("LinkedIn account encryption failed", { accountId }, cryptoError as Error);
+      return { success: false, error: "Credential encryption key is missing or unreadable." };
+    }
+  } else if (accountId) {
+    const { data: existing, error } = await client
+      .from("linkedin_accounts")
+      .select("credentials")
+      .eq("id", accountId)
+      .single();
+    if (error || !existing) return { success: false, error: "Could not load the stored account credentials." };
+    credentials = existing.credentials || {};
+  } else {
+    return { success: false, error: "Password is required for a new account." };
+  }
+
+  let browserSlot: 1 | 2 = 1;
+  if (accountId) {
+    const { data: current } = await client.from("linkedin_accounts").select("browser_slot").eq("id", accountId).single();
+    browserSlot = current?.browser_slot === 2 ? 2 : 1;
+  } else {
+    const { data: occupied } = await client.from("linkedin_accounts").select("browser_slot").not("browser_slot", "is", null);
+    const occupiedSlots = new Set((occupied || []).map((row: any) => Number(row.browser_slot)));
+    const available = ([1, 2] as const).find((slot) => !occupiedSlots.has(slot));
+    if (!available) return { success: false, error: "This deployment supports two LinkedIn accounts. Disable or remove one before adding another." };
+    browserSlot = available;
+  }
+
+  const payload = {
+    label,
+    email,
+    display_name: displayName,
+    browser_slot: browserSlot,
+    credentials,
+    daily_invite_limit: dailyInviteLimit,
+    daily_message_limit: dailyMessageLimit,
+    is_active: isActive,
+  };
+  const query = accountId
+    ? client.from("linkedin_accounts").update(payload).eq("id", accountId)
+    : client.from("linkedin_accounts").insert(payload);
+  const { data, error } = await query.select("id").single();
+  if (error || !data) {
+    logger.error("LinkedIn account save failed", { accountId }, error || undefined);
+    return { success: false, error: error?.message || "Could not save LinkedIn account." };
+  }
+
+  const savedAccountId = data.id as string;
+  const { data: existingSequences } = await client
+    .from("outreach_sequences")
+    .select("name")
+    .eq("linkedin_account_id", savedAccountId)
+    .in("name", [DEFAULT_CONNECT_MESSAGE_SEQUENCE_NAME, CONNECT_ONLY_SEQUENCE_NAME]);
+  const existingNames = new Set((existingSequences || []).map((row: any) => row.name));
+  const missingSequences = [DEFAULT_CONNECT_MESSAGE_SEQUENCE_NAME, CONNECT_ONLY_SEQUENCE_NAME]
+    .filter((name) => !existingNames.has(name))
+    .map((name) => ({ linkedin_account_id: savedAccountId, name }));
+  if (missingSequences.length) {
+    const { error: sequenceError } = await client.from("outreach_sequences").insert(missingSequences);
+    if (sequenceError) logger.warn("Default account sequences could not be created", { accountId: savedAccountId }, sequenceError);
+  }
+
+  revalidatePath("/settings");
+  revalidatePath("/sequences");
+  return { success: true };
 }
 
 export async function saveLinkedinCredentials(

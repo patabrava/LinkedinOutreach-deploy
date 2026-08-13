@@ -19,6 +19,7 @@ export type WorkerRecord = {
   startedAt: string;
   args: string[];
   processGroup?: boolean;
+  accountId?: string;
 };
 
 type RegistryShape = {
@@ -32,6 +33,7 @@ type RegisterWorkerInput = {
   label: string;
   args?: string[];
   processGroup?: boolean;
+  accountId?: string;
 };
 
 type TrackWorkerChildInput = Omit<RegisterWorkerInput, "pid"> & {
@@ -41,6 +43,7 @@ type TrackWorkerChildInput = Omit<RegisterWorkerInput, "pid"> & {
 type ListWorkersInput = {
   registryPath?: string;
   kinds?: WorkerKind[];
+  accountId?: string;
 };
 
 type StopWorkersResult = {
@@ -109,14 +112,13 @@ const cleanupRegistry = (registryPath: string): WorkerRecord[] => {
   return activeWorkers;
 };
 
-export function listActiveWorkers({ registryPath, kinds }: ListWorkersInput = {}): WorkerRecord[] {
+export function listActiveWorkers({ registryPath, kinds, accountId }: ListWorkersInput = {}): WorkerRecord[] {
   const resolvedPath = resolveRegistryPath(registryPath);
   const activeWorkers = cleanupRegistry(resolvedPath);
-  if (!kinds?.length) {
-    return activeWorkers;
-  }
-  const kindSet = new Set(kinds);
-  return activeWorkers.filter((worker) => kindSet.has(worker.kind));
+  const kindSet = kinds?.length ? new Set(kinds) : null;
+  return activeWorkers.filter(
+    (worker) => (!kindSet || kindSet.has(worker.kind)) && (!accountId || worker.accountId === accountId)
+  );
 }
 
 export function registerWorkerPid(input: RegisterWorkerInput): WorkerRecord | null {
@@ -134,6 +136,7 @@ export function registerWorkerPid(input: RegisterWorkerInput): WorkerRecord | nu
     startedAt: new Date().toISOString(),
     args: input.args || [],
     ...(input.processGroup ? { processGroup: true } : {}),
+    ...(input.accountId ? { accountId: input.accountId } : {}),
   };
 
   const nextWorkers = activeWorkers.filter((entry) => entry.pid !== input.pid);
@@ -155,7 +158,7 @@ export function unregisterWorkerPid(pid: number, registryPath?: string) {
   }
 }
 
-export function trackWorkerChild({ child, registryPath, kind, label, args, processGroup }: TrackWorkerChildInput) {
+export function trackWorkerChild({ child, registryPath, kind, label, args, processGroup, accountId }: TrackWorkerChildInput) {
   if (!child.pid) {
     return null;
   }
@@ -167,6 +170,7 @@ export function trackWorkerChild({ child, registryPath, kind, label, args, proce
     label,
     args,
     processGroup,
+    accountId,
   });
 
   child.on("exit", () => {
@@ -176,8 +180,8 @@ export function trackWorkerChild({ child, registryPath, kind, label, args, proce
   return record;
 }
 
-export function stopWorkers({ registryPath, kinds }: ListWorkersInput = {}): StopWorkersResult {
-  const matchingWorkers = listActiveWorkers({ registryPath, kinds });
+export function stopWorkers({ registryPath, kinds, accountId }: ListWorkersInput = {}): StopWorkersResult {
+  const matchingWorkers = listActiveWorkers({ registryPath, kinds, accountId });
   const stopped: WorkerRecord[] = [];
   const notRunning: WorkerRecord[] = [];
 

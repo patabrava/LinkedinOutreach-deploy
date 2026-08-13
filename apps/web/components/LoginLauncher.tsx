@@ -10,6 +10,7 @@ import { RemoteLinkedinBrowser } from "./RemoteLinkedinBrowser";
 import { StartLoginButton } from "./StartLoginButton";
 
 type Props = {
+  accountId: string;
   existingCreds: LinkedinCredentialSummary;
   authStatus: LinkedinAuthStatus;
 };
@@ -76,7 +77,7 @@ const OPERATOR_SEQUENCE = [
   "Click Capture Session to sync the live browser state back to the worker.",
 ];
 
-export function LoginLauncher({ existingCreds, authStatus }: Props) {
+export function LoginLauncher({ accountId, existingCreds, authStatus }: Props) {
   const [currentStatus, setCurrentStatus] = useState(authStatus);
   const [isLaunching, setIsLaunching] = useState(false);
   const [browserUrl, setBrowserUrl] = useState("");
@@ -115,7 +116,7 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
           ...getOperatorApiHeaders(),
           "content-type": "application/json",
         },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ action, accountId }),
       });
 
       const result = (await response.json()) as RemoteSessionResponse;
@@ -150,7 +151,7 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
           ...getOperatorApiHeaders(),
           "content-type": "application/json",
         },
-        body: JSON.stringify({ mode: "manual" }),
+        body: JSON.stringify({ mode: "manual", accountId }),
       });
 
       const result = (await response.json()) as LoginStartResponse & { mode?: "check" | "manual" };
@@ -179,7 +180,10 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
   return (
     <div className="card" style={{ alignSelf: "flex-start" }}>
       <div className="pill">LinkedIn Session</div>
-      <h3 className="section-title-tight">SESSION STATUS</h3>
+      <h3 className="section-title-tight">{existingCreds.label || existingCreds.email || "LINKEDIN ACCOUNT"}</h3>
+      <div className="muted" style={{ marginBottom: 8 }}>
+        Sender: {existingCreds.display_name || "Not set"} · Account ID: {accountId.slice(0, 8)}
+      </div>
       <div className="muted" style={{ marginBottom: 12 }}>
         {sessionCopy.label}
       </div>
@@ -234,6 +238,7 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
       </div>
 
       <StartLoginButton
+        accountId={accountId}
         label={sessionCopy.cta}
         browserUrl={browserUrl}
         disabled={isBusy}
@@ -288,7 +293,7 @@ export function LoginLauncher({ existingCreds, authStatus }: Props) {
       ) : null}
 
       <div style={{ marginTop: 16 }}>
-        <LinkedinCredentialsForm existing={existingCreds} useCard={false} />
+        <LinkedinCredentialsForm existing={existingCreds} useCard={false} accountId={accountId} />
       </div>
 
       {browserUrl ? (

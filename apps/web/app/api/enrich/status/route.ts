@@ -4,18 +4,11 @@ import { requireOperatorAccess } from "../../../../lib/apiGuard";
 import { logger } from "../../../../lib/logger";
 import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 import { listActiveWorkers } from "../../../../lib/workerControl";
+import { getLinkedinAccountRuntime } from "../../../../lib/linkedinAccountServer";
 
 // Force dynamic rendering - disable all caching
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-
-const DEFAULT_DAILY_SEND_LIMIT = 50;
-
-const getDailyEnrichmentCap = () => {
-  const parsedCap = parseInt(process.env.DAILY_SEND_LIMIT || process.env.DAILY_ENRICHMENT_CAP || "", 10);
-  if (Number.isFinite(parsedCap) && parsedCap > 0) return parsedCap;
-  return DEFAULT_DAILY_SEND_LIMIT;
-};
 
 const STATUSES = [
   "NEW",
@@ -61,9 +54,10 @@ export async function GET(request: Request) {
   const correlationId = logger.apiRequest("GET", "/api/enrich/status");
   const guardResponse = await requireOperatorAccess(request, "/api/enrich/status", correlationId);
   if (guardResponse) return guardResponse;
-  const dailyCap = getDailyEnrichmentCap();
   
   try {
+    const account = await getLinkedinAccountRuntime(url.searchParams.get("accountId"));
+    const dailyCap = requestedMode === "connect_only" ? account.dailyInviteLimit : account.dailyMessageLimit;
     const client = supabaseAdmin();
     const counts = createInitialCounts();
 
@@ -78,6 +72,7 @@ export async function GET(request: Request) {
           .select("id", { count: "exact" })
           .eq("status", status)
           .eq("outreach_mode", modeConfig.outreachMode)
+          .eq("linkedin_account_id", account.id)
           .limit(0);
 
         if (error) {
@@ -97,6 +92,7 @@ export async function GET(request: Request) {
       .select("id, linkedin_url, first_name, last_name, company_name")
       .in("status", ["NEW", "PROCESSING"])
       .eq("outreach_mode", modeConfig.outreachMode)
+      .eq("linkedin_account_id", account.id)
       .order("created_at", { ascending: true })
       .limit(1)
       .maybeSingle();
@@ -132,6 +128,7 @@ export async function GET(request: Request) {
         .from("leads")
         .select("id", { count: "exact", head: true })
         .eq("outreach_mode", modeConfig.outreachMode)
+        .eq("linkedin_account_id", account.id)
         .not("connection_sent_at", "is", null);
 
       if (sentTotalError) {
@@ -152,6 +149,7 @@ export async function GET(request: Request) {
         .from("leads")
         .select("id", { count: "exact", head: true })
         .eq("outreach_mode", modeConfig.outreachMode)
+        .eq("linkedin_account_id", account.id)
         .not("connection_sent_at", "is", null)
         .gte("connection_sent_at", startIso);
 
@@ -177,6 +175,7 @@ export async function GET(request: Request) {
         .select("id", { count: "exact", head: true })
         .in("status", modeConfig.completedStatuses)
         .eq("outreach_mode", modeConfig.outreachMode)
+        .eq("linkedin_account_id", account.id)
         .gte("updated_at", startIso);
 
       completedToday = messageCompletedResp.count || 0;
@@ -217,7 +216,7 @@ export async function GET(request: Request) {
     const response = {
       ok: true,
       mode: requestedMode,
-      workerActive: listActiveWorkers({ kinds: ["scraper_outreach"] }).length > 0,
+      workerActive: listActiveWorkers({ kinds: ["scraper_outreach", "sender_outreach"], accountId: account.id }).length > 0,
       counts,
       remaining,
       completed,

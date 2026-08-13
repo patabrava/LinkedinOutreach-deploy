@@ -1,6 +1,8 @@
 import fs from "fs";
 import path from "path";
 
+import { getLinkedinAccountDir, requireLinkedinAccountId } from "./linkedinAccounts";
+
 export type LinkedinAuthSessionState =
   | "no_credentials"
   | "credentials_saved"
@@ -42,7 +44,7 @@ const DEFAULT_STATUS: LinkedinAuthStatus = {
   last_error: null,
 };
 
-const getScraperDir = () => {
+const getLegacyScraperDir = () => {
   const candidates = [
     process.env.LINKEDIN_SCRAPER_DIR?.trim(),
     "/data/scraper",
@@ -51,6 +53,13 @@ const getScraperDir = () => {
   ].filter((candidate): candidate is string => Boolean(candidate));
 
   return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
+};
+
+const getStateDir = (accountId?: string, legacyFallback = false) => {
+  if (!accountId) return getLegacyScraperDir();
+  const accountDir = getLinkedinAccountDir(requireLinkedinAccountId(accountId));
+  if (fs.existsSync(accountDir) || !legacyFallback) return accountDir;
+  return getLegacyScraperDir() ?? accountDir;
 };
 
 const getAuthStatePath = (scraperDir: string | null) => (scraperDir ? path.join(scraperDir, "auth.json") : null);
@@ -133,8 +142,8 @@ const normalizeStatus = (
   };
 };
 
-export function readLinkedinAuthStatus(): LinkedinAuthStatus {
-  const scraperDir = getScraperDir();
+export function readLinkedinAuthStatus(accountId?: string, legacyFallback = false): LinkedinAuthStatus {
+  const scraperDir = getStateDir(accountId, legacyFallback);
   if (!scraperDir) {
     return {
       ...DEFAULT_STATUS,

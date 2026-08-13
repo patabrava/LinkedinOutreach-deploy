@@ -5,11 +5,13 @@ import Papa, { type ParseStepResult } from "papaparse";
 
 import { importLeads } from "../app/actions";
 import type { BatchIntent } from "../lib/outreachModes";
+import type { LinkedinAccountSummary } from "../lib/linkedinAccounts";
 
 type Props = {
   afterImport?: () => void;
   defaultMode?: BatchIntent;
   onModeChange?: (mode: BatchIntent) => void;
+  accounts: LinkedinAccountSummary[];
 };
 
 const HEADER_ALIASES = [
@@ -77,11 +79,13 @@ export function CSVUploader({
   afterImport,
   defaultMode,
   onModeChange,
+  accounts,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<string>("SELECT BATCH INTENT TO START");
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<BatchIntent | null>(defaultMode ?? null);
+  const [accountId, setAccountId] = useState(accounts.find((account) => account.is_active)?.id || "");
   const [progress, setProgress] = useState<{ current: number; total: number; phase: "idle" | "parsing" | "uploading" | "done" | "error" }>({
     current: 0,
     total: 0,
@@ -95,8 +99,8 @@ export function CSVUploader({
 
   const handleFiles = (file?: File | null) => {
     if (!file) return;
-    if (!mode) {
-      setStatus("SELECT BATCH INTENT FIRST");
+    if (!mode || !accountId) {
+      setStatus("SELECT SENDER AND BATCH INTENT FIRST");
       setProgress({ current: 0, total: 0, phase: "error" });
       return;
     }
@@ -135,7 +139,7 @@ export function CSVUploader({
           }
           setProgress({ current: rows.length, total: rows.length, phase: "uploading" });
           setStatus(`UPLOADING… 0 OF ${rows.length}`);
-          const response = await importLeads(rows, file.name, selectedMode);
+          const response = await importLeads(rows, file.name, selectedMode, accountId);
           if (response.inserted === 0) {
             setStatus("NO NEW LEADS INSERTED");
             setProgress({ current: 0, total: rows.length, phase: "done" });
@@ -166,8 +170,8 @@ export function CSVUploader({
 
   const onDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
-    if (!mode) {
-      setStatus("SELECT BATCH INTENT FIRST");
+    if (!mode || !accountId) {
+      setStatus("SELECT SENDER AND BATCH INTENT FIRST");
       return;
     }
     handleFiles(e.dataTransfer.files?.[0]);
@@ -180,6 +184,15 @@ export function CSVUploader({
       onDrop={onDrop}
     >
       <div style={{ display: "grid", gap: 10 }}>
+        <div style={{ display: "grid", gap: 6 }}>
+          <label htmlFor="csv-sender-account"><strong>Sender Account</strong></label>
+          <select id="csv-sender-account" className="input" value={accountId} onChange={(event) => setAccountId(event.target.value)} required>
+            <option value="">Select sender</option>
+            {accounts.filter((account) => account.is_active).map((account) => (
+              <option key={account.id} value={account.id}>{account.label} — {account.display_name}</option>
+            ))}
+          </select>
+        </div>
         <div style={{ display: "grid", gap: 6 }}>
           <strong>Batch Intent</strong>
           <div className="muted" style={{ fontSize: 12 }}>
@@ -222,7 +235,7 @@ export function CSVUploader({
       <button
         className="btn"
         type="button"
-        disabled={!mode || loading}
+        disabled={!mode || !accountId || loading}
         onClick={() => inputRef.current?.click()}
         style={{ marginTop: 12 }}
       >

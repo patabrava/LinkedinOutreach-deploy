@@ -6,6 +6,7 @@ import { getOperatorApiHeaders } from "../lib/operatorToken";
 import type { LinkedinAuthStatus } from "../lib/linkedinAuthSession";
 
 type Props = {
+  accountId: string;
   onStart?: () => void;
   onResult?: (result: LoginResponse) => void;
   onBusyChange?: (busy: boolean) => void;
@@ -23,6 +24,7 @@ type LoginResponse = {
 };
 
 export function StartLoginButton({
+  accountId,
   onStart,
   onResult,
   onBusyChange,
@@ -42,7 +44,8 @@ export function StartLoginButton({
     try {
       const res = await fetch("/api/login", {
         method: "POST",
-        headers: getOperatorApiHeaders(),
+        headers: { ...getOperatorApiHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ accountId }),
       });
       const data = (await res.json().catch(() => ({}))) as LoginResponse;
       if (!res.ok || data?.ok === false) {

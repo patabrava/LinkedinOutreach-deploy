@@ -6,6 +6,8 @@ import { NextResponse } from "next/server";
 import { requireOperatorAccess } from "../../../../../lib/apiGuard";
 import { logger } from "../../../../../lib/logger";
 import { listActiveWorkers, trackWorkerChild } from "../../../../../lib/workerControl";
+import { getLinkedinAccountRuntime } from "../../../../../lib/linkedinAccountServer";
+import { getLinkedinAccountAuthPath } from "../../../../../lib/linkedinAccounts";
 
 const DAEMON_LOG_FILENAME = "sender-message-only-daemon.log";
 
@@ -18,11 +20,12 @@ const resolveIntervalSec = (): number => {
 // Sender reuses the scraper's persisted auth.json — keep this list in sync with
 // _resolve_scraper_auth_path() in workers/sender/sender.py. Checking the sender
 // dir would falsely greenlight a deployment where only the sender file exists.
-const scraperAuthPresent = (repoRoot: string): boolean => {
+const scraperAuthPresent = (repoRoot: string, accountId: string, allowLegacy: boolean): boolean => {
   const candidates = [
-    process.env.LINKEDIN_SCRAPER_DIR ? path.join(process.env.LINKEDIN_SCRAPER_DIR, "auth.json") : null,
-    "/data/scraper/auth.json",
-    path.join(repoRoot, "workers", "scraper", "auth.json"),
+    getLinkedinAccountAuthPath(accountId),
+    allowLegacy && process.env.LINKEDIN_SCRAPER_DIR ? path.join(process.env.LINKEDIN_SCRAPER_DIR, "auth.json") : null,
+    allowLegacy ? "/data/scraper/auth.json" : null,
+    allowLegacy ? path.join(repoRoot, "workers", "scraper", "auth.json") : null,
   ].filter((p): p is string => Boolean(p));
   return candidates.some((p) => {
     try {
@@ -39,6 +42,8 @@ export async function POST(request: Request) {
   if (guardResponse) return guardResponse;
 
   try {
+    const payload = (await request.json().catch(() => ({}))) as { accountId?: string };
+    const account = await getLinkedinAccountRuntime(payload.accountId);
     const webDir = process.cwd();
     const repoRoot = path.resolve(webDir, "..", "..");
     const senderDir = path.join(repoRoot, "workers", "sender");
@@ -49,7 +54,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: false, error: "Sender directory not found" }, { status: 500 });
     }
 
-    if (!scraperAuthPresent(repoRoot)) {
+    if (!scraperAuthPresent(repoRoot, account.id, account.browserSlot === 1)) {
       logger.warn("Cannot start message-only daemon: no scraper auth.json found", { correlationId });
       return NextResponse.json(
         {
@@ -60,7 +65,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const existing = listActiveWorkers({ kinds: ["sender_message_only"] });
+    const existing = listActiveWorkers({ kinds: ["sender_message_only"], accountId: account.id });
     if (existing.length > 0) {
       const pid = existing[0]!.pid;
       logger.warn("Message-only daemon already running", { correlationId }, { pid });
@@ -79,17 +84,17 @@ export async function POST(request: Request) {
       : "python3";
 
     const intervalSec = resolveIntervalSec();
-    const loopCmd = `while true; do "${pythonCmd}" -u sender.py --message-only; sleep ${intervalSec}; done`;
+    const loopCmd = `while true; do "${pythonCmd}" -u sender.py --message-only --account-id "${account.id}"; sleep ${intervalSec}; done`;
 
     fs.mkdirSync(logsDir, { recursive: true });
-    const logPath = path.join(logsDir, DAEMON_LOG_FILENAME);
+    const logPath = path.join(logsDir, `${account.id}-${DAEMON_LOG_FILENAME}`);
     // Raw fd (not a piped stream): pipes opened by the Next dev process die on hot reload;
     // an inherited raw fd survives in the detached child. Do not switch to createWriteStream.
     const logFd = fs.openSync(logPath, "a");
 
     const child = spawn("bash", ["-c", loopCmd], {
       cwd: senderDir,
-      env: { ...process.env, CORRELATION_ID: correlationId, SENDER_MESSAGE_ONLY_INTERVAL_SEC: String(intervalSec) },
+      env: { ...process.env, CORRELATION_ID: correlationId, LINKEDIN_ACCOUNT_ID: account.id, SENDER_MESSAGE_ONLY_INTERVAL_SEC: String(intervalSec) },
       stdio: ["ignore", logFd, logFd],
       detached: true,
     });
@@ -107,6 +112,7 @@ export async function POST(request: Request) {
       label: "Message-only daemon",
       args: ["bash", "-c", loopCmd],
       processGroup: true,
+      accountId: account.id,
     });
     child.unref();
 

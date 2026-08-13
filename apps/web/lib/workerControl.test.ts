@@ -37,6 +37,18 @@ test("listActiveWorkers removes stale pids and keeps live ones", () => {
   assert.equal(active[0]?.kind, "sender_outreach");
 });
 
+test("listActiveWorkers isolates concurrent workers by LinkedIn account", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "worker-control-account-"));
+  const registryPath = path.join(tmpDir, "worker-control.json");
+  registerWorkerPid({ registryPath, kind: "sender_outreach", pid: process.pid, label: "Account A", accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
+  registerWorkerPid({ registryPath, kind: "sender_message_only", pid: process.ppid, label: "Account B", accountId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" });
+
+  const accountA = listActiveWorkers({ registryPath, accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
+  const accountB = listActiveWorkers({ registryPath, accountId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" });
+  assert.deepEqual(accountA.map((worker) => worker.label), ["Account A"]);
+  assert.deepEqual(accountB.map((worker) => worker.label), ["Account B"]);
+});
+
 test("stopWorkers sends SIGTERM to tracked workers", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "worker-control-stop-"));
   const registryPath = path.join(tmpDir, "worker-control.json");

@@ -7,6 +7,7 @@ import {
   spawnScraperCommand,
 } from "../../../lib/linkedinBrowserControl";
 import { readLinkedinAuthStatus } from "../../../lib/linkedinAuthSession";
+import { getLinkedinAccountRuntime } from "../../../lib/linkedinAccountServer";
 import { logger } from "../../../lib/logger";
 
 export async function POST(request: Request) {
@@ -17,10 +18,11 @@ export async function POST(request: Request) {
   if (strictAuthResponse) return strictAuthResponse;
 
   try {
-    const body = (await request.json().catch(() => ({}))) as { mode?: string };
+    const body = (await request.json().catch(() => ({}))) as { mode?: string; accountId?: string };
+    const account = await getLinkedinAccountRuntime(body.accountId);
     const mode = body?.mode === "manual" ? "manual" : "check";
-    const status = readLinkedinAuthStatus();
-    const browserUrl = await resolveRemoteBrowserUrl();
+    const status = readLinkedinAuthStatus(account.id);
+    const browserUrl = await resolveRemoteBrowserUrl(account.browserSlot);
 
     if (mode === "manual") {
       if (browserUrl) {
@@ -42,7 +44,7 @@ export async function POST(request: Request) {
 
       if (process.env.NODE_ENV !== "production") {
         logger.workerSpawn("scraper-manual-browser", ["--manual-browser"], { correlationId });
-        const child = spawnScraperCommand(["--manual-browser"], correlationId);
+        const child = spawnScraperCommand(["--manual-browser"], correlationId, account.id, account.browserSlot);
         child.stdout?.resume();
         child.stderr?.resume();
 
@@ -84,7 +86,7 @@ export async function POST(request: Request) {
     if (!browserUrl) {
       if (process.env.NODE_ENV !== "production") {
         logger.workerSpawn("scraper-login-local", ["--login-only"], { correlationId });
-        const child = spawnScraperCommand(["--login-only"], correlationId);
+        const child = spawnScraperCommand(["--login-only"], correlationId, account.id, account.browserSlot);
         child.stdout?.resume();
         child.stderr?.resume();
 

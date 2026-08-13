@@ -8,6 +8,8 @@ import { logger } from "../../../../lib/logger";
 import { mirrorWorkerOutput } from "../../../../lib/spawnMirror";
 import { trackWorkerChild } from "../../../../lib/workerControl";
 import { assertScraperLockFree, persistScraperPid } from "../../enrich/scraperLock";
+import { getLinkedinAccountForBatch } from "../../../../lib/linkedinAccountServer";
+import { getLinkedinAccountLockPath } from "../../../../lib/linkedinAccounts";
 
 export async function POST(request: Request) {
   const correlationId = logger.apiRequest("POST", "/api/custom-outreach/enrich-batch");
@@ -25,6 +27,7 @@ export async function POST(request: Request) {
   if (typeof batchId !== "number" || !Number.isFinite(batchId) || batchId <= 0) {
     return NextResponse.json({ ok: false, error: "batchId required (positive finite number)" }, { status: 400 });
   }
+  const account = await getLinkedinAccountForBatch(batchId);
 
   const webDir = process.cwd();
   const repoRoot = path.resolve(webDir, "..", "..");
@@ -35,7 +38,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: "Scraper directory not found" }, { status: 500 });
   }
 
-  const pidFile = path.join(scraperDir, "enrichment.pid");
+  const pidFile = getLinkedinAccountLockPath(account.id, "custom-enrichment");
   const lockState = assertScraperLockFree(pidFile);
   if (!lockState.ok) {
     logger.warn("Scraper already running", { correlationId }, { pid: lockState.activePid, pidFile });
@@ -55,13 +58,14 @@ export async function POST(request: Request) {
     "--mode", "enrich",
     "--batch-intent", "custom_outreach",
     "--batch-id", String(batchId),
+    "--account-id", account.id,
   ];
   logger.workerSpawn("scraper", args, { correlationId, batchId });
 
   const logPath = path.join(repoRoot, ".logs", "scraper-spawn.log");
   const child = spawn(pythonCmd, args, {
     cwd: scraperDir,
-    env: { ...process.env, CORRELATION_ID: correlationId },
+    env: { ...process.env, CORRELATION_ID: correlationId, LINKEDIN_ACCOUNT_ID: account.id },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   });
@@ -83,6 +87,7 @@ export async function POST(request: Request) {
     kind: "scraper_enrich_custom",
     label: `custom-outreach enrich-batch:${batchId}`,
     args,
+    accountId: account.id,
   });
 
   logger.info("custom-outreach enrich-batch spawned", { correlationId, pid: child.pid }, { batchId });

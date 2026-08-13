@@ -38,6 +38,7 @@ auth.json
 **/auth.json
 .linkedin_credentials_key
 **/.linkedin_credentials_key
+.linkedin-accounts/
 workers/scraper/auth_status.json
 workers/scraper/auth_status.json.bak
 *.credentials.json

@@ -2,18 +2,19 @@ import { Suspense } from "react";
 
 import { SequenceEditor } from "../components/SequenceEditor";
 import { requireServerSession } from "../lib/auth";
-import { fetchLeadBatches, fetchOutreachSequences } from "./actions";
+import { fetchLeadBatches, fetchLinkedinAccounts, fetchOutreachSequences } from "./actions";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 async function MissionControlSequences() {
-  const [sequences, batches] = await Promise.all([
+  const [sequences, batches, accounts] = await Promise.all([
     fetchOutreachSequences(),
     fetchLeadBatches(),
+    fetchLinkedinAccounts(),
   ]);
 
-  return <SequenceEditor sequences={sequences} batches={batches} />;
+  return <SequenceEditor sequences={sequences} batches={batches} accounts={accounts} />;
 }
 
 export default async function MissionControlPage() {

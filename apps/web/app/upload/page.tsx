@@ -1,4 +1,5 @@
 import { CSVUploader } from "../../components/CSVUploader";
+import { fetchLinkedinAccounts } from "../actions";
 import { requireServerSession } from "../../lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -6,6 +7,7 @@ export const revalidate = 0;
 
 export default async function UploadPage() {
   await requireServerSession("/upload");
+  const accounts = await fetchLinkedinAccounts();
   return (
     <div className="page">
       <div className="pill">Import</div>
@@ -19,7 +21,7 @@ export default async function UploadPage() {
         </a>
       </div>
       <div className="card">
-        <CSVUploader />
+        <CSVUploader accounts={accounts} />
       </div>
     </div>
   );

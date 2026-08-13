@@ -29,9 +29,28 @@ begin
   end if;
 end$$;
 
+create table if not exists linkedin_accounts (
+  id uuid primary key default gen_random_uuid(),
+  label text not null,
+  email text not null default '',
+  credentials jsonb not null default '{}'::jsonb,
+  display_name text not null default '',
+  browser_slot smallint check (browser_slot in (1, 2)),
+  daily_invite_limit int not null default 50 check (daily_invite_limit > 0),
+  daily_message_limit int not null default 50 check (daily_message_limit > 0),
+  is_active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+insert into linkedin_accounts (id, label, browser_slot)
+values ('00000000-0000-0000-0000-000000000001', 'Primary', 1)
+on conflict (id) do nothing;
+
 create table if not exists outreach_sequences (
   id bigserial primary key,
-  name text not null unique,
+  linkedin_account_id uuid not null default '00000000-0000-0000-0000-000000000001' references linkedin_accounts(id) on delete restrict,
+  name text not null,
   connect_note text not null default '',
   first_message text not null default '',
   second_message text not null default '',
@@ -44,6 +63,7 @@ create table if not exists outreach_sequences (
 
 create table if not exists lead_batches (
   id bigserial primary key,
+  linkedin_account_id uuid not null default '00000000-0000-0000-0000-000000000001' references linkedin_accounts(id) on delete restrict,
   name text not null,
   source text not null default 'csv_upload',
   batch_intent text not null default 'connect_message',
@@ -54,7 +74,8 @@ create table if not exists lead_batches (
 
 create table if not exists leads (
   id uuid primary key default gen_random_uuid(),
-  linkedin_url text not null unique,
+  linkedin_account_id uuid not null default '00000000-0000-0000-0000-000000000001' references linkedin_accounts(id) on delete restrict,
+  linkedin_url text not null,
   first_name text,
   last_name text,
   company_name text,
@@ -102,10 +123,15 @@ create table if not exists settings (
 
 insert into outreach_sequences (name)
 values ('Default Sequence')
-on conflict (name) do nothing;
+on conflict do nothing;
 
 -- Helpful indexes
 create index if not exists idx_leads_status on leads (status);
+create unique index if not exists idx_linkedin_accounts_email_unique on linkedin_accounts (lower(email)) where email <> '';
+create unique index if not exists idx_linkedin_accounts_browser_slot_unique on linkedin_accounts (browser_slot) where browser_slot is not null;
+create unique index if not exists idx_outreach_sequences_account_name_unique on outreach_sequences (linkedin_account_id, lower(name));
+create unique index if not exists idx_leads_account_linkedin_url_unique on leads (linkedin_account_id, linkedin_url);
+create index if not exists idx_leads_linkedin_account_status on leads (linkedin_account_id, status);
 create index if not exists idx_drafts_lead_id on drafts (lead_id);
 create index if not exists idx_leads_batch_id on leads (batch_id);
 create index if not exists idx_leads_sequence_id on leads (sequence_id);
@@ -116,6 +142,7 @@ create index if not exists idx_lead_batches_batch_intent on lead_batches (batch_
 
 -- Row Level Security
 alter table outreach_sequences enable row level security;
+alter table linkedin_accounts enable row level security;
 alter table lead_batches enable row level security;
 alter table leads enable row level security;
 alter table drafts enable row level security;
@@ -124,6 +151,12 @@ alter table settings enable row level security;
 -- Allow authenticated users full access to all tables
 do $$
 begin
+  if not exists (select 1 from pg_policies where policyname = 'Allow authenticated linkedin accounts') then
+    create policy "Allow authenticated linkedin accounts" on linkedin_accounts
+      for all using (auth.role() = 'authenticated')
+      with check (auth.role() = 'authenticated');
+  end if;
+
   if not exists (select 1 from pg_policies where policyname = 'Allow authenticated outreach sequences') then
     create policy "Allow authenticated outreach sequences" on outreach_sequences
       for all using (auth.role() = 'authenticated')
@@ -166,6 +199,15 @@ $$;
 
 do $$
 begin
+  if not exists (
+    select 1 from pg_trigger where tgname = 'tg_linkedin_accounts_updated_at'
+  ) then
+    create trigger tg_linkedin_accounts_updated_at
+      before update on linkedin_accounts
+      for each row
+      execute procedure touch_updated_at();
+  end if;
+
   if not exists (
     select 1 from pg_trigger where tgname = 'tg_outreach_sequences_updated_at'
   ) then

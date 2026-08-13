@@ -6,6 +6,7 @@ import { NextResponse } from "next/server";
 import { requireOperatorAccess } from "../../../../lib/apiGuard";
 import { logger } from "../../../../lib/logger";
 import { listActiveWorkers, stopWorkers } from "../../../../lib/workerControl";
+import { requireLinkedinAccountId } from "../../../../lib/linkedinAccounts";
 
 const PID_FILENAME = "enrichment.pid";
 
@@ -15,15 +16,17 @@ export async function POST(request: Request) {
   if (guardResponse) return guardResponse;
 
   try {
+    const payload = (await request.json().catch(() => ({}))) as { accountId?: string };
+    const accountId = requireLinkedinAccountId(payload.accountId);
     const webDir = process.cwd();
     const repoRoot = path.resolve(webDir, "..", "..");
     const scraperDir = path.join(repoRoot, "workers", "scraper");
     const pidFile = path.join(scraperDir, PID_FILENAME);
-    const trackedWorkers = listActiveWorkers({ kinds: ["scraper_outreach"] });
+    const trackedWorkers = listActiveWorkers({ kinds: ["scraper_outreach", "sender_outreach"], accountId });
 
     if (!fs.existsSync(pidFile)) {
       if (trackedWorkers.length > 0) {
-        const result = stopWorkers({ kinds: ["scraper_outreach"] });
+        const result = stopWorkers({ kinds: ["scraper_outreach", "sender_outreach"], accountId });
         const stopped = result.stopped.length > 0;
         logger.info("Enrichment process stop requested via registry only", {
           correlationId,
@@ -55,7 +58,7 @@ export async function POST(request: Request) {
 
     let stopped = false;
     try {
-      const result = stopWorkers({ kinds: ["scraper_outreach"] });
+      const result = stopWorkers({ kinds: ["scraper_outreach", "sender_outreach"], accountId });
       stopped = result.stopped.some((worker) => worker.pid === pid);
       if (!stopped && result.notRunning.some((worker) => worker.pid === pid)) {
         stopped = false;

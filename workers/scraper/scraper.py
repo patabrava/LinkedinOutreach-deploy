@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from auth import (
     AUTH_STATE_PATH,
+    configure_account,
     is_logged_in,
     open_browser,
     reset_remote_login_state,
@@ -47,6 +48,13 @@ print(f"[SCRAPER] .env exists: {env_path.exists()}", file=sys.stderr)
 
 # Initialize logger
 logger = get_logger("scraper")
+CURRENT_ACCOUNT_ID = os.getenv("LINKEDIN_ACCOUNT_ID", "").strip()
+
+
+def configure_runtime_account(account_id: str) -> None:
+    global CURRENT_ACCOUNT_ID, AUTH_STATE_PATH
+    CURRENT_ACCOUNT_ID = account_id
+    AUTH_STATE_PATH = configure_account(account_id) / "auth.json"
 
 # Avoid tripping LinkedIn automation warnings by capping daily enrichments.
 DEFAULT_DAILY_ENRICHMENT_CAP = 20
@@ -426,6 +434,7 @@ def fetch_new_leads(
     query = (
         client.table("leads")
         .select("id, linkedin_url, first_name, last_name, company_name")
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .eq("status", "NEW")
         .limit(limit)
     )
@@ -461,6 +470,7 @@ def fetch_pending_leads_for_intent(
     query = (
         client.table("leads")
         .select("id, linkedin_url, first_name, last_name, company_name, batch_id, lead_batches!inner(batch_intent)")
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .eq("status", "NEW")
         .eq("lead_batches.batch_intent", batch_intent)
         .limit(limit)
@@ -487,6 +497,7 @@ def fetch_today_enrichment_count(client: Client) -> int:
     resp = (
         client.table("leads")
         .select("id", count="exact")
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .in_("status", tracked_statuses)
         .gte("updated_at", start_of_day)
         .execute()
@@ -501,19 +512,20 @@ def fetch_today_enrichment_count(client: Client) -> int:
 
 
 def fetch_linkedin_credentials(client: Client) -> Optional[LinkedinCredentials]:
-    logger.db_query("select", "settings", {"key": "linkedin_credentials"})
+    logger.db_query("select", "linkedin_accounts", {"id": CURRENT_ACCOUNT_ID})
     resp = (
-        client.table("settings")
-        .select("value")
-        .eq("key", "linkedin_credentials")
+        client.table("linkedin_accounts")
+        .select("email, credentials")
+        .eq("id", CURRENT_ACCOUNT_ID)
         .limit(1)
         .execute()
     )
-    value = (resp.data or [{}])[0].get("value") or {}
-    email = value.get("email") or value.get("username")
+    row = (resp.data or [{}])[0]
+    value = row.get("credentials") or {}
+    email = row.get("email") or value.get("email") or value.get("username")
     password = decrypt_password(value)
     has_creds = bool(email and password)
-    logger.db_result("select", "settings", {"key": "linkedin_credentials"}, 1 if resp.data else 0)
+    logger.db_result("select", "linkedin_accounts", {"id": CURRENT_ACCOUNT_ID}, 1 if resp.data else 0)
     logger.info(f"LinkedIn credentials: {'found' if has_creds else 'not found'}")
     if not email or not password:
         return None
@@ -1839,6 +1851,7 @@ async def reset_remote_session_mode() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="LinkedIn scraper")
+    parser.add_argument("--account-id", default=os.getenv("LINKEDIN_ACCOUNT_ID"), help="LinkedIn sender account UUID.")
     parser.add_argument(
         "--run",
         action="store_true",
@@ -1899,6 +1912,8 @@ def parse_args() -> argparse.Namespace:
         help="Restrict lead selection to a specific batch_intent (e.g. 'custom_outreach'). None = no filter (legacy behavior).",
     )
     args = parser.parse_args()
+    if not args.account_id:
+        parser.error("--account-id is required so browser state and queues cannot cross accounts.")
     if args.batch_intent and args.batch_intent != "custom_outreach":
         parser.error(f"--batch-intent '{args.batch_intent}' is not supported; only 'custom_outreach' is valid.")
     return args
@@ -2297,6 +2312,7 @@ def has_active_reply_followup(client: Client, lead_id: str) -> bool:
     existing = execute_with_retry(
         client.table("followups")
         .select("id")
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .eq("lead_id", lead_id)
         .eq("followup_type", "REPLY")
         .in_("status", ["PENDING_REVIEW", "APPROVED", "PROCESSING"])
@@ -2313,6 +2329,7 @@ def fetch_active_reply_lead_ids(client: Client, lead_ids: List[str]) -> set[str]
     resp = execute_with_retry(
         client.table("followups")
         .select("lead_id")
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .in_("lead_id", lead_ids)
         .eq("followup_type", "REPLY")
         .in_("status", ["PENDING_REVIEW", "APPROVED", "PROCESSING"]),
@@ -2600,6 +2617,7 @@ def find_lead_match(client: Client, profile_url: Optional[str], name: str, statu
     query = (
         client.table("leads")
         .select("id, linkedin_url, first_name, last_name, status")
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .ilike("linkedin_url", f"%{url_norm}%")
     )
     if status_filter:
@@ -2642,6 +2660,7 @@ def upsert_followup_for_reply(
         # For NUDGE, the caller should provide last_message_text/from
     
     insert_data = {
+        "linkedin_account_id": CURRENT_ACCOUNT_ID,
         "lead_id": lead_id,
         "reply_id": reply_id,
         "reply_snippet": reply_snippet[:2000] if reply_snippet else None,
@@ -2666,7 +2685,7 @@ def upsert_followup_for_reply(
     
     # Only update last_reply_at if this is an actual reply
     update_data = {
-        "followup_count": (client.table("followups").select("id", count="exact").eq("lead_id", lead_id).execute().count or 0)
+        "followup_count": (client.table("followups").select("id", count="exact").eq("linkedin_account_id", CURRENT_ACCOUNT_ID).eq("lead_id", lead_id).execute().count or 0)
     }
     if followup_type == "REPLY" and reply_timestamp:
         update_data["last_reply_at"] = reply_timestamp
@@ -2688,6 +2707,7 @@ def cancel_active_nudges_for_reply(client: Client, lead_id: str) -> None:
     execute_with_retry(
         client.table("followups")
         .update({"status": "SKIPPED", "last_error": "Superseded by detected reply"})
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .eq("lead_id", lead_id)
         .eq("followup_type", "NUDGE")
         .in_("status", ["PENDING_REVIEW", "APPROVED", "PROCESSING", "RETRY_LATER"]),
@@ -2720,6 +2740,7 @@ async def inbox_scan(context: BrowserContext, client: Client, limit: int, lead_i
             client.table("leads")
             .select("id, first_name, last_name, linkedin_url, status, last_inbox_scan_at, pending_invite, pending_checked_at")
             .in_("status", INBOX_REPLY_CANDIDATE_STATUSES)
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         )
         if lead_ids:
             leads_query = leads_query.in_("id", lead_ids)
@@ -2999,7 +3020,7 @@ async def inbox_mode(limit: int = 0, lead_ids: Optional[List[str]] = None) -> No
 async def enrichment_loop_mode() -> None:
     """Continuously enrich NEW custom_outreach leads; sleep when the queue is empty."""
     # Claim the same pidfile the JS endpoint checks so the single-spawn invariant holds.
-    pid_path = Path(__file__).parent / "enrichment.pid"
+    pid_path = AUTH_STATE_PATH.parent / "enrichment.pid"
     own_pid = str(os.getpid())
 
     if pid_path.exists():
@@ -3065,6 +3086,7 @@ async def enrichment_loop_mode() -> None:
 
 if __name__ == "__main__":
     args = parse_args()
+    configure_runtime_account(args.account_id)
     if getattr(args, "sync_remote_session", False):
         asyncio.run(sync_remote_session_mode())
         sys.exit(0)

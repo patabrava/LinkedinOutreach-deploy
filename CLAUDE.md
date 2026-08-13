@@ -83,3 +83,8 @@ For multi-step tasks, state a brief plan with a `verify:` check per step.
 - Before touching Supabase / sender / scraper: re-read the matching bullets in AGENTS.md §2.
 - Before adding a new package: confirm 0-deps-default; justify if >0.
 - Before a UI change: re-read Design Context above + Aesthetic Direction; confirm it doesn't introduce an AI-slop tell.
+
+<!-- bridgecode:bootstrap:start version="4.1.0" schema="1" -->
+At the beginning of every new task/session, read the root AGENTS.md completely before substantive work. Follow its Bridgecode processflow router and load the general, selected processflow, and specialist files it requires. Treat AGENTS.md as the canonical source of Bridgecode and repository-specific rules.
+After Bridgecode is installed or updated, start a fresh task/session so the harness discovers the new root AGENTS.md.
+<!-- bridgecode:bootstrap:end -->

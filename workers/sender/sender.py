@@ -9,6 +9,7 @@ import sys
 import unicodedata
 from datetime import datetime, time as dtime, timedelta, timezone
 import re
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -55,9 +56,25 @@ load_runtime_env()
 
 # Initialize logger
 logger = get_logger("sender")
+CURRENT_ACCOUNT_ID = os.getenv("LINKEDIN_ACCOUNT_ID", "").strip()
+CURRENT_ACCOUNT_DISPLAY_NAME = ""
+CURRENT_DAILY_INVITE_LIMIT = DAILY_SEND_DEFAULT if "DAILY_SEND_DEFAULT" in globals() else 50
+CURRENT_DAILY_MESSAGE_LIMIT = DAILY_SEND_DEFAULT if "DAILY_SEND_DEFAULT" in globals() else 50
 
 # Reuse the scraper's persisted auth state to avoid drift between workers.
 def _resolve_scraper_auth_path() -> Path:
+    account_id = os.getenv("LINKEDIN_ACCOUNT_ID", "").strip()
+    if account_id:
+        try:
+            safe_account_id = str(uuid.UUID(account_id))
+        except ValueError as exc:
+            raise RuntimeError("LINKEDIN_ACCOUNT_ID must be a valid UUID.") from exc
+        root = Path(os.getenv("LINKEDIN_ACCOUNTS_DIR", "/data/linkedin-accounts")).expanduser()
+        if str(root).startswith("/data") and not Path("/data").exists():
+            root = Path(__file__).resolve().parents[2] / ".linkedin-accounts"
+        account_dir = root / safe_account_id
+        account_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return (account_dir / "auth.json").resolve()
     candidates = [
         os.getenv("LINKEDIN_SCRAPER_DIR", "").strip(),
         "/data/scraper",
@@ -82,6 +99,30 @@ CONNECT_ONLY_CONSECUTIVE_FAILURE_LIMIT = 3
 FOLLOWUP_PROCESSING_STALE_MINUTES = 45
 NUDGE_ACTIVE_STATUSES = {"APPROVED", "PROCESSING", "RETRY_LATER"}
 OWN_SENDER_NAME_DEFAULTS = ("Katharina Hoffmann",)
+
+
+def configure_runtime_account(client: Client, account_id: str) -> None:
+    global CURRENT_ACCOUNT_ID, CURRENT_ACCOUNT_DISPLAY_NAME, CURRENT_DAILY_INVITE_LIMIT
+    global CURRENT_DAILY_MESSAGE_LIMIT, AUTH_STATE_PATH
+    try:
+        CURRENT_ACCOUNT_ID = str(uuid.UUID(account_id))
+    except ValueError as exc:
+        raise RuntimeError("--account-id must be a valid UUID.") from exc
+    os.environ["LINKEDIN_ACCOUNT_ID"] = CURRENT_ACCOUNT_ID
+    AUTH_STATE_PATH = _resolve_scraper_auth_path()
+    response = (
+        client.table("linkedin_accounts")
+        .select("display_name, daily_invite_limit, daily_message_limit, is_active")
+        .eq("id", CURRENT_ACCOUNT_ID)
+        .single()
+        .execute()
+    )
+    account = response.data or {}
+    if not account or account.get("is_active") is False:
+        raise RuntimeError("LinkedIn account was not found or is disabled.")
+    CURRENT_ACCOUNT_DISPLAY_NAME = str(account.get("display_name") or "").strip()
+    CURRENT_DAILY_INVITE_LIMIT = max(int(account.get("daily_invite_limit") or 50), 1)
+    CURRENT_DAILY_MESSAGE_LIMIT = max(int(account.get("daily_message_limit") or 50), 1)
 NETWORK_OUTAGE_PATTERNS = (
     "ERR_INTERNET_DISCONNECTED",
     "nodename nor servname provided",
@@ -90,7 +131,7 @@ NETWORK_OUTAGE_PATTERNS = (
     "network is unreachable",
 )
 LEAD_SELECT_FIELDS_CORE = (
-    "id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
+    "id, linkedin_account_id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
     "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
     "error_message, sequence_id, sequence_step, sequence_started_at, sequence_last_sent_at, "
     "batch_id, outreach_mode, profile_data"
@@ -180,6 +221,8 @@ def direct_thread_text_matches_lead(text: str, lead: Dict[str, Any]) -> bool:
 
 
 def configured_own_sender_names() -> list[str]:
+    if CURRENT_ACCOUNT_DISPLAY_NAME:
+        return [CURRENT_ACCOUNT_DISPLAY_NAME]
     raw = (
         os.getenv("LINKEDIN_ACCOUNT_NAMES")
         or os.getenv("LINKEDIN_ACCOUNT_NAME")
@@ -405,6 +448,7 @@ def sent_today_count(client: Client) -> int:
     resp = (
         client.table("leads")
         .select("id", count="exact")
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .eq("status", "SENT")
         .gte("sent_at", start_iso)
         .execute()
@@ -421,6 +465,7 @@ def followups_sent_today_count(client: Client) -> int:
     resp = (
         client.table("followups")
         .select("id", count="exact")
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .eq("status", "SENT")
         .gte("sent_at", start_iso)
         .execute()
@@ -442,6 +487,7 @@ def connect_only_sent_today_count(client: Client) -> int:
     resp = (
         client.table("leads")
         .select("id", count="exact")
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .eq("outreach_mode", "connect_only")
         .not_.is_("connection_sent_at", "null")
         .gte("connection_sent_at", start_iso)
@@ -502,6 +548,7 @@ def fetch_approved_leads(client: Client, limit: int) -> list[Dict[str, Any]]:
     resp = (
         client.table("leads")
         .select("id, linkedin_url, first_name, last_name, company_name")
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .eq("status", "APPROVED")
         .order("updated_at", desc=True)
         .limit(limit)
@@ -805,6 +852,7 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
         query = (
             client.table("leads")
             .select(LEAD_SELECT_FIELDS_EXTENDED)
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
             .eq("outreach_mode", "connect_only")
             .is_("sent_at", "null")
             .or_(
@@ -822,6 +870,7 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
         query = (
             client.table("leads")
             .select(LEAD_SELECT_FIELDS_CORE)
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
             .eq("outreach_mode", "connect_only")
             .is_("sent_at", "null")
             .or_(
@@ -903,6 +952,7 @@ def fetch_invite_queue(
             "id, linkedin_url, first_name, last_name, company_name, "
             "sequence_id, outreach_mode, batch_id, status, profile_data, lead_batches!inner(batch_intent)"
         )
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .in_("status", INVITE_RETRY_STATUSES)
         .is_("connection_sent_at", "null")
         .in_("lead_batches.batch_intent", ["connect_message", "connect_only"])
@@ -936,6 +986,7 @@ def fetch_lead_by_id(client: Client, lead_id: str) -> Optional[Dict[str, Any]]:
         resp = (
             client.table("leads")
             .select(LEAD_SELECT_FIELDS_EXTENDED)
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
             .eq("id", lead_id)
             .limit(1)
             .execute()
@@ -1085,11 +1136,12 @@ def linkedin_absolute_url(href: str) -> str:
 
 def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, Any]:
     """Resolve sequence messages for a lead, preferring DB templates over defaults."""
+    fallback_sender = (CURRENT_ACCOUNT_DISPLAY_NAME.split()[0] if CURRENT_ACCOUNT_DISPLAY_NAME else "Absender")
     result: Dict[str, Any] = {
         "connect_note": "",
-        "first_message": SEQUENCE_DEFAULT_MESSAGES["first_message"],
-        "second_message": SEQUENCE_DEFAULT_MESSAGES["second_message"],
-        "third_message": SEQUENCE_DEFAULT_MESSAGES["third_message"],
+        "first_message": SEQUENCE_DEFAULT_MESSAGES["first_message"].replace("Katharina", fallback_sender),
+        "second_message": SEQUENCE_DEFAULT_MESSAGES["second_message"].replace("Katharina", fallback_sender),
+        "third_message": SEQUENCE_DEFAULT_MESSAGES["third_message"].replace("Katharina", fallback_sender),
         "followup_interval_days": SEQUENCE_INTERVAL_DEFAULT_DAYS,
         "source": "defaults",
     }
@@ -1100,6 +1152,7 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
             batch_resp = (
                 client.table("lead_batches")
                 .select("sequence_id")
+                .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
                 .eq("id", lead.get("batch_id"))
                 .limit(1)
                 .execute()
@@ -1121,6 +1174,7 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
         query = client.table("outreach_sequences").select(
             "id, connect_note, first_message, second_message, third_message, followup_interval_days, is_active, created_at"
         )
+        query = query.eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         if sequence_id is not None:
             query = query.eq("id", sequence_id)
         else:
@@ -3722,6 +3776,7 @@ def fetch_approved_followups(
                 "last_message_text, last_message_from, updated_at, "
                 "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
             )
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
             .eq("status", "APPROVED")
             .or_(f"next_send_at.is.null,next_send_at.lte.{now_utc.isoformat()}")
             .order("next_send_at", desc=False)
@@ -3739,6 +3794,7 @@ def fetch_approved_followups(
                     "last_message_text, last_message_from, updated_at, "
                     "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
                 )
+                .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
                 .eq("status", "APPROVED")
                 .or_(f"next_send_at.is.null,next_send_at.lte.{now_utc.isoformat()}")
                 .order("next_send_at", desc=False)
@@ -3755,6 +3811,7 @@ def fetch_approved_followups(
                     "last_message_text, last_message_from, updated_at, "
                     "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
                 )
+                .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
                 .eq("status", "APPROVED")
                 .or_(f"next_send_at.is.null,next_send_at.lte.{now_utc.isoformat()}")
                 .order("next_send_at", desc=False)
@@ -3816,7 +3873,7 @@ def fetch_followup_by_id(client: Client, followup_id: str) -> Optional[Dict[str,
         "last_message_text, last_message_from, updated_at, "
         "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
     )
-    resp = client.table("followups").select(select_cols).eq("id", followup_id).limit(1).execute()
+    resp = client.table("followups").select(select_cols).eq("linkedin_account_id", CURRENT_ACCOUNT_ID).eq("id", followup_id).limit(1).execute()
     rows = resp.data or []
     if not rows:
         logger.warn("Requested followup id not found", data={"followupId": followup_id})
@@ -3843,6 +3900,7 @@ def recover_stale_processing_followups(
         resp = (
             client.table("followups")
             .select("id, processing_started_at")
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
             .eq("status", "PROCESSING")
             .lt("processing_started_at", stale_cutoff)
             .order("processing_started_at", desc=False)
@@ -4050,6 +4108,7 @@ def requeue_processing_followup_batch(client: Client, followup_ids: list[str], r
             "last_error": reason[:500] if reason else None,
         })
         .in_("id", ids)
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .eq("status", "PROCESSING")
         .execute()
     )
@@ -4171,6 +4230,7 @@ def recover_due_retry_later_nudges(client: Client, limit: int = 500) -> int:
                 "id, lead_id, status, followup_type, attempt, next_send_at, "
                 "lead:leads(id, status, sent_at, last_reply_at, outreach_mode, connection_sent_at, connection_accepted_at)"
             )
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
             .eq("status", "RETRY_LATER")
             .eq("followup_type", "NUDGE")
             .limit(limit)
@@ -4183,6 +4243,7 @@ def recover_due_retry_later_nudges(client: Client, limit: int = 500) -> int:
                 "id, lead_id, status, followup_type, next_send_at, "
                 "lead:leads(id, status, sent_at, last_reply_at, outreach_mode, connection_sent_at, connection_accepted_at)"
             )
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
             .eq("status", "RETRY_LATER")
             .eq("followup_type", "NUDGE")
             .limit(limit)
@@ -5396,14 +5457,15 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
 
 def fetch_linkedin_credentials(client: Client) -> Optional[Dict[str, str]]:
     resp = (
-        client.table("settings")
-        .select("value")
-        .eq("key", "linkedin_credentials")
+        client.table("linkedin_accounts")
+        .select("email, credentials")
+        .eq("id", CURRENT_ACCOUNT_ID)
         .limit(1)
         .execute()
     )
-    value = (resp.data or [{}])[0].get("value") or {}
-    email = value.get("email") or value.get("username")
+    row = (resp.data or [{}])[0]
+    value = row.get("credentials") or {}
+    email = row.get("email") or value.get("email") or value.get("username")
     password = decrypt_password(value)
     if not email or not password:
         return None
@@ -5582,6 +5644,7 @@ async def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Send approved drafts or follow-ups via LinkedIn.")
+    parser.add_argument("--account-id", default=os.getenv("LINKEDIN_ACCOUNT_ID"), help="LinkedIn sender account UUID.")
     parser.add_argument("--lead-id", help="Send only this lead id (bypass queue).")
     parser.add_argument("--batch-id", type=int, help="Process only leads from this batch id.")
     parser.add_argument("--followup", action="store_true", help="Process APPROVED followups instead of initial outreach.")
@@ -5593,6 +5656,8 @@ async def main() -> None:
         help="Process NEW sequence-driven leads (connect_message/connect_only) and send LinkedIn connection invites.",
     )
     args = parser.parse_args()
+    if not args.account_id:
+        parser.error("--account-id is required so browser state, queues, and limits cannot cross accounts.")
 
     mode = (
         "followup" if args.followup
@@ -5600,12 +5665,13 @@ async def main() -> None:
         else ("send_invites" if args.send_invites
         else "connect_message"))
     )
-    logger.operation_start(f"sender-{mode}", input_data={"lead_id": args.lead_id, "mode": mode})
+    logger.operation_start(f"sender-{mode}", input_data={"lead_id": args.lead_id, "mode": mode, "account_id": args.account_id})
 
     try:
         client = get_supabase_client()
-       
-        daily_limit = resolve_daily_send_limit()
+        configure_runtime_account(client, args.account_id)
+
+        daily_limit = CURRENT_DAILY_INVITE_LIMIT if args.send_invites else CURRENT_DAILY_MESSAGE_LIMIT
         logger.info("Daily send limit computed", data={"limit": daily_limit, "env": os.getenv("DAILY_SEND_LIMIT"), "default": DAILY_SEND_DEFAULT})
         if args.send_invites:
             already_sent = connect_only_sent_today_count(client)
@@ -5639,6 +5705,7 @@ async def main() -> None:
                         "last_message_text, last_message_from, updated_at, "
                         "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
                     )
+                    .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
                     .eq("lead_id", args.lead_id)
                     .eq("status", "APPROVED")
                     .order("updated_at", desc=True)

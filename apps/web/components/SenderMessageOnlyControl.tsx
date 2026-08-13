@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { getOperatorApiHeaders } from "../lib/operatorToken";
+import type { LinkedinAccountSummary } from "../lib/linkedinAccounts";
 
 type IterationOutcome = "ok" | "error" | "unknown";
 
@@ -46,7 +47,8 @@ const outcomeLabel = (outcome: IterationOutcome): string => {
   return "PENDING";
 };
 
-export function SenderMessageOnlyControl() {
+export function SenderMessageOnlyControl({ accounts }: { accounts: LinkedinAccountSummary[] }) {
+  const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState<"start" | "stop" | null>(null);
@@ -56,7 +58,7 @@ export function SenderMessageOnlyControl() {
   const refresh = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
     try {
-      const response = await fetch("/api/sender/message-only/health", {
+      const response = await fetch(`/api/sender/message-only/health?accountId=${encodeURIComponent(accountId)}`, {
         cache: "no-store",
         headers: getOperatorApiHeaders(),
       });
@@ -71,7 +73,7 @@ export function SenderMessageOnlyControl() {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, []);
+  }, [accountId]);
 
   useEffect(() => {
     refresh();
@@ -94,6 +96,7 @@ export function SenderMessageOnlyControl() {
       const response = await fetch("/api/sender/message-only/start", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getOperatorApiHeaders() },
+        body: JSON.stringify({ accountId }),
       });
       const data = (await response.json()) as { ok: boolean; message?: string; error?: string; pid?: number };
       if (!response.ok || data.ok === false) {
@@ -116,7 +119,7 @@ export function SenderMessageOnlyControl() {
       const response = await fetch("/api/workers/stop", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getOperatorApiHeaders() },
-        body: JSON.stringify({ kinds: ["sender_message_only"] }),
+        body: JSON.stringify({ kinds: ["sender_message_only"], accountId }),
       });
       const data = (await response.json()) as { ok: boolean; message?: string; error?: string };
       if (!response.ok || data.ok === false) {
@@ -158,6 +161,10 @@ export function SenderMessageOnlyControl() {
           {loading && !health ? <div className="muted" style={{ fontSize: 12 }}>Checking…</div> : null}
         </div>
       </div>
+      <label htmlFor="message-only-account" className="muted">Sender</label>
+      <select id="message-only-account" className="input" value={accountId} onChange={(event) => setAccountId(event.target.value)}>
+        {accounts.map((account) => <option key={account.id} value={account.id}>{account.label} · {account.email}</option>)}
+      </select>
 
       <div style={{ fontSize: 12, fontFamily: "inherit", letterSpacing: 0.5 }}>
         PID {health?.pid ?? "—"} · STARTED {formatClock(health?.startedAt ?? null)} · LAST RUN{" "}

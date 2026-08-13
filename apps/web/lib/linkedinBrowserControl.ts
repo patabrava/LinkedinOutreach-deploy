@@ -8,8 +8,8 @@ import { isSupabaseAuthConfigured } from "./authConfig";
 import { logger } from "./logger";
 import { supabaseRouteHandler } from "./supabaseServer";
 
-const DEFAULT_REMOTE_BROWSER_URL = "/linkedin-browser/vnc.html?autoconnect=1&resize=remote";
-const LOCAL_REMOTE_BROWSER_URL = "http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=remote";
+const remoteBrowserPath = (slot: 1 | 2) => `/linkedin-browser-${slot}/vnc.html?autoconnect=1&resize=remote`;
+const localRemoteBrowserUrl = (slot: 1 | 2) => `http://127.0.0.1:${slot === 1 ? 6080 : 6081}/vnc.html?autoconnect=1&resize=remote`;
 
 const resolveScraperDir = () => {
   const runtimeScraperDir = process.env.LINKEDIN_SCRAPER_DIR?.trim();
@@ -47,12 +47,14 @@ const resolvePythonCommand = (scraperDir: string) => {
   return "python3";
 };
 
-const getRemoteBrowserUrlCandidates = (): string[] => {
-  const configured = process.env.NEXT_PUBLIC_LINKEDIN_REMOTE_BROWSER_URL?.trim() || "";
+const getRemoteBrowserUrlCandidates = (slot: 1 | 2): string[] => {
+  const configured = (slot === 1
+    ? process.env.NEXT_PUBLIC_LINKEDIN_REMOTE_BROWSER_URL_1 || process.env.NEXT_PUBLIC_LINKEDIN_REMOTE_BROWSER_URL
+    : process.env.NEXT_PUBLIC_LINKEDIN_REMOTE_BROWSER_URL_2)?.trim() || "";
   const candidates = [
     configured,
-    process.env.NODE_ENV === "production" ? "" : LOCAL_REMOTE_BROWSER_URL,
-    DEFAULT_REMOTE_BROWSER_URL,
+    process.env.NODE_ENV === "production" ? "" : localRemoteBrowserUrl(slot),
+    remoteBrowserPath(slot),
   ];
 
   return [...new Set(candidates.filter(Boolean))];
@@ -97,8 +99,8 @@ const isRemoteBrowserReachable = async (browserUrl: string): Promise<boolean> =>
   }
 };
 
-export const resolveRemoteBrowserUrl = async (): Promise<string | null> => {
-  for (const candidate of getRemoteBrowserUrlCandidates()) {
+export const resolveRemoteBrowserUrl = async (slot: 1 | 2): Promise<string | null> => {
+  for (const candidate of getRemoteBrowserUrlCandidates(slot)) {
     if (await isRemoteBrowserReachable(candidate)) {
       return candidate;
     }
@@ -107,7 +109,7 @@ export const resolveRemoteBrowserUrl = async (): Promise<string | null> => {
   return null;
 };
 
-export const getRemoteBrowserUrl = () => getRemoteBrowserUrlCandidates()[0] || DEFAULT_REMOTE_BROWSER_URL;
+export const getRemoteBrowserUrl = (slot: 1 | 2) => getRemoteBrowserUrlCandidates(slot)[0] || remoteBrowserPath(slot);
 
 const readOperatorToken = (request: Request): string => {
   const authHeader = request.headers.get("authorization") || "";
@@ -156,7 +158,7 @@ export const requireStrictOperatorSessionOrToken = async (
   );
 };
 
-export const spawnScraperCommand = (args: string[], correlationId: string) => {
+export const spawnScraperCommand = (args: string[], correlationId: string, accountId: string, browserSlot: 1 | 2) => {
   const scraperDir = resolveScraperDir();
   const scraperEntry = path.join(scraperDir, "scraper.py");
   if (!fs.existsSync(scraperEntry)) {
@@ -165,9 +167,17 @@ export const spawnScraperCommand = (args: string[], correlationId: string) => {
 
   const pythonCmd = resolvePythonCommand(scraperDir);
 
-  return spawn(pythonCmd, [scraperEntry, ...args], {
+  const cdpUrl = browserSlot === 1
+    ? process.env.LINKEDIN_BROWSER_CDP_URL_1 || process.env.LINKEDIN_BROWSER_CDP_URL
+    : process.env.LINKEDIN_BROWSER_CDP_URL_2;
+  return spawn(pythonCmd, [scraperEntry, ...args, "--account-id", accountId], {
     cwd: scraperDir,
-    env: { ...process.env, CORRELATION_ID: correlationId },
+    env: {
+      ...process.env,
+      CORRELATION_ID: correlationId,
+      LINKEDIN_ACCOUNT_ID: accountId,
+      ...(cdpUrl ? { LINKEDIN_BROWSER_CDP_URL: cdpUrl } : {}),
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
 };
