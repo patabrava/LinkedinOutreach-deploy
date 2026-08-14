@@ -1514,10 +1514,11 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         rows = fetch_message_only_leads(client, 25)
 
         self.assertEqual(rows, [legacy_connected_row, eligible_row])
-        self.assertEqual(client.calls[0]["filters"][0], ("eq", "outreach_mode", "connect_only"))
-        self.assertEqual(client.calls[0]["filters"][1], ("is", "sent_at", "null"))
+        self.assertEqual(client.calls[0]["filters"][0], ("eq", "linkedin_account_id", ""))
+        self.assertEqual(client.calls[0]["filters"][1], ("eq", "outreach_mode", "connect_only"))
+        self.assertEqual(client.calls[0]["filters"][2], ("is", "sent_at", "null"))
         self.assertEqual(
-            client.calls[0]["filters"][2],
+            client.calls[0]["filters"][3],
             (
                 "or",
                 "connection_sent_at.not.is.null,"
