@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sender import (
     _next_due_nudge_for_lead,
+    _next_sequence_step_for_nudge,
     _nudge_lead_state_valid,
     _pick_existing_nudge_for_schedule,
     schedule_nudge_followup,
@@ -211,3 +212,23 @@ def test_replied_lead_does_not_schedule_missing_nudge():
 
     assert attempt is None
     assert reason == "lead_replied"
+
+
+def test_attempt_one_cannot_replay_after_lead_reached_step_two():
+    followup = {
+        "followup_type": "NUDGE",
+        "attempt": 1,
+        "lead": _lead(sequence_step=2),
+    }
+
+    assert _next_sequence_step_for_nudge(followup) is None
+
+
+def test_attempt_two_cannot_skip_a_lead_still_at_step_one():
+    followup = {
+        "followup_type": "NUDGE",
+        "attempt": 2,
+        "lead": _lead(sequence_step=1),
+    }
+
+    assert _next_sequence_step_for_nudge(followup) is None

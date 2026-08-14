@@ -97,6 +97,7 @@ SEQUENCE_INTERVAL_DEFAULT_DAYS = 3
 LEAD_MESSAGE_ONLY_MAX_RETRIES = 3
 CONNECT_ONLY_CONSECUTIVE_FAILURE_LIMIT = 3
 FOLLOWUP_PROCESSING_STALE_MINUTES = 45
+FOLLOWUP_RECENT_SEND_SUPPRESSION_HOURS = 48
 NUDGE_ACTIVE_STATUSES = {"APPROVED", "PROCESSING", "RETRY_LATER"}
 OWN_SENDER_NAME_DEFAULTS = ("Katharina Hoffmann",)
 
@@ -961,7 +962,10 @@ def fetch_invite_queue(
     if batch_id is not None:
         query = query.eq("batch_id", batch_id)
     response = query.execute()
-    rows = response.data or []
+    rows = sorted(
+        response.data or [],
+        key=lambda row: 0 if str(row.get("status") or "").upper() == "NEW" else 1,
+    )
     filtered_rows: list[Dict[str, Any]] = []
     for row in rows:
         if str(row.get("id") or "") in excluded:
@@ -3760,6 +3764,36 @@ def _nudge_lead_state_valid(lead: Dict[str, Any]) -> Tuple[bool, str]:
     return True, ""
 
 
+def _lead_has_recent_sent_followup(
+    client: Client,
+    lead_id: str,
+    now_utc: datetime,
+    suppression_hours: int = FOLLOWUP_RECENT_SEND_SUPPRESSION_HOURS,
+) -> bool:
+    """Return true when another follow-up was just sent to this same lead."""
+    if not lead_id:
+        return False
+    cutoff = now_utc - timedelta(hours=suppression_hours)
+    try:
+        resp = (
+            client.table("followups")
+            .select("id, sent_at, updated_at")
+            .eq("lead_id", lead_id)
+            .eq("status", "SENT")
+            .order("sent_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        logger.warn("Recent followup guard query failed; blocking row for safety", {"leadId": lead_id}, error=exc)
+        return True
+    rows = resp.data or []
+    if not rows:
+        return False
+    sent_at = _parse_iso_datetime(rows[0].get("sent_at")) or _parse_iso_datetime(rows[0].get("updated_at"))
+    return bool(sent_at and sent_at >= cutoff)
+
+
 def fetch_approved_followups(
     client: Client,
     limit: int = 10,
@@ -3823,6 +3857,7 @@ def fetch_approved_followups(
     logger.db_result("select", "followups", {"status": "APPROVED"}, len(rows))
 
     selected: list[Dict[str, Any]] = []
+    selected_lead_ids: set[str] = set()
     for row in rows:
         if followup_type_filter and (row.get("followup_type") or "").upper() != followup_type_filter.upper():
             continue
@@ -3830,6 +3865,24 @@ def fetch_approved_followups(
             continue
 
         lead = row.get("lead") or {}
+        lead_id = str(row.get("lead_id") or lead.get("id") or "")
+        if lead_id in selected_lead_ids:
+            logger.warn(
+                "Skipping duplicate due followup for lead in same batch",
+                {"followupId": row.get("id"), "leadId": lead_id},
+            )
+            continue
+        if _lead_has_recent_sent_followup(client, lead_id, now_utc):
+            logger.warn(
+                "Skipping due followup because this lead has a recent sent followup",
+                {
+                    "followupId": row.get("id"),
+                    "leadId": lead_id,
+                    "suppressionHours": FOLLOWUP_RECENT_SEND_SUPPRESSION_HOURS,
+                },
+            )
+            continue
+
         if (row.get("followup_type") or "").upper() == "NUDGE" and lead.get("last_reply_at"):
             mark_followup_skipped(client, row["id"], "Lead replied before scheduled nudge.")
             continue
@@ -3847,6 +3900,8 @@ def fetch_approved_followups(
                 continue
 
         selected.append(row)
+        if lead_id:
+            selected_lead_ids.add(lead_id)
         if len(selected) >= limit:
             break
 
@@ -3971,17 +4026,19 @@ def build_followup_message(fu: Dict[str, Any]) -> str:
 def _next_sequence_step_for_nudge(followup: Dict[str, Any]) -> Optional[int]:
     if (str(followup.get("followup_type") or "").upper() != "NUDGE"):
         return None
-    # Prefer explicit attempt mapping when available.
-    explicit = _step_from_followup(followup.get("followup_type"), followup.get("attempt"))
-    if explicit is not None:
-        return explicit
     lead = followup.get("lead") or {}
     current_step = _safe_int(lead.get("sequence_step"), 0)
     if current_step <= 1:
-        return 2
-    if current_step == 2:
-        return 3
-    return 3
+        expected_step = 2
+    elif current_step == 2:
+        expected_step = 3
+    else:
+        return None
+
+    explicit_step = _step_from_followup(followup.get("followup_type"), followup.get("attempt"))
+    if explicit_step is not None and explicit_step != expected_step:
+        return None
+    return expected_step
 
 
 def resolve_followup_message(client: Client, followup: Dict[str, Any]) -> Tuple[str, Optional[int], str]:
@@ -4498,6 +4555,20 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
         mark_followup_failed(client, followup_id, error_msg, permanent=True)
         return "failed"
 
+    followup_type = str(followup.get("followup_type") or "").upper()
+    if followup_type == "NUDGE" and resolved_step not in (2, 3):
+        logger.warn(
+            "Skipping nudge because queue attempt conflicts with current sequence state",
+            {
+                "followupId": followup_id,
+                "leadId": lead_id,
+                "attempt": followup.get("attempt"),
+                "sequenceStep": lead.get("sequence_step"),
+            },
+        )
+        mark_followup_skipped(client, followup_id, "nudge_sequence_state_mismatch")
+        return "skipped"
+
     logger.debug(
         f"Followup message preview",
         {"followupId": followup_id},
@@ -4512,10 +4583,11 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
         await random_pause()
 
         message_page, surface = await open_followup_message_surface(page)
+        if surface != SURFACE_MESSAGE:
+            raise RuntimeError(f"followup_surface_not_direct_message:{surface}")
 
-        # --- Just-in-time thread guard (Sales Navigator surface deliberately skipped) ---
-        followup_type = str(followup.get("followup_type") or "").upper()
-        if followup_type == "REPLY" and surface != SURFACE_SALES_NAVIGATOR:
+        # --- Just-in-time direct-message thread guard ---
+        if followup_type == "REPLY":
             try:
                 bubble = await extract_last_bubble(message_page)
             except Exception as bubble_exc:
@@ -4551,62 +4623,51 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
                     f"(sender={sender_name[:80]!r}, expected={lead_display_name(lead)!r})."
                 )
 
-        if followup_type == "NUDGE" and surface != SURFACE_SALES_NAVIGATOR:
+        if followup_type == "NUDGE":
             try:
                 bubble = await extract_last_bubble(message_page)
             except Exception as bubble_exc:
-                logger.warn(
-                    "Reply check raised; proceeding with send (fail-open)",
-                    {"followupId": followup_id, "leadId": lead_id},
-                    error=bubble_exc,
-                )
-                bubble = None
+                raise RuntimeError(
+                    "Latest direct-message thread sender could not be verified."
+                ) from bubble_exc
 
-            if bubble is not None:
-                lead_full = " ".join(
-                    p for p in [(lead.get("first_name") or ""), (lead.get("last_name") or "")] if p
-                ).strip()
-                verdict = classify_last_sender(bubble, lead_full, (lead.get("first_name") or ""))
-                sender_name = (bubble.get("sender") or "").strip()
-                if sender_name_is_own_account(sender_name):
-                    logger.debug(
-                        "Latest nudge bubble sender matched own account",
-                        {
-                            "followupId": followup_id,
-                            "leadId": lead_id,
-                            "sender": sender_name[:80],
-                            "previousVerdict": verdict,
-                        },
-                    )
-                    verdict = "us"
-                if verdict == "lead":
-                    logger.info(
-                        "Lead replied since nudge was scheduled; skipping send",
-                        {
-                            "followupId": followup_id,
-                            "leadId": lead_id,
-                            "sender": (bubble.get("sender") or "")[:80],
-                            "preview": (bubble.get("text") or "")[:120],
-                        },
-                    )
-                    _record_reply_at_send_time(client, lead_id, followup_id, bubble.get("text") or "")
-                    mark_followup_skipped(client, followup_id, "reply_detected_at_send_time")
-                    return "skipped"
-                if verdict == "unknown":
-                    if sender_name:
-                        raise RuntimeError(
-                            "Latest direct-message thread sender did not match lead "
-                            f"(sender={sender_name[:80]!r}, expected={lead_display_name(lead)!r})."
-                        )
-                    logger.warn(
-                        "Reply check inconclusive; proceeding with send",
-                        {
-                            "followupId": followup_id,
-                            "leadId": lead_id,
-                            "sender": "",
-                        },
-                    )
-            # bubble is None → fresh thread / loader hadn't finished → fall through to send (fail-open).
+            if bubble is None:
+                raise RuntimeError("Latest direct-message thread sender could not be verified.")
+
+            lead_full = " ".join(
+                p for p in [(lead.get("first_name") or ""), (lead.get("last_name") or "")] if p
+            ).strip()
+            verdict = classify_last_sender(bubble, lead_full, (lead.get("first_name") or ""))
+            sender_name = (bubble.get("sender") or "").strip()
+            if bubble.get("is_outbound") or sender_name_is_own_account(sender_name):
+                logger.debug(
+                    "Latest nudge bubble matched own account",
+                    {
+                        "followupId": followup_id,
+                        "leadId": lead_id,
+                        "sender": sender_name[:80],
+                        "previousVerdict": verdict,
+                    },
+                )
+                verdict = "us"
+            if verdict == "lead":
+                logger.info(
+                    "Lead replied since nudge was scheduled; skipping send",
+                    {
+                        "followupId": followup_id,
+                        "leadId": lead_id,
+                        "sender": (bubble.get("sender") or "")[:80],
+                        "preview": (bubble.get("text") or "")[:120],
+                    },
+                )
+                _record_reply_at_send_time(client, lead_id, followup_id, bubble.get("text") or "")
+                mark_followup_skipped(client, followup_id, "reply_detected_at_send_time")
+                return "skipped"
+            if verdict != "us":
+                raise RuntimeError(
+                    "Latest direct-message thread sender did not match lead or own account "
+                    f"(sender={sender_name[:80]!r}, expected={lead_display_name(lead)!r})."
+                )
         else:
             logger.debug(
                 "Send-time nudge reply check skipped",
@@ -4614,50 +4675,30 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
             )
 
         logger.message_send_start(lead_id or "unknown", {"followupId": followup_id}, message)
-        if surface == SURFACE_SALES_NAVIGATOR:
-            logger.info(
-                "Followup routing through Sales Navigator composer",
+        try:
+            await send_message(message_page, message, surface, lead=lead)
+        except Exception as send_error:
+            if not is_direct_thread_mismatch_error(send_error):
+                raise
+            logger.warn(
+                "Direct message surface opened a stale or mismatched thread; closing overlays and retrying once",
                 {"followupId": followup_id, "leadId": lead_id},
+                error=send_error,
             )
-            await send_sales_navigator_message(
-                message_page,
-                build_sales_navigator_subject(lead, message),
-                build_sales_navigator_body(message),
-            )
-        else:
-            try:
-                await send_message(message_page, message, surface, lead=lead)
-            except Exception as send_error:
-                if not is_direct_thread_mismatch_error(send_error):
-                    raise
-                logger.warn(
-                    "Direct message surface opened a stale or mismatched thread; closing overlays and retrying once",
-                    {"followupId": followup_id, "leadId": lead_id},
-                    error=send_error,
-                )
-                await close_existing_chat_overlays(message_page)
-                if message_page is not page:
-                    try:
-                        await message_page.close()
-                    except Exception:
-                        pass
-                    message_page = None
-                await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
-                await page.wait_for_timeout(1_000)
-                await close_existing_chat_overlays(page)
-                message_page, surface = await open_followup_message_surface(page)
-                if surface == SURFACE_SALES_NAVIGATOR:
-                    logger.info(
-                        "Followup retry routed through Sales Navigator composer",
-                        {"followupId": followup_id, "leadId": lead_id},
-                    )
-                    await send_sales_navigator_message(
-                        message_page,
-                        build_sales_navigator_subject(lead, message),
-                        build_sales_navigator_body(message),
-                    )
-                else:
-                    await send_message(message_page, message, surface, lead=lead)
+            await close_existing_chat_overlays(message_page)
+            if message_page is not page:
+                try:
+                    await message_page.close()
+                except Exception:
+                    pass
+                message_page = None
+            await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
+            await page.wait_for_timeout(1_000)
+            await close_existing_chat_overlays(page)
+            message_page, surface = await open_followup_message_surface(page)
+            if surface != SURFACE_MESSAGE:
+                raise RuntimeError(f"followup_surface_not_direct_message:{surface}")
+            await send_message(message_page, message, surface, lead=lead)
 
         mark_followup_sent(client, followup_id, message, followup, sequence_step=resolved_step)
         if followup_type == "NUDGE" and resolved_step == 2 and lead_id:
@@ -4744,8 +4785,8 @@ def mark_invite_processing(client: Client, lead_id: str) -> bool:
             .execute()
         )
     except Exception as exc:
-        logger.warn("Failed to lock invite lead", {"leadId": lead_id}, error=exc)
-        return False
+        logger.error("Failed to lock invite lead; aborting invite run", {"leadId": lead_id}, error=exc)
+        raise
     rows = getattr(resp, "data", None) or []
     return len(rows) > 0
 

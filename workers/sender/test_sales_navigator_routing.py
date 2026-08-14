@@ -1094,6 +1094,18 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         self.assertEqual([row["id"] for row in rows], ["lead-new", "lead-failed"])
         self.assertIn(("in", "status", INVITE_RETRY_STATUSES), client.calls[0]["filters"])
 
+    def test_fetch_invite_queue_prioritizes_new_leads_before_failed_retries(self):
+        client = FakeInviteQueueClient(
+            [
+                {"id": "lead-failed", "status": "FAILED", "outreach_mode": "connect_only", "profile_data": {}},
+                {"id": "lead-new", "status": "NEW", "outreach_mode": "connect_only", "profile_data": {}},
+            ]
+        )
+
+        rows = fetch_invite_queue(client, 1)
+
+        self.assertEqual([row["id"] for row in rows], ["lead-new"])
+
     def test_fetch_invite_queue_excludes_attempted_leads_for_current_run(self):
         client = FakeInviteQueueClient(
             [
@@ -1115,6 +1127,27 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(client.lead["status"], "PROCESSING")
         self.assertEqual(client.calls[0]["filters"][1], ("in", "status", INVITE_RETRY_STATUSES))
+
+    def test_mark_invite_processing_propagates_database_errors(self):
+        class FailingQuery:
+            def update(self, _payload):
+                return self
+
+            def eq(self, _key, _value):
+                return self
+
+            def in_(self, _key, _values):
+                return self
+
+            def execute(self):
+                raise OSError("temporary DNS failure")
+
+        class FailingClient:
+            def table(self, _table_name):
+                return FailingQuery()
+
+        with self.assertRaisesRegex(OSError, "temporary DNS failure"):
+            mark_invite_processing(FailingClient(), "lead-1")
 
     def test_invite_candidate_accepts_failed_connect_only_without_connection_sent(self):
         self.assertTrue(
@@ -1495,9 +1528,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
 
 class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
-    """process_followup_one must detect Sales Navigator composers so the
-    Subject field is filled; otherwise the InMail Send button stays disabled.
-    """
+    """Followups must stay on direct-message surfaces."""
 
     def _build_followup(self) -> dict:
         lead = {
@@ -1614,7 +1645,7 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
         )
         return stack, mocks
 
-    async def test_routes_to_sales_navigator_when_composer_detected(self):
+    async def test_retries_when_sales_navigator_composer_detected(self):
         from unittest.mock import AsyncMock, MagicMock
         from sender import process_followup_one, SURFACE_SALES_NAVIGATOR
 
@@ -1631,21 +1662,18 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
         with stack:
             result = await process_followup_one(context, client, followup)
 
-        self.assertEqual(result, "sent")
-        mocks["send_sales_navigator_message"].assert_awaited_once()
+        self.assertEqual(result, "retry")
+        mocks["send_sales_navigator_message"].assert_not_awaited()
         mocks["send_message"].assert_not_awaited()
-        mocks["message_send_start"].assert_called_once()
-        mocks["mark_followup_sent"].assert_called_once()
-        mocks["mark_followup_failed"].assert_not_called()
+        mocks["message_send_start"].assert_not_called()
+        mocks["mark_followup_sent"].assert_not_called()
+        mocks["mark_followup_failed"].assert_called_once()
+        self.assertIn(
+            "followup_surface_not_direct_message:sales_navigator_message",
+            mocks["mark_followup_failed"].call_args.args[2],
+        )
 
-        call_args = mocks["send_sales_navigator_message"].await_args
-        sent_page, subject, body = call_args.args
-        self.assertIs(sent_page, sales_page)
-        self.assertEqual(subject, "Kurze Frage zu deiner bAV")
-        self.assertIn("\nKatharina", body)
-        self.assertIn("Hi Marina", body)
-
-    async def test_routes_to_direct_message_when_dm_surface_returned(self):
+    async def test_retries_nudge_when_latest_direct_message_bubble_is_missing(self):
         from unittest.mock import AsyncMock, MagicMock
         from sender import process_followup_one, SURFACE_MESSAGE
 
@@ -1661,11 +1689,45 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
         with stack:
             result = await process_followup_one(context, client, followup)
 
-        self.assertEqual(result, "sent")
-        mocks["send_message"].assert_awaited_once()
+        self.assertEqual(result, "retry")
+        mocks["send_message"].assert_not_awaited()
         mocks["send_sales_navigator_message"].assert_not_awaited()
-        mocks["message_send_start"].assert_called_once()
-        mocks["mark_followup_sent"].assert_called_once()
+        mocks["message_send_start"].assert_not_called()
+        mocks["mark_followup_sent"].assert_not_called()
+        mocks["mark_followup_failed"].assert_called_once()
+        self.assertIn(
+            "Latest direct-message thread sender could not be verified",
+            mocks["mark_followup_failed"].call_args.args[2],
+        )
+
+    async def test_skips_nudge_when_queue_attempt_conflicts_with_sequence_state(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from sender import process_followup_one, SURFACE_MESSAGE
+
+        page = self._build_mock_page()
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        client = MagicMock()
+        followup = self._build_followup()
+
+        stack, mocks = self._patches(surface_result=(page, SURFACE_MESSAGE))
+        mocks["resolve_followup_message"].return_value = (
+            "stale queued message",
+            None,
+            "followup_draft_text_unknown_step",
+        )
+        with stack:
+            result = await process_followup_one(context, client, followup)
+
+        self.assertEqual(result, "skipped")
+        mocks["open_followup_message_surface"].assert_not_awaited()
+        mocks["send_message"].assert_not_awaited()
+        mocks["mark_followup_sent"].assert_not_called()
+        mocks["mark_followup_skipped"].assert_called_once_with(
+            client,
+            followup["id"],
+            "nudge_sequence_state_mismatch",
+        )
 
     async def test_reply_followup_sends_even_when_latest_bubble_is_from_lead(self):
         from unittest.mock import AsyncMock, MagicMock
@@ -1850,6 +1912,12 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
             ),
             None,
         ]
+        mocks["extract_last_bubble"].return_value = {
+            "sender": "Katharina Hoffmann",
+            "text": "Hi Marina, meine vorherige Nachricht.",
+            "is_outbound": True,
+        }
+        mocks["classify_last_sender"].return_value = "us"
         with stack:
             result = await process_followup_one(context, client, followup)
 
