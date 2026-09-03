@@ -160,5 +160,6 @@ The declaration is a commitment to the chosen process. If evidence changes a sta
 - Mixed HubSpot DEGURA imports must map source sequence IDs `837149883`/`836545727`/`837149889` to A/B/C, normalize German lead fields, retain CRM source metadata, sort newest source activity before assignment, and create all non-empty family batches atomically with new leads paused.
 - Managed campaign imports must fail closed until exactly two active slot-isolated accounts and sessions, six active variants, HTTPS booking/privacy URLs, either an HTTPS guide URL or a signature-validated PDF, and explicit eligibility confirmation exist; preserve canonical global URL uniqueness and immutable account/variant ownership after outreach begins.
 - Disposable PostgreSQL migration tests must wait on a successful query against the target database, not `pg_isready` alone, because the image's temporary init server can accept connections before `POSTGRES_DB` exists.
+- Production containers must start the web UI only unless `START_BACKGROUND_WORKERS=1` is explicitly set, and persistent Chromium profiles must delete stale `SingletonLock`/`SingletonCookie`/`SingletonSocket` links before launch so a recreated slot browser cannot enter a false profile-in-use crash loop.
 <!-- bridgecode:repo-rules:end -->
 <!-- bridgecode:managed:end -->

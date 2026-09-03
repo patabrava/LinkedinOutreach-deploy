@@ -10,6 +10,7 @@ services:
       HOME: /data/home
       PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
       WEB_RUNTIME: prod
+      START_BACKGROUND_WORKERS: "0"
       PORT: "3000"
       LINKEDIN_ACCOUNTS_DIR: /data/linkedin-accounts
       LINKEDIN_BROWSER_CDP_URL_1: http://linkedin-browser-1:9222
@@ -62,6 +63,12 @@ services:
       traefik.http.routers.linkedin-browser-1.middlewares: linkedin-browser-1-strip
       traefik.http.middlewares.linkedin-browser-1-strip.stripprefix.prefixes: /linkedin-browser-1
       traefik.http.services.linkedin-browser-1.loadbalancer.server.port: "6080"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 3 bash -c '</dev/tcp/127.0.0.1/9222'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
   linkedin-browser-2:
     restart: unless-stopped
     build:
@@ -88,6 +95,12 @@ services:
       traefik.http.routers.linkedin-browser-2.middlewares: linkedin-browser-2-strip
       traefik.http.middlewares.linkedin-browser-2-strip.stripprefix.prefixes: /linkedin-browser-2
       traefik.http.services.linkedin-browser-2.loadbalancer.server.port: "6080"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 3 bash -c '</dev/tcp/127.0.0.1/9222'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
 volumes:
   campaign_assets:

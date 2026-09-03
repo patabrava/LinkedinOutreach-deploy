@@ -2,7 +2,7 @@
 
 ## Goal and State
 
-Deploy the production DEGURA A/B/C campaign from `degura-linkedin-sequenzen.md`, import the mixed HubSpot export under `new_leads/`, preserve CRM source tracking, route documented replies, and retain two-account isolation. Implementation and the full local regression pass. Production schema/configuration is migrated; the repo-backed VPS deployment and paused real-data import remain. No campaign worker has been started and no LinkedIn message has been sent.
+Deploy the production DEGURA A/B/C campaign from `degura-linkedin-sequenzen.md`, import the mixed HubSpot export under `new_leads/`, preserve CRM source tracking, route documented replies, and retain two-account isolation. Production schema/configuration is migrated. A deployment preflight exposed an unsafe auto-worker entrypoint and stale Chromium profile locks; the VPS project is stopped while those corrections are validated. The paused real-data import remains. No outreach event was recorded during the short preflight window and no campaign message was sent.
 
 ## Confirmed Contract
 
@@ -25,8 +25,9 @@ Deploy the production DEGURA A/B/C campaign from `degura-linkedin-sequenzen.md`,
 - Shell syntax and Docker Compose validation pass.
 - Migrations 019-022 apply twice in PostgreSQL 16; the transactional mixed A/B/C import contract passes with paused rows and source metadata.
 - Full acceptance command: `./agentic/testscripts/two-account-degura-smoke.sh`; result: `PASS: two-account DEGURA non-sending regression block`.
+- The same acceptance block now also builds and boots the remote-browser image against deliberately stale Chromium singleton links, verifies CDP port readiness, and asserts production remains web-only without explicit worker opt-in.
 - Production migrations 021 and 022 are applied. Readback confirms two active account slots, six active variants, 50/50 limits, all three campaign URLs, and the atomic import RPC.
 
 ## Remaining Work
 
-Publish the integrated release revision, replace the older one-browser VPS project while preserving environment and volumes, verify the authenticated production UI, import the real CSV paused, and read back exact family/account/variant counts plus zero outbound activity.
+Publish and deploy the worker/browser safety correction, verify the healthy production UI and two remote browser processes, import the real CSV paused, and read back exact family/account/variant counts plus zero outbound activity.

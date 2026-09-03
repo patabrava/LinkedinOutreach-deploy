@@ -3,6 +3,13 @@ set -euo pipefail
 
 mkdir -p "${CHROME_USER_DATA_DIR}"
 
+# Chromium writes host-specific singleton links into persistent profiles. A
+# recreated container has a different hostname, so those links must not survive
+# the container boundary or Chromium exits with "profile in use".
+find "${CHROME_USER_DATA_DIR}" -maxdepth 1 \
+  \( -name 'SingletonCookie' -o -name 'SingletonLock' -o -name 'SingletonSocket' \) \
+  -delete
+
 CHROMIUM_BIN=""
 
 if [[ -x /ms-playwright/chromium/chrome-linux/chrome ]]; then

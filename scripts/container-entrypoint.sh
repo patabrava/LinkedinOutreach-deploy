@@ -22,12 +22,18 @@ fi
 
 export HOME="${HOME:-/data/home}"
 export WEB_RUNTIME="${WEB_RUNTIME:-prod}"
+export START_BACKGROUND_WORKERS="${START_BACKGROUND_WORKERS:-0}"
 export PLAYWRIGHT_BROWSERS_PATH
 export PLAYWRIGHT_BROWSERS_SEED_PATH
 
-if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+if [ "$START_BACKGROUND_WORKERS" = "1" ]; then
+  if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+    echo "[entrypoint] START_BACKGROUND_WORKERS=1 requires Supabase worker credentials." >&2
+    exit 1
+  fi
+  echo "[entrypoint] Explicit worker opt-in enabled; starting web and background workers."
   exec ./run_all.sh --all
 fi
 
-echo "[entrypoint] Supabase worker env missing; starting web UI only."
+echo "[entrypoint] Background workers disabled; starting web UI only."
 exec ./run_all.sh --web
