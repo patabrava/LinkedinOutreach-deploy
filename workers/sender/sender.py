@@ -134,7 +134,7 @@ NETWORK_OUTAGE_PATTERNS = (
 LEAD_SELECT_FIELDS_CORE = (
     "id, linkedin_account_id, linkedin_url, first_name, last_name, company_name, status, sent_at, "
     "connection_sent_at, connection_accepted_at, followup_count, last_reply_at, "
-    "error_message, sequence_id, sequence_step, sequence_started_at, sequence_last_sent_at, "
+    "error_message, sequence_id, sequence_variant_id, sequence_step, sequence_started_at, sequence_last_sent_at, "
     "batch_id, outreach_mode, profile_data"
 )
 LEAD_SELECT_FIELDS_EXTENDED = f"{LEAD_SELECT_FIELDS_CORE}, csv_batch_id, ai_tags"
@@ -1147,10 +1147,63 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
         "second_message": SEQUENCE_DEFAULT_MESSAGES["second_message"].replace("Katharina", fallback_sender),
         "third_message": SEQUENCE_DEFAULT_MESSAGES["third_message"].replace("Katharina", fallback_sender),
         "followup_interval_days": SEQUENCE_INTERVAL_DEFAULT_DAYS,
+        "guide_url": "",
+        "guide_asset_path": "",
+        "asset_followup_1": "",
+        "asset_followup_2": "",
         "source": "defaults",
     }
 
     sequence_id = _resolve_launch_sequence_id(lead)
+    variant_id = lead.get("sequence_variant_id")
+    if variant_id:
+        try:
+            variant_resp = (
+                client.table("outreach_sequence_variants")
+                .select(
+                    "id, sequence_id, connect_note, first_message, second_message, third_message, "
+                    "asset_followup_1, asset_followup_2, is_active, "
+                    "sequence:outreach_sequences(id, campaign_key, guide_url, guide_asset_path, followup_interval_days, is_active)"
+                )
+                .eq("id", variant_id)
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            variant_rows = variant_resp.data or []
+            if variant_rows:
+                variant = variant_rows[0]
+                sequence = variant.get("sequence") or {}
+                if isinstance(sequence, list):
+                    sequence = sequence[0] if sequence else {}
+                if sequence.get("is_active") is not False and (
+                    sequence_id is None or int(variant.get("sequence_id") or 0) == int(sequence_id)
+                ):
+                    result.update(
+                        {
+                            "connect_note": variant.get("connect_note") or "",
+                            "first_message": variant.get("first_message") or "",
+                            "second_message": variant.get("second_message") or "",
+                            "third_message": variant.get("third_message") or "",
+                            "asset_followup_1": variant.get("asset_followup_1") or "",
+                            "asset_followup_2": variant.get("asset_followup_2") or "",
+                            "guide_url": sequence.get("guide_url") or "",
+                            "guide_asset_path": sequence.get("guide_asset_path") or "",
+                            "followup_interval_days": _safe_int(
+                                sequence.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS
+                            ),
+                            "source": "outreach_sequence_variants",
+                        }
+                    )
+                    for message_key in ("connect_note", "first_message", "second_message", "third_message", "asset_followup_1", "asset_followup_2"):
+                        result[message_key] = _render_template_message(str(result[message_key]), lead)
+                    return result
+        except Exception as exc:
+            logger.warn(
+                "Failed to load assigned sequence variant",
+                {"leadId": lead.get("id"), "sequenceVariantId": variant_id},
+                error=exc,
+            )
     if sequence_id is None and lead.get("batch_id"):
         try:
             batch_resp = (
@@ -3808,7 +3861,7 @@ def fetch_approved_followups(
             .select(
                 "id, lead_id, status, followup_type, attempt, draft_text, sent_text, next_send_at, "
                 "last_message_text, last_message_from, updated_at, "
-                "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
+                "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
             )
             .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
             .eq("status", "APPROVED")
@@ -3826,7 +3879,7 @@ def fetch_approved_followups(
                 .select(
                     "id, lead_id, status, followup_type, draft_text, sent_text, next_send_at, "
                     "last_message_text, last_message_from, updated_at, "
-                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
+                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
                 )
                 .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
                 .eq("status", "APPROVED")
@@ -3843,7 +3896,7 @@ def fetch_approved_followups(
                 .select(
                     "id, lead_id, status, draft_text, sent_text, next_send_at, "
                     "last_message_text, last_message_from, updated_at, "
-                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
+                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
                 )
                 .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
                 .eq("status", "APPROVED")
@@ -3926,7 +3979,7 @@ def fetch_followup_by_id(client: Client, followup_id: str) -> Optional[Dict[str,
     select_cols = (
         "id, lead_id, status, followup_type, draft_text, sent_text, next_send_at, "
         "last_message_text, last_message_from, updated_at, "
-        "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
+        "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
     )
     resp = client.table("followups").select(select_cols).eq("linkedin_account_id", CURRENT_ACCOUNT_ID).eq("id", followup_id).limit(1).execute()
     rows = resp.data or []

@@ -25,6 +25,7 @@ services:
     volumes:
       - scraper_auth:/data/scraper
       - sender_auth:/data/sender
+      - campaign_assets:/data/campaign-assets
       - playwright_cache:/ms-playwright
       - app_home:/data/home
       - app_logs:/app/.logs
@@ -89,6 +90,7 @@ services:
       traefik.http.services.linkedin-browser-2.loadbalancer.server.port: "6080"
 
 volumes:
+  campaign_assets:
   scraper_auth:
   sender_auth:
   playwright_cache:

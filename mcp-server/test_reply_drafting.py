@@ -13,6 +13,21 @@ import run_followup_agent as agent
 
 
 class ReplyDraftingTest(unittest.TestCase):
+    def test_human_only_route_never_calls_model(self):
+        context = {
+            "followup_id": "fu_human",
+            "followup_type": "REPLY",
+            "reply_snippet": "Was kostet das und wie ist das rechtlich?",
+            "last_message_from": "lead",
+            "requires_human": True,
+            "handoff_reason": "price_question",
+        }
+
+        with patch.object(agent, "call_gemini_reply_model") as model:
+            with self.assertRaisesRegex(ValueError, "HUMAN_HANDOFF_REQUIRED"):
+                agent.generate_followup(context)
+        model.assert_not_called()
+
     def test_positive_reply_preserves_booking_link(self):
         payload = json.dumps({
             "intent": "positive",

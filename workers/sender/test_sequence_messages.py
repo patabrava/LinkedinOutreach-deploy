@@ -131,6 +131,46 @@ class LoadSequenceMessagesTest(unittest.TestCase):
 
         self.assertEqual(result["connect_note"], "SEQUENZ b ohne Vertrag")
 
+    def test_assigned_managed_variant_wins_and_renders_company_name(self):
+        client = FakeClient(
+            {
+                "outreach_sequence_variants": [
+                    {
+                        "id": 17,
+                        "sequence_id": 7,
+                        "connect_note": "Hallo {{first_name}} von {{company_name}}",
+                        "first_message": "Leitfaden für {{company_name}}",
+                        "second_message": "Zweiter Kontakt",
+                        "third_message": "Dritter Kontakt",
+                        "asset_followup_1": "Nachfrage eins",
+                        "asset_followup_2": "Nachfrage zwei",
+                        "is_active": True,
+                        "sequence": {
+                            "id": 7,
+                            "campaign_key": "DEGURA_B",
+                            "guide_url": "https://www.degura.de/leitfaden",
+                            "guide_asset_path": "",
+                            "followup_interval_days": 3,
+                            "is_active": True,
+                        },
+                    }
+                ]
+            }
+        )
+        lead = {
+            "sequence_id": 7,
+            "sequence_variant_id": 17,
+            "first_name": "Mia",
+            "company_name": "ACME",
+        }
+
+        result = load_sequence_messages(client, lead)
+
+        self.assertEqual(result["source"], "outreach_sequence_variants")
+        self.assertEqual(result["connect_note"], "Hallo Mia von ACME")
+        self.assertEqual(result["first_message"], "Leitfaden für ACME")
+        self.assertEqual(result["guide_url"], "https://www.degura.de/leitfaden")
+
     def test_fetch_lead_by_id_fallback_preserves_sequence_fields(self):
         client = SelectFallbackClient(
             {

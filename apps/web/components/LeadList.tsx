@@ -117,6 +117,9 @@ const formatStatus = (status?: string | null) => {
 };
 
 const formatLifecycleStatus = (lead: LeadListRow) => {
+  if (lead.campaign_paused) {
+    return "Campaign paused";
+  }
   if (lead.sent_at) {
     if ((lead.sequence_step ?? 0) <= 1) {
       return "First message sent";

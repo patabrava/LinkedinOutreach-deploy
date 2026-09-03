@@ -38,6 +38,7 @@ from auth import (
 
 # Import shared logger
 from credential_crypto import decrypt_password
+from degura_campaign import event_payload, out_of_office_resume, route_degura_reply
 from shared_logger import get_logger
 
 # Load .env from scraper directory explicitly
@@ -436,13 +437,14 @@ def fetch_new_leads(
         .select("id, linkedin_url, first_name, last_name, company_name")
         .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .eq("status", "NEW")
-        .limit(limit)
+        .eq("campaign_paused", False)
     )
 
     if outreach_mode:
         query = query.eq("outreach_mode", outreach_mode)
     if sequence_id is not None:
         query = query.eq("sequence_id", sequence_id)
+    query = query.order("source_last_activity_at", desc=True, nullsfirst=False).order("created_at", desc=False).limit(limit)
 
     resp = query.execute()
     leads = [Lead(**row) for row in resp.data or []]
@@ -472,11 +474,12 @@ def fetch_pending_leads_for_intent(
         .select("id, linkedin_url, first_name, last_name, company_name, batch_id, lead_batches!inner(batch_intent)")
         .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .eq("status", "NEW")
+        .eq("campaign_paused", False)
         .eq("lead_batches.batch_intent", batch_intent)
-        .limit(limit)
     )
     if batch_id is not None:
         query = query.eq("batch_id", batch_id)
+    query = query.order("source_last_activity_at", desc=True, nullsfirst=False).order("created_at", desc=False).limit(limit)
     response = query.execute()
     rows = response.data or []
     logger.db_result("select", "leads", {"status": "NEW", "batch_intent": batch_intent, "limit": limit}, len(rows))
@@ -2652,6 +2655,40 @@ def upsert_followup_for_reply(
         last_message_text: The actual text of the last message in the thread
         last_message_from: Who sent the last message ("us" or "lead")
     """
+    lead_rows = (
+        client.table("leads")
+        .select("id, linkedin_url, sequence_id, sequence_variant_id, sequence_step, linkedin_account_id, sequence:outreach_sequences(campaign_key)")
+        .eq("id", lead_id)
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+        .limit(1)
+        .execute()
+    ).data or []
+    if not lead_rows:
+        raise RuntimeError(f"ACCOUNT_RESOURCE_MISMATCH: Lead {lead_id} is not owned by account {CURRENT_ACCOUNT_ID}")
+    lead = lead_rows[0]
+    sequence = lead.get("sequence") or {}
+    if isinstance(sequence, list):
+        sequence = sequence[0] if sequence else {}
+    is_degura = str(sequence.get("campaign_key") or "").startswith("DEGURA_")
+    decision = route_degura_reply(reply_snippet) if followup_type == "REPLY" and is_degura else None
+    source_touch = int(lead.get("sequence_step") or 0) or None
+
+    if decision and "suppress" in decision.action_order:
+        canonical_url = re.sub(r"[?#].*$", "", str(lead.get("linkedin_url") or "")).rstrip("/").lower()
+        if canonical_url:
+            execute_with_retry(
+                client.table("outbound_suppressions").upsert(
+                    {
+                        "linkedin_url": canonical_url,
+                        "reason": decision.reason,
+                        "source_lead_id": lead_id,
+                        "created_by": "reply-router",
+                    },
+                    on_conflict="linkedin_url",
+                ),
+                desc=f"Suppress replied lead {lead_id}",
+            )
+
     # Determine last_message values if not provided
     if last_message_text is None:
         if reply_snippet:
@@ -2665,10 +2702,15 @@ def upsert_followup_for_reply(
         "reply_id": reply_id,
         "reply_snippet": reply_snippet[:2000] if reply_snippet else None,
         "reply_timestamp": reply_timestamp,
-        "status": "PENDING_REVIEW",
+        "status": "SKIPPED" if decision and decision.route == "out_of_office" else "PENDING_REVIEW",
         "followup_type": followup_type,
         "last_message_text": last_message_text[:2000] if last_message_text else None,
         "last_message_from": last_message_from,
+        "sequence_variant_id": lead.get("sequence_variant_id"),
+        "reply_route": decision.route if decision else None,
+        "requires_human": decision.requires_human if decision else False,
+        "source_touch": source_touch,
+        "handoff_reason": decision.reason if decision and decision.requires_human else None,
     }
     
     insert_resp = execute_with_retry(
@@ -2689,8 +2731,15 @@ def upsert_followup_for_reply(
     }
     if followup_type == "REPLY" and reply_timestamp:
         update_data["last_reply_at"] = reply_timestamp
+        update_data["next_action_at"] = None
+        update_data["stop_reason"] = "reply_received"
+        update_data["human_handoff_required"] = bool(decision and decision.requires_human)
+        update_data["human_handoff_reason"] = decision.reason if decision and decision.requires_human else None
+        if decision and decision.route == "out_of_office":
+            update_data["paused_until"] = out_of_office_resume(datetime.datetime.now(datetime.timezone.utc)).isoformat()
+            update_data["stop_reason"] = "out_of_office_pause"
     update_resp = execute_with_retry(
-        client.table("leads").update(update_data).eq("id", lead_id),
+        client.table("leads").update(update_data).eq("id", lead_id).eq("linkedin_account_id", CURRENT_ACCOUNT_ID),
         desc="Update lead after followup insert",
     )
     if getattr(update_resp, "error", None):
@@ -2700,6 +2749,44 @@ def upsert_followup_for_reply(
             error=getattr(update_resp, "error", None),
         )
         raise RuntimeError(f"Lead update failed for lead {lead_id}: {update_resp.error}")
+
+    if decision:
+        events = [event_payload(
+            account_id=CURRENT_ACCOUNT_ID,
+            lead_id=lead_id,
+            event_type="reply_received",
+            sequence_id=lead.get("sequence_id"),
+            variant_id=lead.get("sequence_variant_id"),
+            touch_number=source_touch,
+            correlation_id=os.getenv("CORRELATION_ID"),
+            metadata={"route": decision.route},
+        )]
+        if decision.requires_human:
+            events.append(event_payload(
+                account_id=CURRENT_ACCOUNT_ID,
+                lead_id=lead_id,
+                event_type="human_handoff",
+                sequence_id=lead.get("sequence_id"),
+                variant_id=lead.get("sequence_variant_id"),
+                touch_number=source_touch,
+                correlation_id=os.getenv("CORRELATION_ID"),
+                metadata={"reason": decision.reason},
+            ))
+        if "suppress" in decision.action_order:
+            events.append(event_payload(
+                account_id=CURRENT_ACCOUNT_ID,
+                lead_id=lead_id,
+                event_type="suppression_created",
+                sequence_id=lead.get("sequence_id"),
+                variant_id=lead.get("sequence_variant_id"),
+                touch_number=source_touch,
+                correlation_id=os.getenv("CORRELATION_ID"),
+                metadata={"reason": decision.reason},
+            ))
+        try:
+            client.table("outreach_events").insert(events).execute()
+        except Exception as exc:
+            logger.warn("Failed to record DEGURA reply routing events", {"lead_id": lead_id}, error=exc)
 
 
 def cancel_active_nudges_for_reply(client: Client, lead_id: str) -> None:

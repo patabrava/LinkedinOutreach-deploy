@@ -4,6 +4,7 @@ import { useRef, useState, DragEvent } from "react";
 import Papa, { type ParseStepResult } from "papaparse";
 
 import { importLeads } from "../app/actions";
+import { normalizeDeguraCsvRecord } from "../lib/deguraCampaign";
 import type { BatchIntent } from "../lib/outreachModes";
 import type { LinkedinAccountSummary } from "../lib/linkedinAccounts";
 
@@ -17,10 +18,14 @@ type Props = {
 const HEADER_ALIASES = [
   "linkedin_url",
   "linkedin url",
+  "linkedin-url",
   "legacy linkedin url",
   "first name",
+  "vorname",
   "last name",
+  "nachname",
   "company name",
+  "unternehmensname",
   "current company",
   "legacy current company",
 ];
@@ -35,7 +40,7 @@ function findHeaderRow(rows: string[][]) {
   );
 }
 
-function rowsToObjects(rows: string[][]) {
+export function csvRowsToLeadRows(rows: string[][]) {
   const headerIndex = findHeaderRow(rows);
   if (headerIndex === -1) {
     return [];
@@ -52,21 +57,12 @@ function rowsToObjects(rows: string[][]) {
         const key = header || `column_${index}`;
         record[key] = row[index]?.trim() || "";
       });
+      const normalized = normalizeDeguraCsvRecord(record);
       return {
-        linkedin_url:
-          record.linkedin_url ||
-          record["LinkedIn URL"] ||
-          record["Legacy LinkedIn URL"] ||
-          record.LinkedIn ||
-          record.linkedin ||
-          "",
-        first_name: record.first_name || record.firstName || record["First Name"] || "",
-        last_name: record.last_name || record.lastName || record["Last Name"] || "",
+        ...normalized,
+        linkedin_url: normalized.linkedin_url || record.linkedin || "",
         company_name:
-          record.company_name ||
-          record["Current Company"] ||
-          record["Legacy Current Company"] ||
-          record.Company ||
+          normalized.company_name ||
           record.company ||
           record.organization_name ||
           record.organization ||
@@ -131,7 +127,7 @@ export function CSVUploader({
             ? ((results as { data?: string[][] }).data ?? [])
             : [];
           const sourceRows = parsedRows.length ? parsedRows : fallbackRows;
-          const rows = Array.isArray(sourceRows[0]) ? rowsToObjects(sourceRows) : [];
+          const rows = Array.isArray(sourceRows[0]) ? csvRowsToLeadRows(sourceRows) : [];
           if (!rows.length) {
             setStatus("NO LEADS FOUND. CHECK THE HEADER ROW.");
             setProgress({ current: 0, total: 0, phase: "error" });

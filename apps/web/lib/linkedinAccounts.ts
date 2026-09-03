@@ -13,6 +13,8 @@ export type LinkedinAccountSummary = {
   daily_message_limit: number;
   is_active: boolean;
   hasPassword: boolean;
+  has_password?: boolean;
+  session_active?: boolean;
   isPrimary: boolean;
 };
 

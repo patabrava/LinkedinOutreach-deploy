@@ -539,6 +539,10 @@ def generate_followup(context: Dict[str, Any]) -> Dict[str, Any]:
         Dictionary with message, message_type, tone
     """
     if _is_reply_context(context):
+        if bool(context.get("requires_human")):
+            raise ValueError(
+                f"HUMAN_HANDOFF_REQUIRED: {context.get('handoff_reason') or context.get('reply_route') or 'manual review'}"
+            )
         logger.debug("Generating Gemini reply draft", data={
             "followup_id": context.get("followup_id"),
             "has_reply": bool(context.get("reply_snippet") or context.get("last_message_text")),

@@ -1,6 +1,7 @@
 "use server";
 
 import { spawn } from "child_process";
+import fs from "node:fs";
 import path from "path";
 
 import { revalidatePath } from "next/cache";
@@ -8,11 +9,23 @@ import { revalidatePath } from "next/cache";
 import { logger } from "../lib/logger";
 import { encryptLinkedinPassword } from "../lib/credentialCrypto";
 import { requireLinkedinAccountId, type LinkedinAccountSummary } from "../lib/linkedinAccounts";
+import { readLinkedinAuthStatus } from "../lib/linkedinAuthSession";
 import { isVisibleFollowup } from "../lib/followupVisibility";
 import type { BatchIntent, OutreachMode } from "../lib/outreachModes";
 import { BATCH_INTENT_LABELS, normalizeBatchIntent, normalizeOutreachMode, OUTREACH_MODE_TO_DB } from "../lib/outreachModes";
 import type { PromptType } from "../lib/promptTypes";
 import { validateSequencePlaceholdersByField } from "../lib/sequencePlaceholders";
+import {
+  buildDeguraReplyDraft,
+  canonicalizeLinkedinUrl,
+  distributeDeguraLeads,
+  groupDeguraRowsByFamily,
+  previewDeguraRows,
+  validateCampaignReadiness,
+  validateGuidePdfBytes,
+  type DeguraCampaignFamily,
+} from "../lib/deguraCampaign";
+import { aggregateDeguraEvents } from "../lib/deguraAnalytics";
 import { isSupabaseAdminConfigured, supabaseAdmin } from "../lib/supabaseAdmin";
 import { trackWorkerChild, type WorkerKind } from "../lib/workerControl";
 
@@ -48,6 +61,7 @@ export type LinkedinCredentialSummary = {
   daily_message_limit?: number;
   is_active?: boolean;
   hasPassword: boolean;
+  session_active?: boolean;
 };
 
 export type LinkedinCredentialState = {
@@ -358,6 +372,9 @@ export type LeadListRow = {
   sequence_id?: number | null;
   sequence_name?: string | null;
   sequence_step?: number | null;
+  campaign_paused?: boolean;
+  source_sequence_id?: string | null;
+  source_last_activity_at?: string | null;
   sent_at?: string | null;
   connection_sent_at?: string | null;
   connection_accepted_at?: string | null;
@@ -402,9 +419,10 @@ export async function fetchLeadList(
     let query = client
       .from("leads")
       .select(
-        "id, linkedin_url, first_name, last_name, company_name, status, batch_id, sequence_id, sequence_step, sent_at, connection_sent_at, connection_accepted_at, followup_count, last_reply_at, created_at, updated_at, profile_data, recent_activity, batch:lead_batches(id, name, sequence_id), sequence:outreach_sequences(id, name)",
+        "id, linkedin_url, first_name, last_name, company_name, status, batch_id, sequence_id, sequence_step, campaign_paused, source_sequence_id, source_last_activity_at, sent_at, connection_sent_at, connection_accepted_at, followup_count, last_reply_at, created_at, updated_at, profile_data, recent_activity, batch:lead_batches(id, name, sequence_id), sequence:outreach_sequences(id, name)",
         { count: "exact" }
       )
+      .order("source_last_activity_at", { ascending: false, nullsFirst: false })
       .order("created_at", { ascending: false });
 
     // Apply optional filters
@@ -455,6 +473,9 @@ export async function fetchLeadList(
         sequence_id: lead.sequence_id ?? sequence?.id ?? null,
         sequence_name: sequence?.name || null,
         sequence_step: lead.sequence_step ?? 0,
+        campaign_paused: lead.campaign_paused === true,
+        source_sequence_id: lead.source_sequence_id || null,
+        source_last_activity_at: lead.source_last_activity_at || null,
         sent_at: lead.sent_at || null,
         connection_sent_at: lead.connection_sent_at || null,
         connection_accepted_at: lead.connection_accepted_at || null,
@@ -490,6 +511,20 @@ export type OutreachSequenceRow = {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  variants?: OutreachSequenceVariantRow[];
+};
+
+export type OutreachSequenceVariantRow = {
+  id: number;
+  sequence_id: number;
+  variant_key: number;
+  connect_note: string;
+  first_message: string;
+  second_message: string;
+  third_message: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
 };
 
 export type LeadBatchRow = {
@@ -515,7 +550,10 @@ export async function fetchOutreachSequences(): Promise<OutreachSequenceRow[]> {
   if (error) {
     throw error;
   }
-  return (data || []) as OutreachSequenceRow[];
+  return (data || []).map((row: any) => ({
+    ...row,
+    variants: row.outreach_sequence_variants || [],
+  })) as OutreachSequenceRow[];
 }
 
 export async function fetchLeadBatches(): Promise<LeadBatchRow[]> {
@@ -715,6 +753,50 @@ export async function saveOutreachSequence(input: {
   return data as OutreachSequenceRow;
 }
 
+export async function saveOutreachSequenceVariant(input: {
+  id: number;
+  sequence_id: number;
+  variant_key: number;
+  connect_note: string;
+  first_message: string;
+  second_message: string;
+  third_message: string;
+}) {
+  const payload = {
+    connect_note: input.connect_note.trim(),
+    first_message: input.first_message.trim(),
+    second_message: input.second_message.trim(),
+    third_message: input.third_message.trim(),
+  };
+  const placeholderValidation = validateSequencePlaceholdersByField(payload);
+  if (!placeholderValidation.isValid) {
+    throw new Error(JSON.stringify({
+      code: "SEQUENCE_PLACEHOLDER_VALIDATION_FAILED",
+      message: "Sequence contains unsupported placeholders.",
+      field_errors: placeholderValidation.errors.map((entry) => ({
+        field: entry.fieldKey,
+        invalid_tokens: entry.invalidTokens,
+        allowed_tokens: entry.allowedTokens,
+      })),
+      allowed_tokens: placeholderValidation.allowedTokens,
+    }));
+  }
+
+  const client = supabaseAdmin();
+  const { data, error } = await client
+    .from("outreach_sequence_variants")
+    .update(payload)
+    .eq("id", input.id)
+    .eq("sequence_id", input.sequence_id)
+    .eq("variant_key", input.variant_key)
+    .select("id, sequence_id, variant_key, connect_note, first_message, second_message, third_message, is_active, created_at, updated_at")
+    .single();
+  if (error) throw error;
+  revalidatePath("/");
+  revalidatePath("/leads");
+  return data as OutreachSequenceVariantRow;
+}
+
 export async function assignBatchToSequence(batchId: number, sequenceId: number) {
   const client = supabaseAdmin();
   const [{ data: batch, error: batchFetchError }, { data: sequence, error: sequenceFetchError }] = await Promise.all([
@@ -826,10 +908,12 @@ export async function fetchFollowups(statuses: Array<FollowupRow["status"]> = ["
 export async function approveFollowup(followupId: string, draftText: string) {
   const client = supabaseAdmin();
   // Set draft text and mark APPROVED
-  const { error } = await client
+  const { data: approvedFollowup, error } = await client
     .from("followups")
     .update({ status: "APPROVED", draft_text: draftText })
-    .eq("id", followupId);
+    .eq("id", followupId)
+    .select("linkedin_account_id")
+    .single();
   if (error) {
     console.error("approveFollowup error", error);
     throw error;
@@ -845,7 +929,8 @@ export async function approveFollowup(followupId: string, draftText: string) {
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-    const args = [senderPath, "--followup", "--followup-id", followupId, "--account-id", accountId];
+    const args = [senderPath, "--followup", "--followup-id", followupId];
+    args.push("--account-id", accountId);
     spawnTrackedWorker({
       execPath: execToUse,
       args,
@@ -884,7 +969,7 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
     // Fetch followup with lead data
     const { data: followup, error: fetchError } = await client
       .from("followups")
-      .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, profile_data, sequence_id, batch_id, sequence:outreach_sequences(id, name, connect_note, first_message, second_message, third_message), batch:lead_batches(id, sequence_id, sequence:outreach_sequences(id, name, connect_note, first_message, second_message, third_message)))")
+      .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, profile_data, sequence_id, batch_id, sequence:outreach_sequences(id, name, campaign_key, tone, booking_url, privacy_url, guide_url, connect_note, first_message, second_message, third_message), batch:lead_batches(id, sequence_id, sequence:outreach_sequences(id, name, campaign_key, tone, booking_url, privacy_url, guide_url, connect_note, first_message, second_message, third_message)))")
       .eq("id", followupId)
       .single();
 
@@ -921,6 +1006,29 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
     const batchSequence = Array.isArray(batch?.sequence) ? batch.sequence[0] : batch?.sequence;
     const sequence = leadSequence || batchSequence || null;
 
+    if (followup.requires_human) {
+      return { success: false, error: `HUMAN_HANDOFF_REQUIRED: ${followup.handoff_reason || followup.reply_route || "manual review"}` };
+    }
+
+    if (sequence?.campaign_key && followup.reply_route) {
+      const formal = sequence.tone === "sie";
+      const deterministicDraft = buildDeguraReplyDraft({
+        route: String(followup.reply_route),
+        formal,
+        bookingUrl: String(sequence.booking_url || ""),
+        guideUrl: String(sequence.guide_url || ""),
+      });
+      if (deterministicDraft) {
+        const { error: draftError } = await client
+          .from("followups")
+          .update({ draft_text: deterministicDraft, last_error: null })
+          .eq("id", followupId);
+        if (draftError) return { success: false, error: draftError.message };
+        revalidatePath("/followups");
+        return { success: true, draft: deterministicDraft };
+      }
+    }
+
     // Spawn the followup agent
     const repoRoot = path.resolve(process.cwd(), "..", "..");
     const agentDir = path.resolve(repoRoot, "mcp-server");
@@ -955,6 +1063,10 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
       // New: last message tracking for proper sender attribution
       last_message_text: followup.last_message_text || null,
       last_message_from: followup.last_message_from || null,
+      reply_route: followup.reply_route || null,
+      requires_human: Boolean(followup.requires_human),
+      handoff_reason: followup.handoff_reason || null,
+      source_touch: followup.source_touch || null,
     };
 
     // Write context to temp file for the agent to read
@@ -1059,7 +1171,8 @@ export async function generateAllFollowupDrafts(): Promise<{
       .from("followups")
       .select("id, draft_text")
       .eq("status", "PENDING_REVIEW")
-      .eq("followup_type", "REPLY");
+      .eq("followup_type", "REPLY")
+      .eq("requires_human", false);
 
     if (fetchError) {
       logger.error("Failed to fetch followups for bulk draft generation", { correlationId }, fetchError);
@@ -1147,7 +1260,7 @@ export async function retryFollowup(followupId: string) {
   revalidatePath("/followups");
 }
 
-export async function triggerInboxScan() {
+export async function triggerInboxScan(accountValue?: string | FormData) {
   // Fire-and-forget execution of scraper in inbox mode
   try {
     const repoRoot = path.resolve(process.cwd(), "..", "..");
@@ -1157,7 +1270,10 @@ export async function triggerInboxScan() {
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-    const { data: accounts, error } = await supabaseAdmin().from("linkedin_accounts").select("id").eq("is_active", true);
+    const requestedAccountId = typeof accountValue === "string" ? requireLinkedinAccountId(accountValue) : null;
+    let accountQuery = supabaseAdmin().from("linkedin_accounts").select("id").eq("is_active", true);
+    if (requestedAccountId) accountQuery = accountQuery.eq("id", requestedAccountId);
+    const { data: accounts, error } = await accountQuery;
     if (error) throw error;
     for (const account of accounts || []) {
       const accountId = requireLinkedinAccountId(account.id);
@@ -1229,7 +1345,7 @@ export async function approveAndSendAllFollowups() {
       .from("followups")
       .update({ status: "APPROVED" })
       .in("id", ids)
-      .select("id");
+      .select("id, linkedin_account_id");
 
     if (updateError) {
       logger.error("Failed to bulk approve followups", { correlationId }, updateError);
@@ -1241,8 +1357,9 @@ export async function approveAndSendAllFollowups() {
     // 3. Trigger sender worker
     let triggered = false;
     if (approvedCount > 0) {
-      await triggerFollowupSender();
-      triggered = true;
+      const accountIds = [...new Set((updatedData || []).map((row) => row.linkedin_account_id).filter(Boolean))];
+      await Promise.all(accountIds.map((accountId) => triggerFollowupSender(accountId)));
+      triggered = accountIds.length > 0;
     }
 
     revalidatePath("/followups");
@@ -1256,7 +1373,7 @@ export async function approveAndSendAllFollowups() {
   }
 }
 
-export async function triggerFollowupSender() {
+export async function triggerFollowupSender(accountValue?: string | FormData) {
   try {
     const repoRoot = path.resolve(process.cwd(), "..", "..");
     const senderDir = path.resolve(repoRoot, "workers", "sender");
@@ -1265,11 +1382,15 @@ export async function triggerFollowupSender() {
     const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
     const pythonExec = process.env.FORCE_SYSTEM_PY === "1" ? pythonBin : venvPython;
     const execToUse = pythonExec;
-    const { data: accounts, error } = await supabaseAdmin().from("linkedin_accounts").select("id").eq("is_active", true);
+    const requestedAccountId = typeof accountValue === "string" ? requireLinkedinAccountId(accountValue) : null;
+    let accountQuery = supabaseAdmin().from("linkedin_accounts").select("id").eq("is_active", true);
+    if (requestedAccountId) accountQuery = accountQuery.eq("id", requestedAccountId);
+    const { data: accounts, error } = await accountQuery;
     if (error) throw error;
     for (const account of accounts || []) {
       const accountId = requireLinkedinAccountId(account.id);
-      const args = [senderPath, "--followup", "--account-id", accountId];
+      const args = [senderPath, "--followup"];
+      args.push("--account-id", accountId);
       spawnTrackedWorker({ execPath: execToUse, args, cwd: repoRoot, stdio: "ignore", env: { ...process.env, LINKEDIN_ACCOUNT_ID: accountId }, kind: "sender_followup", label: "Follow-up sender", accountId });
     }
   } catch (err) {
@@ -1552,7 +1673,7 @@ export async function approveAndSendAllDrafts(outreachMode: OutreachMode = "conn
 
     let query = client
       .from("leads")
-      .select("id, drafts(id, opener, body_text, cta_text, cta_type, created_at)")
+      .select("id, linkedin_account_id, drafts(id, opener, body_text, cta_text, cta_type, created_at)")
       .eq("status", draftingStatus)
       .eq("outreach_mode", dbOutreachMode);
 
@@ -1734,7 +1855,167 @@ type LeadCsvRow = {
   first_name?: string;
   last_name?: string;
   company_name?: string;
+  source_contact_id?: string;
+  source_company_id?: string;
+  source_sequence_id?: string;
+  source_last_activity_at?: string;
 };
+
+type AssignedDeguraLead = Required<Pick<LeadCsvRow,
+  "linkedin_url" | "first_name" | "last_name" | "company_name" |
+  "source_contact_id" | "source_company_id" | "source_sequence_id" | "source_last_activity_at"
+>> & {
+  linkedin_account_id: string;
+  sequence_id: number;
+  sequence_variant_id: number;
+  outreach_mode: "connect_message";
+  family: DeguraCampaignFamily;
+};
+
+async function fetchLeadUrlSets(client: ReturnType<typeof supabaseAdmin>, urls: string[]) {
+  const existingUrls = new Set<string>();
+  const suppressedUrls = new Set<string>();
+  for (let offset = 0; offset < urls.length; offset += 200) {
+    const chunk = urls.slice(offset, offset + 200);
+    const [{ data: existing, error: existingError }, { data: suppressions, error: suppressionsError }] = await Promise.all([
+      client.from("leads").select("linkedin_url").in("linkedin_url", chunk),
+      client.from("outbound_suppressions").select("linkedin_url, expires_at").in("linkedin_url", chunk),
+    ]);
+    if (existingError || suppressionsError) throw existingError || suppressionsError;
+    for (const row of existing || []) existingUrls.add(String(row.linkedin_url));
+    for (const row of suppressions || []) {
+      if (!row.expires_at || new Date(row.expires_at).getTime() > Date.now()) suppressedUrls.add(String(row.linkedin_url));
+    }
+  }
+  return { existingUrls, suppressedUrls };
+}
+
+async function resolveDeguraImport(rows: LeadCsvRow[], eligibilityConfirmed: boolean) {
+  const groupedInput = groupDeguraRowsByFamily(rows);
+  const mappedCount = groupedInput.A.length + groupedInput.B.length + groupedInput.C.length;
+  if (mappedCount !== rows.length) {
+    throw new Error(`UNKNOWN_SOURCE_SEQUENCE: ${rows.length - mappedCount} row(s) do not match the approved HubSpot sequence IDs.`);
+  }
+  const campaignStatus = await fetchDeguraCampaignStatus();
+  if (!campaignStatus.ready) throw new Error(`CAMPAIGN_NOT_READY: ${campaignStatus.codes.join(", ")}`);
+  const client = supabaseAdmin();
+  const [{ data: accounts, error: accountsError }, { data: sequences, error: sequencesError }] = await Promise.all([
+    client.from("linkedin_accounts").select("id").eq("is_active", true).order("browser_slot", { ascending: true }),
+    client
+      .from("outreach_sequences")
+      .select("id, campaign_key, outreach_sequence_variants(id, variant_key, is_active)")
+      .in("campaign_key", ["DEGURA_A", "DEGURA_B", "DEGURA_C"])
+      .eq("is_active", true)
+      .order("campaign_key", { ascending: true }),
+  ]);
+  if (accountsError || sequencesError) throw accountsError || sequencesError;
+  if ((accounts || []).length !== 2) throw new Error("TWO_ACTIVE_ACCOUNTS_REQUIRED");
+  if ((sequences || []).length !== 3) throw new Error("ALL_DEGURA_FAMILIES_REQUIRED");
+
+  const canonicalUrls = rows.map((row) => canonicalizeLinkedinUrl(row.linkedin_url)).filter(Boolean);
+  const { existingUrls, suppressedUrls } = await fetchLeadUrlSets(client, canonicalUrls);
+  const preview = previewDeguraRows(rows, {
+    eligibilityConfirmed,
+    existingUrls,
+    suppressedUrls,
+  });
+  const acceptedRows = preview.accepted.map((entry) => ({ ...entry.row, linkedin_url: entry.linkedinUrl })) as LeadCsvRow[];
+  const acceptedByFamily = groupDeguraRowsByFamily(acceptedRows);
+  const assigned: AssignedDeguraLead[] = [];
+  for (const family of ["A", "B", "C"] as DeguraCampaignFamily[]) {
+    const sequence = (sequences || []).find((row: any) => row.campaign_key === `DEGURA_${family}`);
+    if (!sequence) throw new Error(`DEGURA_${family} sequence is missing or inactive.`);
+    const variants = ((sequence as any).outreach_sequence_variants || [])
+      .filter((variant: any) => variant.is_active)
+      .sort((left: any, right: any) => Number(left.variant_key) - Number(right.variant_key));
+    if (variants.length !== 2) throw new Error(`DEGURA_${family} requires exactly two active variants.`);
+    const familyRows = acceptedByFamily[family];
+    const sourceByUrl = new Map(familyRows.map((row) => [String(row.linkedin_url), row]));
+    const distribution = distributeDeguraLeads(
+      familyRows.map((row) => String(row.linkedin_url)),
+      (accounts || []).map((account: any) => account.id),
+      variants.map((variant: any) => Number(variant.id)),
+    );
+    for (const entry of distribution) {
+      const row = sourceByUrl.get(entry.linkedinUrl);
+      assigned.push({
+        linkedin_url: entry.linkedinUrl,
+        first_name: String(row?.first_name || "").trim(),
+        last_name: String(row?.last_name || "").trim(),
+        company_name: String(row?.company_name || "").trim(),
+        source_contact_id: String(row?.source_contact_id || "").trim(),
+        source_company_id: String(row?.source_company_id || "").trim(),
+        source_sequence_id: String(row?.source_sequence_id || "").trim(),
+        source_last_activity_at: String(row?.source_last_activity_at || "").trim(),
+        linkedin_account_id: entry.accountId,
+        sequence_id: Number(sequence.id),
+        sequence_variant_id: entry.variantId,
+        outreach_mode: "connect_message",
+        family,
+      });
+    }
+  }
+  return {
+    client,
+    preview,
+    assigned,
+  };
+}
+
+export async function previewDeguraImport(rows: LeadCsvRow[], eligibilityConfirmed: boolean) {
+  const result = await resolveDeguraImport(rows, eligibilityConfirmed);
+  const byAccount = result.assigned.reduce<Record<string, number>>((counts, row) => {
+    counts[row.linkedin_account_id] = (counts[row.linkedin_account_id] || 0) + 1;
+    return counts;
+  }, {});
+  const byVariant = result.assigned.reduce<Record<string, number>>((counts, row) => {
+    const key = String(row.sequence_variant_id);
+    counts[key] = (counts[key] || 0) + 1;
+    return counts;
+  }, {});
+  const byFamily = result.assigned.reduce<Record<string, number>>((counts, row) => {
+    const key = String(row.family);
+    counts[key] = (counts[key] || 0) + 1;
+    return counts;
+  }, {});
+  return {
+    accepted: result.assigned.length,
+    rejected: result.preview.rejected.map((row) => ({ linkedinUrl: row.linkedinUrl, reason: row.reason })),
+    byAccount,
+    byVariant,
+    byFamily,
+    canImport: result.preview.canCreateBatch,
+  };
+}
+
+export async function importDeguraLeads(
+  rows: LeadCsvRow[],
+  fileName: string,
+  eligibilityConfirmed: boolean,
+) {
+  if (!eligibilityConfirmed) throw new Error("ELIGIBILITY_CONFIRMATION_REQUIRED");
+  const result = await resolveDeguraImport(rows, eligibilityConfirmed);
+  if (!result.preview.canCreateBatch || !result.assigned.length) {
+    throw new Error("No eligible unique leads remained after validation.");
+  }
+  const { data, error } = await result.client.rpc("import_degura_campaign_batches", {
+    p_batch_name: fileName.trim() || "CSV batch",
+    p_eligibility_confirmed_by: "mission-control-operator",
+    p_leads: result.assigned.map(({ family: _family, ...row }) => row),
+  });
+  if (error) throw error;
+  const batches = data || [];
+  revalidatePath("/leads");
+  revalidatePath("/upload");
+  return {
+    inserted: batches.reduce((total: number, batch: any) => total + Number(batch.inserted_count || 0), 0),
+    batches: batches.map((batch: any) => ({
+      batchId: Number(batch.batch_id),
+      sequenceId: Number(batch.sequence_id),
+      inserted: Number(batch.inserted_count),
+    })),
+  };
+}
 
 export async function importLeads(
   rows: LeadCsvRow[],
@@ -1847,18 +2128,118 @@ export async function fetchLinkedinAccounts(): Promise<LinkedinAccountSummary[]>
     .order("created_at", { ascending: true });
 
   if (error) throw error;
-  return (data || []).map((row: any, index: number) => ({
-    id: row.id,
-    label: row.label,
-    email: row.email || "",
-    display_name: row.display_name || "",
-    browser_slot: row.browser_slot === 2 ? 2 : 1,
-    daily_invite_limit: row.daily_invite_limit || 50,
-    daily_message_limit: row.daily_message_limit || 50,
-    is_active: row.is_active !== false,
-    hasPassword: Boolean(row.credentials?.password || row.credentials?.password_encrypted),
-    isPrimary: index === 0,
-  }));
+  return (data || []).map((row: any, index: number) => {
+    const hasPassword = Boolean(row.credentials?.password || row.credentials?.password_encrypted);
+    const authStatus = readLinkedinAuthStatus(row.id);
+    return {
+      id: row.id,
+      label: row.label,
+      email: row.email || "",
+      display_name: row.display_name || "",
+      browser_slot: row.browser_slot === 2 ? 2 : 1,
+      daily_invite_limit: row.daily_invite_limit || 50,
+      daily_message_limit: row.daily_message_limit || 50,
+      is_active: row.is_active !== false,
+      hasPassword,
+      has_password: hasPassword,
+      session_active: authStatus.session_state === "session_active",
+      isPrimary: index === 0,
+    };
+  });
+}
+
+export async function fetchDeguraCampaignStatus() {
+  const client = supabaseAdmin();
+  const accounts = await fetchLinkedinAccounts();
+  const { data: sequences, error } = await client
+    .from("outreach_sequences")
+    .select("id, campaign_key, booking_url, privacy_url, guide_url, guide_asset_path, is_active, outreach_sequence_variants(id, is_active)")
+    .in("campaign_key", ["DEGURA_A", "DEGURA_B", "DEGURA_C"])
+    .order("campaign_key", { ascending: true });
+  if (error) throw error;
+  const active = (sequences || []).filter((sequence: any) => sequence.is_active);
+  const variantCount = active.reduce(
+    (count: number, sequence: any) => count + (sequence.outreach_sequence_variants || []).filter((variant: any) => variant.is_active).length,
+    0,
+  );
+  const singleValue = (field: string) => {
+    const values = new Set(active.map((sequence: any) => String(sequence[field] || "")));
+    return values.size === 1 ? [...values][0] : "";
+  };
+  const bookingUrl = singleValue("booking_url");
+  const privacyUrl = singleValue("privacy_url");
+  const guideAssetPath = singleValue("guide_asset_path");
+  const guideUrl = singleValue("guide_url");
+  let guideAssetPresent = false;
+  try {
+    if (guideAssetPath) guideAssetPresent = validateGuidePdfBytes(fs.readFileSync(guideAssetPath));
+  } catch {
+    guideAssetPresent = false;
+  }
+  const readiness = validateCampaignReadiness({ accounts, variantCount, bookingUrl, privacyUrl, guideUrl, guideAssetPresent });
+  return { ...readiness, accounts, variantCount, bookingUrl, privacyUrl, guideUrl, guideAssetPath };
+}
+
+export async function fetchDeguraEventAnalytics(days = 30, accountId?: string, variantId?: number) {
+  const safeDays = [7, 30, 90].includes(days) ? days : 30;
+  const since = new Date(Date.now() - safeDays * 24 * 60 * 60 * 1000).toISOString();
+  let query = supabaseAdmin()
+    .from("outreach_events")
+    .select("linkedin_account_id, sequence_variant_id, event_type")
+    .gte("occurred_at", since)
+    .order("occurred_at", { ascending: false })
+    .limit(10000);
+  if (accountId) query = query.eq("linkedin_account_id", requireLinkedinAccountId(accountId));
+  if (variantId && Number.isInteger(variantId)) query = query.eq("sequence_variant_id", variantId);
+  const { data, error } = await query;
+  if (error) throw error;
+  return aggregateDeguraEvents(data || []);
+}
+
+export type DeguraCampaignSettingsState = { success: boolean; error?: string };
+
+export async function saveDeguraCampaignSettings(
+  _previous: DeguraCampaignSettingsState,
+  formData: FormData,
+): Promise<DeguraCampaignSettingsState> {
+  const bookingUrl = String(formData.get("booking_url") || "").trim();
+  const privacyUrl = String(formData.get("privacy_url") || "").trim();
+  const guideUrl = String(formData.get("guide_url") || "").trim();
+  try {
+    if ([bookingUrl, privacyUrl, guideUrl].some((value) => new URL(value).protocol !== "https:")) {
+      return { success: false, error: "Booking, guide, and privacy URLs must use HTTPS." };
+    }
+  } catch {
+    return { success: false, error: "Booking, guide, and privacy URLs must be valid HTTPS URLs." };
+  }
+
+  const client = supabaseAdmin();
+  const { data: sequences, error: sequenceError } = await client
+    .from("outreach_sequences")
+    .select("id, guide_asset_path")
+    .in("campaign_key", ["DEGURA_A", "DEGURA_B", "DEGURA_C"]);
+  if (sequenceError || (sequences || []).length !== 3) {
+    return { success: false, error: "All three DEGURA campaign families must exist before configuration." };
+  }
+
+  let guideAssetPath = String(sequences?.[0]?.guide_asset_path || "");
+  const upload = formData.get("guide_pdf");
+  if (upload instanceof File && upload.size > 0) {
+    const bytes = new Uint8Array(await upload.arrayBuffer());
+    if (!validateGuidePdfBytes(bytes)) return { success: false, error: "Guide must be a readable PDF no larger than 10 MB." };
+    const assetRoot = fs.existsSync("/data") ? "/data/campaign-assets" : path.join(process.cwd(), ".campaign-assets");
+    fs.mkdirSync(assetRoot, { recursive: true, mode: 0o700 });
+    guideAssetPath = path.join(assetRoot, "degura-guide.pdf");
+    fs.writeFileSync(guideAssetPath, bytes, { mode: 0o600 });
+  }
+  const { error } = await client
+    .from("outreach_sequences")
+    .update({ booking_url: bookingUrl, privacy_url: privacyUrl, guide_url: guideUrl, guide_asset_path: guideAssetPath || null })
+    .in("campaign_key", ["DEGURA_A", "DEGURA_B", "DEGURA_C"]);
+  if (error) return { success: false, error: error.message };
+  revalidatePath("/settings");
+  revalidatePath("/upload");
+  return { success: true };
 }
 
 export async function saveLinkedinAccount(
