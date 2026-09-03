@@ -152,7 +152,7 @@ export function canonicalizeLinkedinUrl(value: unknown): string {
     const encodedSlug = encodeURIComponent(slug).replace(/[!'()*]/g, (character) =>
       `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
     );
-    return `https://www.linkedin.com/in/${encodedSlug}`;
+    return `https://www.linkedin.com/in/${encodedSlug.toLowerCase()}`;
   } catch {
     return "";
   }

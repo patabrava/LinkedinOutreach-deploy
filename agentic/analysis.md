@@ -2,7 +2,7 @@
 
 ## Goal and State
 
-Deploy the production DEGURA A/B/C campaign from `degura-linkedin-sequenzen.md`, import the mixed HubSpot export under `new_leads/`, preserve CRM source tracking, route documented replies, and retain two-account isolation. Production schema/configuration is migrated. A deployment preflight exposed an unsafe auto-worker entrypoint and stale Chromium profile locks; the VPS project is stopped while those corrections are validated. The paused real-data import remains. No outreach event was recorded during the short preflight window and no campaign message was sent.
+Deploy the production DEGURA A/B/C campaign from `degura-linkedin-sequenzen.md`, import the mixed HubSpot export under `new_leads/`, preserve CRM source tracking, route documented replies, and retain two-account isolation. Production schema/configuration is migrated and 4,028 accepted leads are imported in three paused batches. The app and both account browser containers are healthy with background workers explicitly disabled. No outreach event was recorded and no campaign message was sent.
 
 ## Confirmed Contract
 
@@ -27,8 +27,9 @@ Deploy the production DEGURA A/B/C campaign from `degura-linkedin-sequenzen.md`,
 - Full acceptance command: `./agentic/testscripts/two-account-degura-smoke.sh`; result: `PASS: two-account DEGURA non-sending regression block`.
 - The same acceptance block now also builds and boots the remote-browser image against deliberately stale Chromium singleton links, verifies CDP port readiness, and asserts production remains web-only without explicit worker opt-in.
 - A production dry-run confirmed Unicode LinkedIn profile slugs are safely canonicalized and the accepted allocation is balanced 2,015 / 2,013 across slots before atomic import.
+- Production readback confirms batches 30/31/32 contain 2,087/985/956 leads; all 4,028 rows are `NEW`, all are campaign-paused, all contain a company, A/B/C variants are split 1,044/1,043, 493/492, and 478/478, and the imported cohort has zero outreach events.
 - Production migrations 021 and 022 are applied. Readback confirms two active account slots, six active variants, 50/50 limits, all three campaign URLs, and the atomic import RPC.
 
 ## Remaining Work
 
-Publish and deploy the cross-architecture Chromium and Unicode URL corrections, verify the healthy production UI and two remote browser processes, import the 4,028 accepted rows paused, and read back exact family/account/variant counts plus zero outbound activity. Before launch, replace the configured guide URL: live readback currently resolves it to a DEGURA event page rather than the promised guide.
+Publish and deploy the final lowercase percent-encoding correction and verify the public production surface. Before launch, replace the configured guide URL: live readback currently resolves it to a DEGURA event page rather than the promised guide. Authenticated UI verification requires an operator magic-link session.

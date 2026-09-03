@@ -20,7 +20,7 @@ test("canonicalizes LinkedIn profile URLs for global dedupe", () => {
   );
   assert.equal(
     canonicalizeLinkedinUrl("https://linkedin.com/in/J%C3%B6rg-M%C3%BCller/"),
-    "https://www.linkedin.com/in/j%C3%B6rg-m%C3%BCller",
+    "https://www.linkedin.com/in/j%c3%b6rg-m%c3%bcller",
   );
   assert.equal(canonicalizeLinkedinUrl("https://linkedin.com/in/not%2Fa-profile"), "");
 });
