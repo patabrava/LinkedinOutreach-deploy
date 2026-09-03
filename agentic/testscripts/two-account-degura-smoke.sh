@@ -20,6 +20,7 @@ PYTHONPATH=workers python3 -m unittest \
   lib/deguraCampaign.test.ts lib/deguraAnalytics.test.ts \
   lib/deguraPerformanceReport.test.ts lib/followupReplyIntent.test.ts \
   lib/followupVisibility.test.ts lib/senderMessageOnlyHealth.test.ts \
+  lib/linkedinBrowserControl.test.ts \
   lib/sequenceConnectNote.test.ts lib/sequenceContent.test.ts \
   lib/sequenceRender.test.ts lib/settingsData.test.ts lib/workerControl.test.ts)
 (cd apps/web && node --test lib/*.test.mjs)

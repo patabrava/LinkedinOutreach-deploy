@@ -60,7 +60,9 @@ services:
       traefik.http.routers.linkedin-browser-1.entrypoints: websecure
       traefik.http.routers.linkedin-browser-1.tls: "true"
       traefik.http.routers.linkedin-browser-1.tls.certresolver: letsencrypt
-      traefik.http.routers.linkedin-browser-1.middlewares: linkedin-browser-1-strip
+      traefik.http.routers.linkedin-browser-1.middlewares: linkedin-browser-auth,linkedin-browser-1-strip
+      traefik.http.middlewares.linkedin-browser-auth.forwardauth.address: http://app:3000/api/traefik-auth
+      traefik.http.middlewares.linkedin-browser-auth.forwardauth.trustForwardHeader: "true"
       traefik.http.middlewares.linkedin-browser-1-strip.stripprefix.prefixes: /linkedin-browser-1
       traefik.http.services.linkedin-browser-1.loadbalancer.server.port: "6080"
     healthcheck:
@@ -92,7 +94,7 @@ services:
       traefik.http.routers.linkedin-browser-2.entrypoints: websecure
       traefik.http.routers.linkedin-browser-2.tls: "true"
       traefik.http.routers.linkedin-browser-2.tls.certresolver: letsencrypt
-      traefik.http.routers.linkedin-browser-2.middlewares: linkedin-browser-2-strip
+      traefik.http.routers.linkedin-browser-2.middlewares: linkedin-browser-auth,linkedin-browser-2-strip
       traefik.http.middlewares.linkedin-browser-2-strip.stripprefix.prefixes: /linkedin-browser-2
       traefik.http.services.linkedin-browser-2.loadbalancer.server.port: "6080"
     healthcheck:

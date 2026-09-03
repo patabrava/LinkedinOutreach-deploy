@@ -2,7 +2,7 @@
 
 ## Goal and State
 
-Deploy the production DEGURA A/B/C campaign from `degura-linkedin-sequenzen.md`, import the mixed HubSpot export under `new_leads/`, preserve CRM source tracking, route documented replies, and retain two-account isolation. Production schema/configuration is migrated and 4,028 accepted leads are imported in three paused batches. The app and both account browser containers are healthy with background workers explicitly disabled. No outreach event was recorded and no campaign message was sent.
+Deploy the production DEGURA A/B/C campaign from `degura-linkedin-sequenzen.md`, import the mixed HubSpot export under `new_leads/`, preserve CRM source tracking, route documented replies, and retain two-account isolation. Production schema/configuration is migrated and 4,028 accepted leads are imported in three paused batches. The app and both account browser containers are healthy with background workers explicitly disabled. Live noVNC inspection shows both production browser profiles at LinkedIn login, so launch remains blocked on two account sign-ins. No outreach event was recorded and no campaign message was sent.
 
 ## Confirmed Contract
 
@@ -32,4 +32,4 @@ Deploy the production DEGURA A/B/C campaign from `degura-linkedin-sequenzen.md`,
 
 ## Remaining Work
 
-Publish and deploy the final lowercase percent-encoding correction and verify the public production surface. Before launch, replace the configured guide URL: live readback currently resolves it to a DEGURA event page rather than the promised guide. Authenticated UI verification requires an operator magic-link session.
+Publish and deploy the authenticated noVNC proxy-path correction, then verify anonymous browser routes fail closed and the public login remains healthy. Before launch, sign in both production LinkedIn browser slots and replace the configured guide URL: live readback currently resolves it to a DEGURA event page rather than the promised guide. Authenticated UI verification requires an operator magic-link session.

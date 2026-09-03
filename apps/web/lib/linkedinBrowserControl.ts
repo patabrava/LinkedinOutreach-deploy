@@ -8,7 +8,8 @@ import { isSupabaseAuthConfigured } from "./authConfig";
 import { logger } from "./logger";
 import { supabaseRouteHandler } from "./supabaseServer";
 
-const remoteBrowserPath = (slot: 1 | 2) => `/linkedin-browser-${slot}/vnc.html?autoconnect=1&resize=remote`;
+export const remoteBrowserPath = (slot: 1 | 2) =>
+  `/linkedin-browser-${slot}/vnc.html?autoconnect=1&resize=remote&path=linkedin-browser-${slot}%2Fwebsockify`;
 const localRemoteBrowserUrl = (slot: 1 | 2) => `http://127.0.0.1:${slot === 1 ? 6080 : 6081}/vnc.html?autoconnect=1&resize=remote`;
 
 const resolveScraperDir = () => {
