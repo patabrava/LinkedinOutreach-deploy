@@ -147,9 +147,12 @@ export function canonicalizeLinkedinUrl(value: unknown): string {
     if (hostname !== "linkedin.com") return "";
     const profileMatch = parsed.pathname.match(/^\/in\/([^/?#]+)\/?$/i);
     if (!profileMatch) return "";
-    const slug = decodeURIComponent(profileMatch[1]).trim().toLowerCase();
-    if (!slug || !/^[a-z0-9%_.~-]+$/i.test(slug)) return "";
-    return `https://www.linkedin.com/in/${encodeURIComponent(slug).replace(/%25/g, "%")}`;
+    const slug = decodeURIComponent(profileMatch[1]).trim().normalize("NFKC").toLowerCase();
+    if (!slug || /[\u0000-\u001f\u007f\s/?#]/u.test(slug)) return "";
+    const encodedSlug = encodeURIComponent(slug).replace(/[!'()*]/g, (character) =>
+      `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+    );
+    return `https://www.linkedin.com/in/${encodedSlug}`;
   } catch {
     return "";
   }

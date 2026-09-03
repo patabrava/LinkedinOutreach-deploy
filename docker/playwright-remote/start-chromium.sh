@@ -10,18 +10,9 @@ find "${CHROME_USER_DATA_DIR}" -maxdepth 1 \
   \( -name 'SingletonCookie' -o -name 'SingletonLock' -o -name 'SingletonSocket' \) \
   -delete
 
-CHROMIUM_BIN=""
-
-if [[ -x /ms-playwright/chromium/chrome-linux/chrome ]]; then
-  CHROMIUM_BIN="/ms-playwright/chromium/chrome-linux/chrome"
-else
-  CHROMIUM_BIN="$(find /ms-playwright /usr/bin -type f \
-    \( -path '*/chrome-linux/chrome' -o -name 'chromium' -o -name 'chromium-browser' \) \
-    2>/dev/null | sort | head -n 1 || true)"
-fi
-
-if [[ -z "${CHROMIUM_BIN}" ]]; then
-  echo "chromium executable not found" >&2
+CHROMIUM_BIN="/usr/local/bin/chromium-runtime"
+if [[ ! -x "${CHROMIUM_BIN}" ]]; then
+  echo "build-validated chromium executable is unavailable" >&2
   exit 1
 fi
 

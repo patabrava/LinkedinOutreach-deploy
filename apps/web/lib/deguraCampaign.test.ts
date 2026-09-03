@@ -18,6 +18,11 @@ test("canonicalizes LinkedIn profile URLs for global dedupe", () => {
     canonicalizeLinkedinUrl(" http://www.linkedin.com/in/Camilo-Test/?trk=foo "),
     "https://www.linkedin.com/in/camilo-test",
   );
+  assert.equal(
+    canonicalizeLinkedinUrl("https://linkedin.com/in/J%C3%B6rg-M%C3%BCller/"),
+    "https://www.linkedin.com/in/j%C3%B6rg-m%C3%BCller",
+  );
+  assert.equal(canonicalizeLinkedinUrl("https://linkedin.com/in/not%2Fa-profile"), "");
 });
 
 test("accepts only a PDF signature within the asset size boundary", () => {
