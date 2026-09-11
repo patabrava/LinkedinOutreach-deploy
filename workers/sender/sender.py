@@ -12,6 +12,7 @@ import re
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
@@ -58,6 +59,7 @@ load_runtime_env()
 logger = get_logger("sender")
 CURRENT_ACCOUNT_ID = os.getenv("LINKEDIN_ACCOUNT_ID", "").strip()
 CURRENT_ACCOUNT_DISPLAY_NAME = ""
+CURRENT_ACCOUNT_BROWSER_SLOT = 0
 CURRENT_DAILY_INVITE_LIMIT = DAILY_SEND_DEFAULT if "DAILY_SEND_DEFAULT" in globals() else 50
 CURRENT_DAILY_MESSAGE_LIMIT = DAILY_SEND_DEFAULT if "DAILY_SEND_DEFAULT" in globals() else 50
 
@@ -100,11 +102,24 @@ FOLLOWUP_PROCESSING_STALE_MINUTES = 45
 FOLLOWUP_RECENT_SEND_SUPPRESSION_HOURS = 48
 NUDGE_ACTIVE_STATUSES = {"APPROVED", "PROCESSING", "RETRY_LATER"}
 OWN_SENDER_NAME_DEFAULTS = ("Katharina Hoffmann",)
+DEGURA_UTM_CAMPAIGN = {
+    "DEGURA_A": "degura_a_837149883",
+    "DEGURA_B": "degura_b_836545727",
+    "DEGURA_C": "degura_c_837149889",
+}
+DEGURA_MESSAGE_UTM_CONTEXT = {
+    "connect_note": "touch1",
+    "first_message": "touch2",
+    "second_message": "touch3",
+    "third_message": "touch4",
+    "asset_followup_1": "asset_followup1",
+    "asset_followup_2": "asset_followup2",
+}
 
 
 def configure_runtime_account(client: Client, account_id: str) -> None:
     global CURRENT_ACCOUNT_ID, CURRENT_ACCOUNT_DISPLAY_NAME, CURRENT_DAILY_INVITE_LIMIT
-    global CURRENT_DAILY_MESSAGE_LIMIT, AUTH_STATE_PATH
+    global CURRENT_ACCOUNT_BROWSER_SLOT, CURRENT_DAILY_MESSAGE_LIMIT, AUTH_STATE_PATH
     try:
         CURRENT_ACCOUNT_ID = str(uuid.UUID(account_id))
     except ValueError as exc:
@@ -113,7 +128,7 @@ def configure_runtime_account(client: Client, account_id: str) -> None:
     AUTH_STATE_PATH = _resolve_scraper_auth_path()
     response = (
         client.table("linkedin_accounts")
-        .select("display_name, daily_invite_limit, daily_message_limit, is_active")
+        .select("display_name, browser_slot, daily_invite_limit, daily_message_limit, is_active")
         .eq("id", CURRENT_ACCOUNT_ID)
         .single()
         .execute()
@@ -122,6 +137,7 @@ def configure_runtime_account(client: Client, account_id: str) -> None:
     if not account or account.get("is_active") is False:
         raise RuntimeError("LinkedIn account was not found or is disabled.")
     CURRENT_ACCOUNT_DISPLAY_NAME = str(account.get("display_name") or "").strip()
+    CURRENT_ACCOUNT_BROWSER_SLOT = _safe_int(account.get("browser_slot"), 0)
     CURRENT_DAILY_INVITE_LIMIT = max(int(account.get("daily_invite_limit") or 50), 1)
     CURRENT_DAILY_MESSAGE_LIMIT = max(int(account.get("daily_message_limit") or 50), 1)
 NETWORK_OUTAGE_PATTERNS = (
@@ -1127,6 +1143,73 @@ def _render_template_message(template: str, lead: Dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+def _normalize_utm_token(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    ascii_value = "".join(character for character in normalized if not unicodedata.combining(character))
+    return re.sub(r"^_+|_+$", "", re.sub(r"[^a-z0-9]+", "_", ascii_value.lower())) or "unknown"
+
+
+def build_degura_utm_url(
+    base_url: str,
+    *,
+    campaign_key: str,
+    variant_key: int,
+    context: str,
+    link_type: str,
+    account_slot: int,
+) -> str:
+    campaign = DEGURA_UTM_CAMPAIGN.get(campaign_key)
+    if not campaign or not str(base_url or "").strip() or link_type not in {"guide", "booking"}:
+        return base_url
+    try:
+        parsed = urlsplit(base_url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            return base_url
+        query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                 if key not in {"utm_source", "utm_medium", "utm_campaign", "utm_content"}]
+        variant = f"v{variant_key}" if variant_key in {1, 2} else "v_unknown"
+        slot = f"slot{account_slot}" if account_slot in {1, 2} else "slot_unknown"
+        normalized_context = _normalize_utm_token(context)
+        link_suffix = "" if normalized_context == link_type or normalized_context.endswith(f"_{link_type}") else f"_{link_type}"
+        query.extend((
+            ("utm_source", "linkedin"),
+            ("utm_medium", "social"),
+            ("utm_campaign", campaign),
+            ("utm_content", f"{variant}_{normalized_context}{link_suffix}_{slot}"),
+        ))
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
+    except (TypeError, ValueError):
+        return base_url
+
+
+def _render_and_track_sequence_messages(result: Dict[str, Any], lead: Dict[str, Any]) -> None:
+    campaign_key = str(result.get("campaign_key") or "")
+    variant_key = _safe_int(result.get("variant_key"), 0)
+    for message_key, context in DEGURA_MESSAGE_UTM_CONTEXT.items():
+        message = _render_template_message(str(result.get(message_key) or ""), lead)
+        guide_url = str(result.get("guide_url") or "")
+        booking_url = str(result.get("booking_url") or "")
+        if guide_url:
+            message = message.replace(guide_url, build_degura_utm_url(
+                guide_url,
+                campaign_key=campaign_key,
+                variant_key=variant_key,
+                context=context,
+                link_type="guide",
+                account_slot=CURRENT_ACCOUNT_BROWSER_SLOT,
+            ))
+        if booking_url:
+            message = message.replace(booking_url, build_degura_utm_url(
+                booking_url,
+                campaign_key=campaign_key,
+                variant_key=variant_key,
+                context=context,
+                link_type="booking",
+                account_slot=CURRENT_ACCOUNT_BROWSER_SLOT,
+            ))
+        result[message_key] = message
+
+
 def linkedin_absolute_url(href: str) -> str:
     clean_href = (href or "").strip()
     if not clean_href:
@@ -1147,8 +1230,10 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
         "second_message": SEQUENCE_DEFAULT_MESSAGES["second_message"].replace("Katharina", fallback_sender),
         "third_message": SEQUENCE_DEFAULT_MESSAGES["third_message"].replace("Katharina", fallback_sender),
         "followup_interval_days": SEQUENCE_INTERVAL_DEFAULT_DAYS,
+        "campaign_key": "",
+        "variant_key": 0,
+        "booking_url": "",
         "guide_url": "",
-        "guide_asset_path": "",
         "asset_followup_1": "",
         "asset_followup_2": "",
         "source": "defaults",
@@ -1161,9 +1246,9 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
             variant_resp = (
                 client.table("outreach_sequence_variants")
                 .select(
-                    "id, sequence_id, connect_note, first_message, second_message, third_message, "
+                    "id, sequence_id, variant_key, connect_note, first_message, second_message, third_message, "
                     "asset_followup_1, asset_followup_2, is_active, "
-                    "sequence:outreach_sequences(id, campaign_key, guide_url, guide_asset_path, followup_interval_days, is_active)"
+                    "sequence:outreach_sequences(id, campaign_key, booking_url, guide_url, followup_interval_days, is_active)"
                 )
                 .eq("id", variant_id)
                 .eq("is_active", True)
@@ -1187,16 +1272,17 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
                             "third_message": variant.get("third_message") or "",
                             "asset_followup_1": variant.get("asset_followup_1") or "",
                             "asset_followup_2": variant.get("asset_followup_2") or "",
+                            "campaign_key": sequence.get("campaign_key") or "",
+                            "variant_key": _safe_int(variant.get("variant_key"), 0),
+                            "booking_url": sequence.get("booking_url") or "",
                             "guide_url": sequence.get("guide_url") or "",
-                            "guide_asset_path": sequence.get("guide_asset_path") or "",
                             "followup_interval_days": _safe_int(
                                 sequence.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS
                             ),
                             "source": "outreach_sequence_variants",
                         }
                     )
-                    for message_key in ("connect_note", "first_message", "second_message", "third_message", "asset_followup_1", "asset_followup_2"):
-                        result[message_key] = _render_template_message(str(result[message_key]), lead)
+                    _render_and_track_sequence_messages(result, lead)
                     return result
         except Exception as exc:
             logger.warn(
@@ -1229,7 +1315,7 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
     rows: list[Dict[str, Any]] = []
     try:
         query = client.table("outreach_sequences").select(
-            "id, connect_note, first_message, second_message, third_message, followup_interval_days, is_active, created_at"
+            "id, campaign_key, booking_url, guide_url, connect_note, first_message, second_message, third_message, followup_interval_days, is_active, created_at"
         )
         query = query.eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         if sequence_id is not None:
@@ -1250,6 +1336,9 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
                 "first_message": row.get("first_message") or result["first_message"],
                 "second_message": row.get("second_message") or result["second_message"],
                 "third_message": row.get("third_message") or result["third_message"],
+                "campaign_key": row.get("campaign_key") or "",
+                "booking_url": row.get("booking_url") or "",
+                "guide_url": row.get("guide_url") or "",
                 "followup_interval_days": _safe_int(
                     row.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS
                 ),
@@ -1320,10 +1409,7 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
             except Exception:
                 continue
 
-    result["connect_note"] = _render_template_message(str(result["connect_note"]), lead)
-    result["first_message"] = _render_template_message(str(result["first_message"]), lead)
-    result["second_message"] = _render_template_message(str(result["second_message"]), lead)
-    result["third_message"] = _render_template_message(str(result["third_message"]), lead)
+    _render_and_track_sequence_messages(result, lead)
     if result["followup_interval_days"] < 1:
         result["followup_interval_days"] = SEQUENCE_INTERVAL_DEFAULT_DAYS
     return result
@@ -1885,6 +1971,44 @@ async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
 def normalize_typed_text(text: str) -> str:
     normalized = (text or "").replace("\r\n", "\n").replace("\xa0", " ")
     return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _pick_invite_dialog_candidate(candidates: list[Dict[str, Any]]) -> Optional[int]:
+    """Choose the visible LinkedIn invitation modal, ignoring unrelated overlays."""
+    visible_fallbacks: list[int] = []
+    for index, candidate in enumerate(candidates):
+        if not candidate.get("visible"):
+            continue
+        visible_fallbacks.append(index)
+        for button in candidate.get("buttons") or []:
+            label = f"{button.get('text') or ''} {button.get('aria') or ''}"
+            if button.get("visible") and re.search(
+                r"(Einladung\s+senden|Send\s+invitation)", label, re.I
+            ):
+                return index
+    for index in visible_fallbacks:
+        if "send-invite" in str(candidates[index].get("className") or ""):
+            return index
+    return visible_fallbacks[-1] if visible_fallbacks else None
+
+
+async def find_invite_dialog(page: Page):
+    dialogs = page.locator("section[role='dialog'], div[role='dialog']")
+    candidates = await dialogs.evaluate_all(
+        """els => els.map((dialog) => ({
+            visible: !!(dialog.offsetWidth || dialog.offsetHeight || dialog.getClientRects().length),
+            className: dialog.className || '',
+            buttons: Array.from(dialog.querySelectorAll('button')).map((button) => ({
+                text: (button.innerText || button.textContent || '').trim(),
+                aria: button.getAttribute('aria-label') || '',
+                visible: !!(button.offsetWidth || button.offsetHeight || button.getClientRects().length)
+            }))
+        }))"""
+    )
+    index = _pick_invite_dialog_candidate(candidates)
+    if index is None:
+        raise RuntimeError("Could not find the visible connection invitation dialog")
+    return dialogs.nth(index)
 
 
 def typed_text_matches(actual_text: str, expected_text: str) -> Tuple[bool, Dict[str, Any]]:
@@ -3265,7 +3389,7 @@ async def send_message(
             raise RuntimeError("Could not find note textbox in connection request dialog")
 
         # Find and click Send button in the dialog
-        dialog = page.locator("section[role='dialog'], div[role='dialog']").first
+        dialog = await find_invite_dialog(page)
         # Support both English and German
         send_btn = dialog.locator(
             "button:has-text('Send invitation'), button:has-text('Send'), button:has-text('Einladung senden'), button:has-text('Senden'), button[aria-label*='Send']"
@@ -4054,9 +4178,12 @@ def sanitize_followup_message(text: str) -> str:
     """Apply safety filters for direct-message followups without invite-note truncation."""
     if not text:
         return ""
-    # Remove dashes and apostrophes (same as outreach no-dash rule)
-    sanitized = re.sub(r"[\-\u2010-\u2015\u2212]+", " ", text)
-    sanitized = re.sub(r"['`\u2018\u2019]+", " ", sanitized)
+    # Apply prose cleanup outside URLs so destination paths and query values stay valid.
+    parts = re.split(r"(https?://[^\s]+)", text)
+    for index in range(0, len(parts), 2):
+        parts[index] = re.sub(r"[\-\u2010-\u2015\u2212]+", " ", parts[index])
+        parts[index] = re.sub(r"['`\u2018\u2019]+", " ", parts[index])
+    sanitized = "".join(parts)
     sanitized = sanitized.replace("\r\n", "\n").replace("\r", "\n")
     lines = [re.sub(r"[ \t]{2,}", " ", line).strip() for line in sanitized.splitlines()]
     sanitized = "\n".join(lines).strip()

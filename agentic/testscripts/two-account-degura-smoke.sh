@@ -64,7 +64,7 @@ test ! -e "$browser_profile_root/profile/SingletonLock" || \
 cleanup_browser
 
 docker run --rm -d --name degura-postgres-test \
-  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=degura postgres:16-alpine >/dev/null
+  -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=degura postgres:16-alpine >/dev/null
 cleanup_db() { docker stop degura-postgres-test >/dev/null 2>&1 || true; }
 trap 'cleanup_db; cleanup_browser; rm -f "$compose_file"' EXIT
 for _ in $(seq 1 30); do
@@ -79,10 +79,14 @@ docker exec -i degura-postgres-test psql -v ON_ERROR_STOP=1 -U postgres -d degur
 docker exec -i degura-postgres-test psql -v ON_ERROR_STOP=1 -U postgres -d degura <supabase/migrations/020_seed_degura_campaign.sql
 docker exec -i degura-postgres-test psql -v ON_ERROR_STOP=1 -U postgres -d degura <supabase/migrations/021_import_mixed_degura_campaign.sql
 docker exec -i degura-postgres-test psql -v ON_ERROR_STOP=1 -U postgres -d degura <supabase/migrations/022_linkedin_account_display_compatibility.sql
+docker exec -i degura-postgres-test psql -v ON_ERROR_STOP=1 -U postgres -d degura <supabase/migrations/023_sync_degura_copy_v2.sql
+docker exec -i degura-postgres-test psql -v ON_ERROR_STOP=1 -U postgres -d degura <supabase/migrations/024_sync_degura_copy_september_2026.sql
 docker exec -i degura-postgres-test psql -v ON_ERROR_STOP=1 -U postgres -d degura <supabase/migrations/019_add_two_account_campaign.sql
 docker exec -i degura-postgres-test psql -v ON_ERROR_STOP=1 -U postgres -d degura <supabase/migrations/020_seed_degura_campaign.sql
 docker exec -i degura-postgres-test psql -v ON_ERROR_STOP=1 -U postgres -d degura <supabase/migrations/021_import_mixed_degura_campaign.sql
 docker exec -i degura-postgres-test psql -v ON_ERROR_STOP=1 -U postgres -d degura <supabase/migrations/022_linkedin_account_display_compatibility.sql
+docker exec -i degura-postgres-test psql -v ON_ERROR_STOP=1 -U postgres -d degura <supabase/migrations/023_sync_degura_copy_v2.sql
+docker exec -i degura-postgres-test psql -v ON_ERROR_STOP=1 -U postgres -d degura <supabase/migrations/024_sync_degura_copy_september_2026.sql
 docker exec -i degura-postgres-test psql -v ON_ERROR_STOP=1 -U postgres -d degura <agents/testscripts/two-account-degura-db.sql
 
 echo "PASS: two-account DEGURA non-sending regression block"

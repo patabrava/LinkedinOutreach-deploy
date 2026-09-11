@@ -17,6 +17,7 @@ from sender import (
     DIRECT_MESSAGE_SCOPED_SEND_ROOT_SELECTORS,
     DIRECT_MESSAGE_SEND_BUTTON_SELECTOR,
     MESSAGE_ONLY_PROCESSING_STATUSES,
+    _pick_invite_dialog_candidate,
     _pick_send_button_candidate,
     classify_connect_only_surface,
     classify_connect_only_probe_surface,
@@ -57,6 +58,21 @@ class FakeResponse:
     def __init__(self, data=None, count=None):
         self.data = data or []
         self.count = count
+
+
+class InviteDialogSelectionTest(unittest.TestCase):
+    def test_prefers_visible_invitation_modal_over_unrelated_dialog(self):
+        dialogs = [
+            {"visible": True, "className": "overlay-shell", "buttons": []},
+            {"visible": False, "className": "vjs-modal-dialog", "buttons": []},
+            {
+                "visible": True,
+                "className": "artdeco-modal send-invite",
+                "buttons": [{"text": "Senden", "aria": "Einladung senden", "visible": True}],
+            },
+        ]
+
+        self.assertEqual(_pick_invite_dialog_candidate(dialogs), 2)
 
     def execute(self):
         return self
