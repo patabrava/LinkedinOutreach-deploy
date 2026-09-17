@@ -870,7 +870,7 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
             client.table("leads")
             .select(LEAD_SELECT_FIELDS_EXTENDED)
             .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
-            .eq("outreach_mode", "connect_only")
+            .or_("outreach_mode.eq.connect_message,outreach_mode.eq.connect_only")
             .is_("sent_at", "null")
             .or_(
                 "connection_sent_at.not.is.null,"
@@ -888,7 +888,7 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
             client.table("leads")
             .select(LEAD_SELECT_FIELDS_CORE)
             .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
-            .eq("outreach_mode", "connect_only")
+            .or_("outreach_mode.eq.connect_message,outreach_mode.eq.connect_only")
             .is_("sent_at", "null")
             .or_(
                 "connection_sent_at.not.is.null,"
@@ -967,12 +967,15 @@ def fetch_invite_queue(
         client.table("leads")
         .select(
             "id, linkedin_url, first_name, last_name, company_name, "
-            "sequence_id, outreach_mode, batch_id, status, profile_data, lead_batches!inner(batch_intent)"
+            "sequence_id, sequence_variant_id, outreach_mode, batch_id, status, profile_data, "
+            "campaign_paused, source_last_activity_at, lead_batches!inner(batch_intent)"
         )
         .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .in_("status", INVITE_RETRY_STATUSES)
         .is_("connection_sent_at", "null")
+        .eq("campaign_paused", False)
         .in_("lead_batches.batch_intent", ["connect_message", "connect_only"])
+        .order("source_last_activity_at", desc=True, nullsfirst=False)
         .limit(max((limit + len(excluded)) * 5, limit))
     )
     if batch_id is not None:

@@ -279,6 +279,10 @@ class FakeInviteQueueQuery:
         self.filters.append(("is", key, value))
         return self
 
+    def order(self, key, desc=False, nullsfirst=None):
+        self.filters.append(("order", key, desc, nullsfirst))
+        return self
+
     def limit(self, value):
         self.filters.append(("limit", value))
         return self
@@ -1134,6 +1138,38 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual([row["id"] for row in rows], ["lead-replacement"])
 
+    def test_fetch_invite_queue_excludes_paused_campaigns_at_database_boundary(self):
+        client = FakeInviteQueueClient(
+            [{"id": "lead-new", "status": "NEW", "outreach_mode": "connect_message", "profile_data": {}}]
+        )
+
+        fetch_invite_queue(client, 10, batch_id=30)
+
+        self.assertIn(("eq", "campaign_paused", False), client.calls[0]["filters"])
+
+    def test_fetch_invite_queue_orders_most_recent_source_activity_first(self):
+        client = FakeInviteQueueClient(
+            [{"id": "lead-new", "status": "NEW", "outreach_mode": "connect_message", "profile_data": {}}]
+        )
+
+        fetch_invite_queue(client, 10, batch_id=30)
+
+        self.assertIn(
+            ("order", "source_last_activity_at", True, False),
+            client.calls[0]["filters"],
+        )
+        self.assertIn("source_last_activity_at", client.calls[0]["selected"])
+        self.assertIn("campaign_paused", client.calls[0]["selected"])
+
+    def test_fetch_invite_queue_preserves_assigned_sequence_variant(self):
+        client = FakeInviteQueueClient(
+            [{"id": "lead-new", "status": "NEW", "outreach_mode": "connect_message", "profile_data": {}}]
+        )
+
+        fetch_invite_queue(client, 10, batch_id=30)
+
+        self.assertIn("sequence_variant_id", client.calls[0]["selected"])
+
     def test_mark_invite_processing_claims_failed_invite_lead_for_retry(self):
         lead = {"id": "lead-1", "status": "FAILED"}
         client = FakeClient(lead)
@@ -1531,7 +1567,10 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual(rows, [legacy_connected_row, eligible_row])
         self.assertEqual(client.calls[0]["filters"][0], ("eq", "linkedin_account_id", ""))
-        self.assertEqual(client.calls[0]["filters"][1], ("eq", "outreach_mode", "connect_only"))
+        self.assertEqual(
+            client.calls[0]["filters"][1],
+            ("or", "outreach_mode.eq.connect_message,outreach_mode.eq.connect_only"),
+        )
         self.assertEqual(client.calls[0]["filters"][2], ("is", "sent_at", "null"))
         self.assertEqual(
             client.calls[0]["filters"][3],
@@ -1541,6 +1580,25 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
                 "connection_accepted_at.not.is.null,"
                 "status.in.(CONNECTED,MESSAGE_ONLY_READY,MESSAGE_ONLY_APPROVED)",
             ),
+        )
+
+    def test_fetch_message_only_leads_includes_canonical_connect_message_mode(self):
+        canonical_row = {
+            "id": "lead-canonical",
+            "status": "NEW",
+            "sent_at": None,
+            "connection_sent_at": "2026-04-26T00:00:00Z",
+            "connection_accepted_at": None,
+            "outreach_mode": "connect_message",
+        }
+        client = FakeMessageOnlyClient([canonical_row])
+
+        rows = fetch_message_only_leads(client, 25)
+
+        self.assertEqual(rows, [canonical_row])
+        self.assertIn(
+            ("or", "outreach_mode.eq.connect_message,outreach_mode.eq.connect_only"),
+            client.calls[0]["filters"],
         )
 
 
