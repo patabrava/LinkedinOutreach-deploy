@@ -5,6 +5,7 @@ const CANONICAL_TOKENS = new Set([
   "last_name",
   "full_name",
   "company_name",
+  "salutation",
 ]);
 
 const TOKEN_RE = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}|\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}|\[\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\]/g;
@@ -19,7 +20,7 @@ export function validateConnectNote(text: string): ValidationResult {
     const name = match[1] ?? match[2] ?? match[3];
     if (!name) continue;
     if (!CANONICAL_TOKENS.has(name)) {
-      return { ok: false, error: `Unknown token "${name}". Allowed: first_name, last_name, full_name, company_name.` };
+      return { ok: false, error: `Unknown token "${name}". Allowed: first_name, last_name, full_name, company_name, salutation.` };
     }
   }
   return { ok: true };

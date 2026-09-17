@@ -42,3 +42,10 @@ test("preserves text around tokens verbatim", () => {
 test("leaves unknown tokens untouched (validator's job to reject)", () => {
   assert.equal(renderSequence("Hi {{recent_post}}", lead), "Hi {{recent_post}}");
 });
+
+test("substitutes a verified salutation", () => {
+  assert.equal(
+    renderSequence("Guten Tag {{salutation}} {{last_name}}", { ...lead, salutation: "Frau" }),
+    "Guten Tag Frau Müller",
+  );
+});

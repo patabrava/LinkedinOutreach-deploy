@@ -63,6 +63,7 @@ CURRENT_ACCOUNT_DISPLAY_NAME = ""
 CURRENT_ACCOUNT_BROWSER_SLOT = 0
 CURRENT_DAILY_INVITE_LIMIT = DAILY_SEND_DEFAULT if "DAILY_SEND_DEFAULT" in globals() else 50
 CURRENT_DAILY_MESSAGE_LIMIT = DAILY_SEND_DEFAULT if "DAILY_SEND_DEFAULT" in globals() else 50
+VERIFIED_SALUTATIONS = {"Frau", "Herr"}
 
 # Reuse the scraper's persisted auth state to avoid drift between workers.
 def _resolve_scraper_auth_path() -> Path:
@@ -1251,18 +1252,26 @@ def _render_template_message(template: str, lead: Dict[str, Any]) -> str:
     first_name = (lead.get("first_name") or "").strip()
     last_name = (lead.get("last_name") or "").strip()
     company = (lead.get("company_name") or "").strip()
+    profile_data = lead.get("profile_data")
+    profile_salutation = profile_data.get("salutation") if isinstance(profile_data, dict) else None
+    salutation = str(lead.get("salutation") or profile_salutation or "").strip()
+    if re.search(r"\{\{\s*salutation\s*\}\}|\{\s*salutation\s*\}|\[\s*salutation\s*\]", template or ""):
+        if salutation not in VERIFIED_SALUTATIONS:
+            raise ValueError("Verified salutation is required before rendering a salutation template.")
     full_name = " ".join([p for p in [first_name, last_name] if p]).strip()
     replacements = {
         "{{first_name}}": first_name,
         "{{last_name}}": last_name,
         "{{full_name}}": full_name,
         "{{company_name}}": company,
+        "{{salutation}}": salutation,
         "{{VORNAME}}": first_name,
         "{{NACHNAME}}": last_name,
         "{first_name}": first_name,
         "{last_name}": last_name,
         "{full_name}": full_name,
         "{company_name}": company,
+        "{salutation}": salutation,
         "[Name]": first_name or full_name,
         "[name]": first_name or full_name,
     }

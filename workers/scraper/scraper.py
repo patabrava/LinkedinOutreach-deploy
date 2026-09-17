@@ -41,11 +41,21 @@ from credential_crypto import decrypt_password
 from degura_campaign import event_payload, out_of_office_resume, route_degura_reply
 from shared_logger import get_logger
 
-# Load .env from scraper directory explicitly
-env_path = Path(__file__).parent / ".env"
-load_dotenv(dotenv_path=env_path)
-print(f"[SCRAPER] Loading .env from: {env_path}", file=sys.stderr)
-print(f"[SCRAPER] .env exists: {env_path.exists()}", file=sys.stderr)
+# Load the scraper-local env first, then the shared worker/repository env files.
+# This keeps direct scraper runs consistent with sender and web-worker launches.
+scraper_dir = Path(__file__).parent
+repo_root = scraper_dir.parent.parent
+env_candidates = [
+    scraper_dir / ".env",
+    repo_root / ".env",
+    repo_root / "workers" / ".env",
+    repo_root / "mcp-server" / ".env",
+]
+for env_path in env_candidates:
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, override=False)
+        print(f"[SCRAPER] Loaded env: {env_path}", file=sys.stderr)
+print(f"[SCRAPER] Scraper env present: {(scraper_dir / '.env').exists()}", file=sys.stderr)
 
 # Initialize logger
 logger = get_logger("scraper")
@@ -62,6 +72,7 @@ DEFAULT_DAILY_ENRICHMENT_CAP = 20
 DAILY_INBOX_SCAN_LIMIT = 60
 INBOX_SCAN_COOLDOWN_HOURS = 24  # skip re-opening profiles scanned within this window
 PENDING_INVITE_BACKOFF_DAYS = 7  # skip pending invites for this many days
+VERIFIED_SALUTATIONS = {"Frau", "Herr"}
 INBOX_REPLY_CANDIDATE_STATUSES = [
     "SENT",
     "FAILED",
@@ -108,6 +119,10 @@ class Lead:
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     company_name: Optional[str] = None
+    profile_data: Optional[Dict[str, Any]] = None
+    status: Optional[str] = None
+    batch_id: Optional[int] = None
+    campaign_paused: Optional[bool] = None
 
 
 @dataclass
@@ -492,6 +507,73 @@ def fetch_pending_leads_for_intent(
     ) for row in rows]
 
 
+def fetch_salutation_leads(
+    client: Client,
+    batch_id: int,
+    limit: int = 0,
+    only_missing: bool = False,
+) -> List[Lead]:
+    """Fetch only paused leads from one batch for read-only salutation enrichment."""
+    logger.db_query(
+        "select",
+        "leads",
+        {
+            "batchId": batch_id,
+            "campaign_paused": True,
+            "limit": limit,
+            "onlyMissing": only_missing,
+        },
+    )
+    query = (
+        client.table("leads")
+        .select("id, linkedin_url, first_name, last_name, company_name, profile_data, status, batch_id, campaign_paused")
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+        .eq("batch_id", batch_id)
+        .eq("campaign_paused", True)
+    )
+    query = query.order("created_at", desc=False)
+    # Missing-only retries must fetch the full paused batch before applying the
+    # limit; limiting in SQL first could return already-enriched rows and starve
+    # the retry queue.
+    if not only_missing and limit > 0:
+        query = query.limit(limit)
+
+    response = query.execute()
+    rows = response.data or []
+    if only_missing:
+        rows = [
+            row for row in rows
+            if not (row.get("profile_data") or {}).get("salutation_enrichment_at")
+        ]
+        if limit > 0:
+            rows = rows[:limit]
+    logger.db_result(
+        "select",
+        "leads",
+        {
+            "batchId": batch_id,
+            "campaign_paused": True,
+            "limit": limit,
+            "onlyMissing": only_missing,
+        },
+        len(rows),
+    )
+    return [
+        Lead(
+            id=row["id"],
+            linkedin_url=row["linkedin_url"],
+            first_name=row.get("first_name"),
+            last_name=row.get("last_name"),
+            company_name=row.get("company_name"),
+            profile_data=row.get("profile_data"),
+            status=row.get("status"),
+            batch_id=row.get("batch_id"),
+            campaign_paused=row.get("campaign_paused"),
+        )
+        for row in rows
+    ]
+
+
 def fetch_today_enrichment_count(client: Client) -> int:
     """Return count of leads processed today (enriched or connect-only)."""
     start_of_day = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -640,6 +722,54 @@ def safe_text(value: Optional[str]) -> str:
     return value.strip() if value else ""
 
 
+def extract_verified_salutation(profile_name: Optional[str], evidence_texts: List[str]) -> Dict[str, str]:
+    """Extract Frau/Herr only from explicit profile evidence, never from a name guess."""
+    candidates: List[tuple[str, str]] = []
+    name_text = safe_text(profile_name)
+
+    name_prefix = re.match(r"^\s*(Frau|Herr|Ms\.?|Mrs\.?|Mr\.?)\b", name_text, re.I)
+    if name_prefix:
+        honorific = name_prefix.group(1).lower().rstrip(".")
+        candidates.append(("Frau" if honorific in {"frau", "ms", "mrs"} else "Herr", f"profile_name:{honorific}"))
+
+    evidence = " ".join(safe_text(text) for text in evidence_texts if safe_text(text))
+    pronoun_patterns = (
+        (re.compile(r"(?<![A-Za-z])she\s*/\s*her(?:s)?(?![A-Za-z])", re.I), "Frau", "pronouns:she/her"),
+        (re.compile(r"(?<![A-Za-z])he\s*/\s*him(?:s)?(?![A-Za-z])", re.I), "Herr", "pronouns:he/him"),
+    )
+    for pattern, salutation, evidence_label in pronoun_patterns:
+        if pattern.search(evidence):
+            candidates.append((salutation, evidence_label))
+
+    candidate_salutations = {salutation for salutation, _ in candidates}
+    if len(candidate_salutations) == 1:
+        evidence_labels: List[str] = []
+        for _, label in candidates:
+            if label not in evidence_labels:
+                evidence_labels.append(label)
+        return {
+            "salutation": next(iter(candidate_salutations)),
+            "salutation_status": "verified",
+            "salutation_source": "linkedin_profile_explicit_signal",
+            "salutation_evidence": ",".join(evidence_labels),
+        }
+
+    if len(candidate_salutations) > 1:
+        return {
+            "salutation": "",
+            "salutation_status": "unresolved",
+            "salutation_source": "linkedin_profile_conflicting_signals",
+            "salutation_evidence": ",".join(label for _, label in candidates),
+        }
+
+    return {
+        "salutation": "",
+        "salutation_status": "unresolved",
+        "salutation_source": "linkedin_profile_no_explicit_signal",
+        "salutation_evidence": "",
+    }
+
+
 def normalize_person_name(value: Optional[str]) -> str:
     """Normalize a LinkedIn display name for exact-ish matching."""
     text = safe_text(value).lower()
@@ -647,6 +777,18 @@ def normalize_person_name(value: Optional[str]) -> str:
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"[^a-z0-9äöüßáàâãåéèêëíìîïóòôõúùûüñç ]", "", text)
     return text.strip()
+
+
+def profile_identity_matches_lead(profile_name: Optional[str], lead: Lead) -> bool:
+    """Require the scraped profile name to match the queued lead before persisting evidence."""
+    scraped = normalize_person_name(profile_name)
+    scraped = re.sub(r"^(?:frau|herr|mr|ms|mrs)\s+", "", scraped)
+    expected_full = normalize_person_name(" ".join(part for part in (lead.first_name, lead.last_name) if part))
+    expected_first = normalize_person_name(lead.first_name)
+    expected_last = normalize_person_name(lead.last_name)
+    if not scraped or not expected_full:
+        return False
+    return scraped == expected_full or bool(expected_first and expected_last and expected_first in scraped and expected_last in scraped)
 
 
 def lead_display_name(lead: Dict[str, Any]) -> str:
@@ -980,6 +1122,8 @@ async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
         [
             "main h1.text-heading-xlarge",
             "main h1",
+            "main h2",
+            "main a[aria-label^='Profil von ']",
             "header h1",
             "div.pv-text-details__left-panel h1",
         ],
@@ -1016,6 +1160,22 @@ async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
         field_name="about",
     )
 
+    # Prefer explicit profile pronouns or an honorific in the profile header.
+    # Do not infer a salutation from the first name.
+    profile_signal_text = await first_match_text(
+        page,
+        [
+            "main [data-testid*='pronoun']",
+            "main [aria-label*='Pronoun']",
+            "main [aria-label*='pronoun']",
+            "main [class*='pronoun']",
+            "main [data-testid='lazy-column'] > div:first-child",
+            "main .pv-text-details__left-panel",
+        ],
+        field_name="salutation_signal",
+    )
+    salutation_data = extract_verified_salutation(name, [profile_signal_text, about])
+
     # Extract current company and title from experience section
     logger.debug("Extracting: experience")
     experience = await scrape_experience(page)
@@ -1033,6 +1193,7 @@ async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
         "current_title": current_title,
         "url": normalized,
         "experience": experience,
+        **salutation_data,
     }
     
     # Summary log with all extracted fields
@@ -1044,9 +1205,51 @@ async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
         "aboutLength": len(about) if about else 0,
         "experienceCount": len(experience),
         "currentTitle": current_title[:40] if current_title else None,
+        "salutationStatus": salutation_data["salutation_status"],
     })
     
     return profile_data
+
+
+async def scrape_salutation_profile(page: Page, url: str) -> Dict[str, Any]:
+    """Read only the profile top card needed for explicit salutation evidence."""
+    normalized = url.replace("http://", "https://")
+    logger.info("Salutation profile scrape starting", data={"url": normalized})
+    page.set_default_timeout(8_000)
+    page.set_default_navigation_timeout(60_000)
+
+    await gentle_nav(page, normalized)
+    await page.wait_for_selector("main", timeout=20_000)
+    await page.wait_for_timeout(1_000)
+
+    name = await first_match_text(
+        page,
+        [
+            "main h2",
+            "main h1.text-heading-xlarge",
+            "main h1",
+            "main a[aria-label^='Profil von ']",
+        ],
+        timeout=3_000,
+        field_name="name",
+    )
+    profile_signal_text = await first_match_text(
+        page,
+        [
+            "main [data-testid*='pronoun']",
+            "main [aria-label*='Pronoun']",
+            "main [aria-label*='pronoun']",
+            "main [class*='pronoun']",
+            "main [data-testid='lazy-column'] > div:first-child",
+        ],
+        timeout=3_000,
+        field_name="salutation_signal",
+    )
+    return {
+        "name": name,
+        "url": normalized,
+        **extract_verified_salutation(name, [profile_signal_text]),
+    }
 
 
 async def scrape_recent_activity(page: Page, profile_url: str) -> List[Dict[str, Any]]:
@@ -1625,6 +1828,33 @@ def update_lead(
     logger.info(f"Lead updated to ENRICHED", {"leadId": lead_id})
 
 
+def update_salutation_profile(
+    client: Client,
+    lead: Lead,
+    profile_data: Dict[str, Any],
+) -> None:
+    """Persist profile enrichment without changing status or campaign pause state."""
+    existing = lead.profile_data if isinstance(lead.profile_data, dict) else {}
+    merged_profile = {
+        **existing,
+        **profile_data,
+        "salutation_enrichment_at": now_iso_utc(),
+    }
+    logger.db_query(
+        "update",
+        "leads",
+        {"leadId": lead.id, "batchId": lead.batch_id},
+        {
+            "salutation": merged_profile.get("salutation") or None,
+            "salutationStatus": merged_profile.get("salutation_status"),
+            "preserveStatus": lead.status,
+            "preserveCampaignPaused": lead.campaign_paused,
+        },
+    )
+    client.table("leads").update({"profile_data": merged_profile}).eq("id", lead.id).execute()
+    logger.db_result("update", "leads", {"leadId": lead.id, "batchId": lead.batch_id}, 1)
+
+
 def mark_enrich_failed(client: Client, lead_id: str, reason: Optional[str] = None) -> None:
     """Mark a lead as ENRICH_FAILED to avoid being re-queued as NEW endlessly."""
     logger.db_query("update", "leads", {"leadId": lead_id}, {"status": "ENRICH_FAILED", "reason": (reason or "")[:240]})
@@ -1664,6 +1894,85 @@ async def enrich_one(page: Page, client: Client, lead: Lead) -> None:
         # On enrichment error, mark as ENRICH_FAILED to avoid resetting to NEW loops
         mark_enrich_failed(client, lead.id, reason=str(exc))
         raise
+
+
+async def enrich_salutation_one(page: Page, client: Client, lead: Lead) -> None:
+    """Scrape one profile's explicit salutation signal without touching outreach status."""
+    logger.scrape_start(lead.id, lead.linkedin_url)
+    profile = await scrape_salutation_profile(page, lead.linkedin_url)
+    if not profile_identity_matches_lead(profile.get("name"), lead):
+        raise RuntimeError("Scraped profile identity could not be matched to the queued lead; salutation was not persisted.")
+    if profile.get("salutation_status") != "verified" or profile.get("salutation") not in VERIFIED_SALUTATIONS:
+        profile["salutation"] = ""
+        profile["salutation_status"] = "unresolved"
+    update_salutation_profile(client, lead, profile)
+    logger.scrape_complete(
+        lead.id,
+        profile_data={
+            "salutation": profile.get("salutation"),
+            "salutation_status": profile.get("salutation_status"),
+            "salutation_source": profile.get("salutation_source"),
+        },
+    )
+
+
+async def salutation_enrichment_mode(
+    batch_id: int,
+    limit: int = 0,
+    only_missing: bool = False,
+) -> None:
+    """Enrich one paused batch with verified salutations; never sends or unpauses leads."""
+    operation_name = "salutation-enrichment"
+    logger.operation_start(
+        operation_name,
+        input_data={"batch_id": batch_id, "limit": limit, "only_missing": only_missing},
+    )
+    client = get_supabase_client()
+
+    batch_response = (
+        client.table("lead_batches")
+        .select("id, linkedin_account_id")
+        .eq("id", batch_id)
+        .limit(1)
+        .execute()
+    )
+    batch_rows = batch_response.data or []
+    if not batch_rows:
+        raise RuntimeError(f"Batch {batch_id} was not found.")
+    if batch_rows[0].get("linkedin_account_id") != CURRENT_ACCOUNT_ID:
+        raise RuntimeError(f"Batch {batch_id} is not owned by the selected LinkedIn account.")
+
+    leads = fetch_salutation_leads(client, batch_id, limit=limit, only_missing=only_missing)
+    if not leads:
+        logger.info("No paused leads found for salutation enrichment", data={"batchId": batch_id})
+        return
+
+    creds = fetch_linkedin_credentials(client)
+    playwright, browser, context = await open_browser(headless=False)
+    processed = 0
+    failed = 0
+    try:
+        await ensure_linkedin_auth(context, creds)
+        for lead in leads:
+            page = await context.new_page()
+            try:
+                await enrich_salutation_one(page, client, lead)
+                processed += 1
+            except Exception as exc:
+                failed += 1
+                logger.error("Salutation enrichment failed", {"leadId": lead.id}, error=exc)
+            finally:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            await random_pause()
+        logger.operation_complete(
+            operation_name,
+            result={"batchId": batch_id, "processed": processed, "failed": failed, "sent": 0},
+        )
+    finally:
+        await shutdown(playwright, browser)
 
 
 async def process_batch(context: BrowserContext, client: Client, leads: List[Lead]) -> None:
@@ -1909,6 +2218,22 @@ def parse_args() -> argparse.Namespace:
         help="Continuously enrich NEW custom-outreach leads. Sleeps between passes when queue is empty.",
     )
     parser.add_argument(
+        "--salutation-enrichment",
+        action="store_true",
+        help="Enrich explicit Frau/Herr signals for one paused batch without changing outreach status.",
+    )
+    parser.add_argument(
+        "--batch-id",
+        type=int,
+        default=None,
+        help="Batch id used by --salutation-enrichment.",
+    )
+    parser.add_argument(
+        "--salutation-only-missing",
+        action="store_true",
+        help="Retry only paused leads without a persisted salutation enrichment result.",
+    )
+    parser.add_argument(
         "--batch-intent",
         type=str,
         default=None,
@@ -1919,6 +2244,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--account-id is required so browser state and queues cannot cross accounts.")
     if args.batch_intent and args.batch_intent != "custom_outreach":
         parser.error(f"--batch-intent '{args.batch_intent}' is not supported; only 'custom_outreach' is valid.")
+    if args.salutation_enrichment and not args.batch_id:
+        parser.error("--batch-id is required with --salutation-enrichment.")
+    if args.salutation_enrichment and args.inbox:
+        parser.error("--salutation-enrichment cannot be combined with --inbox.")
+    if args.salutation_only_missing and not args.salutation_enrichment:
+        parser.error("--salutation-only-missing requires --salutation-enrichment.")
     return args
 
 ###################################################################################################
@@ -3192,6 +3523,17 @@ if __name__ == "__main__":
 
     if getattr(args, "enrichment_loop", False):
         asyncio.run(enrichment_loop_mode())
+        sys.exit(0)
+
+    if getattr(args, "salutation_enrichment", False):
+        limit = args.limit if isinstance(args.limit, int) and args.limit >= 0 else 0
+        asyncio.run(
+            salutation_enrichment_mode(
+                batch_id=args.batch_id,
+                limit=limit,
+                only_missing=args.salutation_only_missing,
+            )
+        )
         sys.exit(0)
 
     if not args.run:

@@ -3,11 +3,12 @@ type LeadFields = {
   last_name?: string | null;
   full_name?: string | null;
   company_name?: string | null;
+  salutation?: string | null;
 };
 
 const TOKEN_RE = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}|\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}|\[\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\]/g;
 
-const CANONICAL = new Set(["first_name", "last_name", "full_name", "company_name"]);
+const CANONICAL = new Set(["first_name", "last_name", "full_name", "company_name", "salutation"]);
 
 function resolve(name: string, lead: LeadFields): string | null {
   if (!CANONICAL.has(name)) return null;
