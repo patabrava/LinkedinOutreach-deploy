@@ -63,6 +63,8 @@ create table if not exists outreach_sequences (
   privacy_url text,
   guide_url text,
   guide_asset_path text,
+  delivery_mode text not null default 'standard_connect_message',
+  inmail_subject text not null default '',
   is_managed_campaign boolean not null default false,
   is_active boolean not null default true,
   created_at timestamptz not null default now(),

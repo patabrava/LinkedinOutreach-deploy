@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import sender as sender_module
 from sender import (
     INVITE_RETRY_STATUSES,
+    INMAIL_AND_INVITE_MODE,
     CONNECT_ONLY_CONSECUTIVE_FAILURE_LIMIT,
     DIRECT_MESSAGE_COMPOSER_SELECTOR,
     DIRECT_MESSAGE_SCOPED_SEND_ROOT_SELECTORS,
@@ -32,6 +33,9 @@ from sender import (
     linkedin_absolute_url,
     _is_invite_candidate,
     _is_message_only_candidate,
+    is_inmail_and_invite_sequence,
+    inmail_first_touch_already_sent,
+    validate_inmail_test_override,
     mark_connect_only_limit_reached,
     mark_invite_processing,
     mark_message_only_processing,
@@ -73,6 +77,25 @@ class InviteDialogSelectionTest(unittest.TestCase):
         ]
 
         self.assertEqual(_pick_invite_dialog_candidate(dialogs), 2)
+
+
+class InmailCampaignContractTest(unittest.TestCase):
+    def test_delivery_mode_is_selected_from_assigned_sequence(self):
+        self.assertTrue(is_inmail_and_invite_sequence({"delivery_mode": INMAIL_AND_INVITE_MODE}))
+        self.assertFalse(is_inmail_and_invite_sequence({"delivery_mode": "standard_connect_message"}))
+        self.assertFalse(is_inmail_and_invite_sequence({}))
+
+    def test_existing_inmail_event_makes_first_touch_idempotent(self):
+        lead = {"id": "lead-1", "profile_data": {"inmail_first_touch_sent": True}}
+        self.assertTrue(inmail_first_touch_already_sent(lead))
+        self.assertFalse(inmail_first_touch_already_sent({"id": "lead-2", "profile_data": {}}))
+
+    def test_test_override_requires_targeted_lead_and_explicit_flag(self):
+        self.assertTrue(validate_inmail_test_override("lead-1", True))
+        with self.assertRaises(ValueError):
+            validate_inmail_test_override(None, True)
+        with self.assertRaises(ValueError):
+            validate_inmail_test_override("lead-1", False)
 
     def execute(self):
         return self
