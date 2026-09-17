@@ -21,6 +21,7 @@ from supabase import Client, create_client
 # Import shared logger
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from credential_crypto import decrypt_password
+from degura_campaign import event_payload
 from shared_logger import get_logger
 from thread_reader import extract_last_bubble, classify_last_sender
 
@@ -62,6 +63,7 @@ CURRENT_ACCOUNT_DISPLAY_NAME = ""
 CURRENT_ACCOUNT_BROWSER_SLOT = 0
 CURRENT_DAILY_INVITE_LIMIT = DAILY_SEND_DEFAULT if "DAILY_SEND_DEFAULT" in globals() else 50
 CURRENT_DAILY_MESSAGE_LIMIT = DAILY_SEND_DEFAULT if "DAILY_SEND_DEFAULT" in globals() else 50
+VERIFIED_SALUTATIONS = {"Frau", "Herr"}
 
 # Reuse the scraper's persisted auth state to avoid drift between workers.
 def _resolve_scraper_auth_path() -> Path:
@@ -154,6 +156,8 @@ LEAD_SELECT_FIELDS_CORE = (
     "batch_id, outreach_mode, profile_data"
 )
 LEAD_SELECT_FIELDS_EXTENDED = f"{LEAD_SELECT_FIELDS_CORE}, csv_batch_id, ai_tags"
+INMAIL_AND_INVITE_MODE = "invite_and_inmail"
+INMAIL_TEST_TOUCH_NUMBER = 99
 DIRECT_MESSAGE_COMPOSER_SELECTOR = (
     "div.msg-overlay-conversation-bubble, "
     "section[role='dialog'] div[role='textbox'][contenteditable='true'], "
@@ -737,10 +741,31 @@ def _derive_sales_navigator_subject_from_message(message: str) -> str:
     return _hard_cap_text(subject, 80)
 
 
-def build_sales_navigator_subject(lead: Dict[str, Any], message: str = "") -> str:
+def build_sales_navigator_subject(
+    lead: Dict[str, Any], message: str = "", explicit_subject: str = ""
+) -> str:
     # Sales Navigator/InMail performs best with a short, direct subject line.
     # Keep this stable so the compose window always uses the intended wording.
-    return "Kurze Frage zu deiner bAV"
+    return (explicit_subject or "Kurze Frage zu deiner bAV").strip()
+
+
+def is_inmail_and_invite_sequence(sequence: Optional[Dict[str, Any]]) -> bool:
+    return str((sequence or {}).get("delivery_mode") or "").strip().lower() == INMAIL_AND_INVITE_MODE
+
+
+def inmail_first_touch_already_sent(lead: Dict[str, Any]) -> bool:
+    profile_data = lead.get("profile_data") or {}
+    return isinstance(profile_data, dict) and profile_data.get("inmail_first_touch_sent") is True
+
+
+def validate_inmail_test_override(lead_id: Optional[str], test_override: bool) -> bool:
+    if test_override and not str(lead_id or "").strip():
+        raise ValueError("--test-override requires --lead-id")
+    if not test_override and not lead_id:
+        return False
+    if test_override is not True:
+        raise ValueError("InMail test sends require an explicit --test-override flag")
+    return True
 
 
 def build_sales_navigator_body(message: str) -> str:
@@ -998,6 +1023,114 @@ def fetch_invite_queue(
     return filtered_rows
 
 
+def fetch_inmail_and_invite_queue(
+    client: Client,
+    limit: int,
+    batch_id: Optional[int] = None,
+) -> list[Dict[str, Any]]:
+    """Fetch only the new sequence delivery mode owned by this account."""
+    query = (
+        client.table("leads")
+        .select(
+            f"{LEAD_SELECT_FIELDS_EXTENDED}, "
+            "sequence:outreach_sequences!inner(id, delivery_mode, inmail_subject, is_active)"
+        )
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+        .in_("status", INVITE_RETRY_STATUSES)
+        .is_("sent_at", "null")
+        .is_("connection_sent_at", "null")
+        .eq("campaign_paused", False)
+        .eq("sequence.delivery_mode", INMAIL_AND_INVITE_MODE)
+        .eq("sequence.is_active", True)
+        .order("created_at", desc=False)
+        .limit(max(limit * 3, limit))
+    )
+    if batch_id is not None:
+        query = query.eq("batch_id", batch_id)
+    rows = query.execute().data or []
+    result = [row for row in rows if not inmail_first_touch_already_sent(row)]
+    return result[:limit]
+
+
+def _inmail_event_exists(
+    client: Client,
+    lead: Dict[str, Any],
+    sequence_id: Optional[int],
+    test_override: bool,
+) -> bool:
+    """Check the immutable event ledger before opening LinkedIn."""
+    try:
+        response = (
+            client.table("outreach_events")
+            .select("id, sequence_id, touch_number, metadata")
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+            .eq("lead_id", lead.get("id"))
+            .eq("event_type", "touch_sent")
+            .limit(50)
+            .execute()
+        )
+    except Exception as exc:
+        logger.warn("Failed to check InMail idempotency ledger", {"leadId": lead.get("id")}, error=exc)
+        return False
+    for row in response.data or []:
+        metadata = row.get("metadata") or {}
+        if (
+            row.get("sequence_id") == sequence_id
+            and row.get("touch_number") == (INMAIL_TEST_TOUCH_NUMBER if test_override else 1)
+            and metadata.get("delivery_mode") == INMAIL_AND_INVITE_MODE
+            and bool(metadata.get("test_override")) is test_override
+        ):
+            return True
+    return False
+
+
+def _record_inmail_event(
+    client: Client,
+    lead: Dict[str, Any],
+    sequence_id: Optional[int],
+    *,
+    test_override: bool,
+) -> None:
+    touch_number = INMAIL_TEST_TOUCH_NUMBER if test_override else 1
+    payload = event_payload(
+        account_id=CURRENT_ACCOUNT_ID,
+        lead_id=str(lead.get("id") or ""),
+        event_type="touch_sent",
+        sequence_id=sequence_id,
+        variant_id=lead.get("sequence_variant_id") if not test_override else None,
+        touch_number=touch_number,
+        correlation_id=os.getenv("CORRELATION_ID"),
+        metadata={
+            "surface": SURFACE_SALES_NAVIGATOR,
+            "delivery_mode": INMAIL_AND_INVITE_MODE,
+            "test_override": test_override,
+            "first_touch": True,
+        },
+    )
+    client.table("outreach_events").insert(payload).execute()
+
+
+def _mark_inmail_processing(client: Client, lead_id: str) -> bool:
+    response = (
+        client.table("leads")
+        .update({"status": "PROCESSING", "updated_at": datetime.utcnow().isoformat()})
+        .eq("id", lead_id)
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+        .in_("status", INVITE_RETRY_STATUSES)
+        .is_("sent_at", "null")
+        .execute()
+    )
+    return bool(getattr(response, "data", None))
+
+
+def _mark_inmail_failed(client: Client, lead_id: str, error_message: str) -> None:
+    client.table("leads").update({
+        "status": "FAILED",
+        "error_message": str(error_message)[:500],
+        "updated_at": datetime.utcnow().isoformat(),
+    }).eq("id", lead_id).eq("linkedin_account_id", CURRENT_ACCOUNT_ID).execute()
+
+
 def fetch_next_lead(client: Client) -> Optional[Dict[str, Any]]:
     """Legacy function - fetch a single approved lead."""
     leads = fetch_approved_leads(client, 1)
@@ -1122,18 +1255,26 @@ def _render_template_message(template: str, lead: Dict[str, Any]) -> str:
     first_name = (lead.get("first_name") or "").strip()
     last_name = (lead.get("last_name") or "").strip()
     company = (lead.get("company_name") or "").strip()
+    profile_data = lead.get("profile_data")
+    profile_salutation = profile_data.get("salutation") if isinstance(profile_data, dict) else None
+    salutation = str(lead.get("salutation") or profile_salutation or "").strip()
+    if re.search(r"\{\{\s*salutation\s*\}\}|\{\s*salutation\s*\}|\[\s*salutation\s*\]", template or ""):
+        if salutation not in VERIFIED_SALUTATIONS:
+            raise ValueError("Verified salutation is required before rendering a salutation template.")
     full_name = " ".join([p for p in [first_name, last_name] if p]).strip()
     replacements = {
         "{{first_name}}": first_name,
         "{{last_name}}": last_name,
         "{{full_name}}": full_name,
         "{{company_name}}": company,
+        "{{salutation}}": salutation,
         "{{VORNAME}}": first_name,
         "{{NACHNAME}}": last_name,
         "{first_name}": first_name,
         "{last_name}": last_name,
         "{full_name}": full_name,
         "{company_name}": company,
+        "{salutation}": salutation,
         "[Name]": first_name or full_name,
         "[name]": first_name or full_name,
     }
@@ -1224,7 +1365,11 @@ def linkedin_absolute_url(href: str) -> str:
     return clean_href
 
 
-def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, Any]:
+def load_sequence_messages(
+    client: Client,
+    lead: Dict[str, Any],
+    sequence_id_override: Optional[int] = None,
+) -> Dict[str, Any]:
     """Resolve sequence messages for a lead, preferring DB templates over defaults."""
     fallback_sender = (CURRENT_ACCOUNT_DISPLAY_NAME.split()[0] if CURRENT_ACCOUNT_DISPLAY_NAME else "Absender")
     result: Dict[str, Any] = {
@@ -1239,11 +1384,13 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
         "guide_url": "",
         "asset_followup_1": "",
         "asset_followup_2": "",
+        "delivery_mode": "standard_connect_message",
+        "inmail_subject": "",
         "source": "defaults",
     }
 
-    sequence_id = _resolve_launch_sequence_id(lead)
-    variant_id = lead.get("sequence_variant_id")
+    sequence_id = sequence_id_override or _resolve_launch_sequence_id(lead)
+    variant_id = None if sequence_id_override else lead.get("sequence_variant_id")
     if variant_id:
         try:
             variant_resp = (
@@ -1251,7 +1398,8 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
                 .select(
                     "id, sequence_id, variant_key, connect_note, first_message, second_message, third_message, "
                     "asset_followup_1, asset_followup_2, is_active, "
-                    "sequence:outreach_sequences(id, campaign_key, booking_url, guide_url, followup_interval_days, is_active)"
+                    "sequence:outreach_sequences(id, campaign_key, booking_url, guide_url, followup_interval_days, "
+                    "delivery_mode, inmail_subject, is_active)"
                 )
                 .eq("id", variant_id)
                 .eq("is_active", True)
@@ -1282,6 +1430,8 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
                             "followup_interval_days": _safe_int(
                                 sequence.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS
                             ),
+                            "delivery_mode": sequence.get("delivery_mode") or result["delivery_mode"],
+                            "inmail_subject": sequence.get("inmail_subject") or "",
                             "source": "outreach_sequence_variants",
                         }
                     )
@@ -1318,7 +1468,8 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
     rows: list[Dict[str, Any]] = []
     try:
         query = client.table("outreach_sequences").select(
-            "id, campaign_key, booking_url, guide_url, connect_note, first_message, second_message, third_message, followup_interval_days, is_active, created_at"
+            "id, campaign_key, booking_url, guide_url, connect_note, first_message, second_message, third_message, "
+            "followup_interval_days, delivery_mode, inmail_subject, is_active, created_at"
         )
         query = query.eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         if sequence_id is not None:
@@ -1345,6 +1496,8 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
                 "followup_interval_days": _safe_int(
                     row.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS
                 ),
+                "delivery_mode": row.get("delivery_mode") or result["delivery_mode"],
+                "inmail_subject": row.get("inmail_subject") or "",
                 "source": "outreach_sequences",
             }
         )
@@ -5309,6 +5462,188 @@ async def process_invite_one(
     return outcome
 
 
+# ------------------------- INMAIL + INVITE FLOW -------------------------
+async def _verify_inmail_recipient(page: Page, lead: Dict[str, Any]) -> None:
+    """Require the opened composer to still identify the requested profile."""
+    first_name = normalize_linkedin_person_name(str(lead.get("first_name") or ""))
+    last_name = normalize_linkedin_person_name(str(lead.get("last_name") or ""))
+    expected_tokens = [token for token in (first_name, last_name) if token]
+    if not expected_tokens:
+        raise RuntimeError("InMail recipient cannot be verified because the lead has no name.")
+    body_text = await page.locator("body").inner_text(timeout=5_000)
+    normalized_body = normalize_linkedin_person_name(body_text)
+    if not all(token in normalized_body for token in expected_tokens):
+        raise RuntimeError("InMail composer recipient did not match the requested lead.")
+
+
+def _persist_inmail_success(
+    client: Client,
+    lead: Dict[str, Any],
+    inmail_sent_at: str,
+    invite_result: str,
+) -> None:
+    lead_id = str(lead.get("id") or "")
+    if invite_result == "sent":
+        payload = {
+            "status": "CONNECT_ONLY_SENT",
+            "connection_sent_at": inmail_sent_at,
+            "sent_at": inmail_sent_at,
+            "sequence_step": 1,
+            "sequence_started_at": lead.get("sequence_started_at") or inmail_sent_at,
+            "sequence_last_sent_at": inmail_sent_at,
+            "error_message": None,
+            "profile_data": {
+                **(lead.get("profile_data") if isinstance(lead.get("profile_data"), dict) else {}),
+                "inmail_first_touch_sent": True,
+            },
+            "updated_at": inmail_sent_at,
+        }
+    elif invite_result == "connected":
+        payload = {
+            "status": "SENT",
+            "sent_at": inmail_sent_at,
+            "connection_accepted_at": lead.get("connection_accepted_at") or inmail_sent_at,
+            "sequence_step": 1,
+            "sequence_started_at": lead.get("sequence_started_at") or inmail_sent_at,
+            "sequence_last_sent_at": inmail_sent_at,
+            "error_message": None,
+            "profile_data": {
+                **(lead.get("profile_data") if isinstance(lead.get("profile_data"), dict) else {}),
+                "inmail_first_touch_sent": True,
+            },
+            "updated_at": inmail_sent_at,
+        }
+    else:
+        payload = {
+            "status": "FAILED",
+            "error_message": f"InMail sent but connection request outcome was {invite_result}",
+            "profile_data": {
+                **(lead.get("profile_data") if isinstance(lead.get("profile_data"), dict) else {}),
+                "inmail_first_touch_sent": True,
+            },
+            "updated_at": inmail_sent_at,
+        }
+    client.table("leads").update(payload).eq("id", lead_id).eq(
+        "linkedin_account_id", CURRENT_ACCOUNT_ID
+    ).execute()
+
+
+def _record_inmail_invite_event(
+    client: Client,
+    lead: Dict[str, Any],
+    sequence_id: Optional[int],
+    invite_result: str,
+) -> None:
+    client.table("outreach_events").insert(event_payload(
+        account_id=CURRENT_ACCOUNT_ID,
+        lead_id=str(lead.get("id") or ""),
+        event_type="invite_sent",
+        sequence_id=sequence_id,
+        variant_id=lead.get("sequence_variant_id"),
+        touch_number=1,
+        correlation_id=os.getenv("CORRELATION_ID"),
+        metadata={
+            "surface": "connection_request",
+            "delivery_mode": INMAIL_AND_INVITE_MODE,
+            "invite_result": invite_result,
+        },
+    )).execute()
+
+
+async def process_inmail_and_invite_one(
+    context: BrowserContext,
+    client: Client,
+    lead: Dict[str, Any],
+    *,
+    sequence_id_override: Optional[int] = None,
+    test_override: bool = False,
+) -> str:
+    """Send the first-touch InMail, then verify/send the connection request."""
+    validate_inmail_test_override(str(lead.get("id") or ""), test_override)
+    sequence_messages = load_sequence_messages(client, lead, sequence_id_override)
+    if not is_inmail_and_invite_sequence(sequence_messages):
+        raise RuntimeError("Lead is not assigned to the invite_and_inmail delivery mode.")
+    sequence_id = sequence_id_override or _resolve_launch_sequence_id(lead)
+    if _inmail_event_exists(client, lead, sequence_id, test_override):
+        logger.info("Skipping already-recorded InMail first touch", {"leadId": lead.get("id")})
+        return "already_sent"
+
+    message = str(sequence_messages.get("first_message") or "").strip()
+    subject = str(sequence_messages.get("inmail_subject") or "").strip()
+    if not message or not subject:
+        raise RuntimeError("InMail campaign requires both first_message and inmail_subject.")
+
+    lead_id = str(lead.get("id") or "")
+    profile_url = normalize_linkedin_profile_url(str(lead.get("linkedin_url") or ""))
+    scraper_lead = ScraperLead(
+        id=lead_id,
+        linkedin_url=profile_url,
+        first_name=lead.get("first_name"),
+        last_name=lead.get("last_name"),
+        company_name=lead.get("company_name"),
+    )
+    page = await context.new_page()
+    message_page: Optional[Page] = None
+    inmail_sent_at = datetime.now(timezone.utc).isoformat()
+    try:
+        await page.goto(profile_url, wait_until="domcontentloaded", timeout=60_000)
+        await page.wait_for_selector("main", timeout=15_000)
+        await page.wait_for_timeout(1_000)
+        unavailable_reason = await linkedin_profile_unavailable_reason(page)
+        if unavailable_reason:
+            raise RuntimeError(f"LinkedIn profile unavailable: {unavailable_reason}")
+
+        message_page, surface = await open_followup_message_surface(page)
+        if surface != SURFACE_SALES_NAVIGATOR:
+            raise RuntimeError(f"Expected Sales Navigator/InMail surface, got {surface}")
+        await _verify_inmail_recipient(message_page, lead)
+        await send_sales_navigator_message(
+            message_page,
+            build_sales_navigator_subject(lead, message, subject),
+            build_sales_navigator_body(message),
+        )
+        inmail_sent_at = datetime.now(timezone.utc).isoformat()
+        _record_inmail_event(client, lead, sequence_id, test_override=test_override)
+
+        relationship = await probe_connect_only_surface(page, scraper_lead)
+        if relationship == "already_connected":
+            invite_result = "connected"
+        elif relationship == "pending_invite":
+            invite_result = "sent"
+        else:
+            invite_result = await send_connection_request(page, scraper_lead)
+            if invite_result == "sent":
+                invite_result = "sent"
+
+        if test_override:
+            logger.info(
+                "InMail test override completed without rewriting lead lifecycle",
+                {"leadId": lead_id},
+                {"inviteResult": invite_result, "sequenceId": sequence_id},
+            )
+            return f"test_sent:{invite_result}"
+
+        if invite_result == "sent":
+            _record_inmail_invite_event(client, lead, sequence_id, invite_result)
+        _persist_inmail_success(client, lead, inmail_sent_at, invite_result)
+        return "sent" if invite_result in {"sent", "connected"} else invite_result
+    except Exception as exc:
+        logger.error("Failed InMail + invite first touch", {"leadId": lead_id}, error=exc)
+        if not test_override:
+            _mark_inmail_failed(client, lead_id, str(exc))
+        raise
+    finally:
+        if message_page is not None and message_page is not page:
+            try:
+                await message_page.close()
+            except Exception:
+                pass
+        try:
+            await page.close()
+        except Exception:
+            pass
+
+
 # ------------------------- MESSAGE-ONLY FLOW -------------------------
 async def process_message_only_one(context: BrowserContext, client: Client, lead: Dict[str, Any]) -> str:
     """Process a CONNECT_ONLY_SENT lead: check if connected, send message if so.
@@ -5879,6 +6214,21 @@ async def main() -> None:
         action="store_true",
         help="Process NEW sequence-driven leads (connect_message/connect_only) and send LinkedIn connection invites.",
     )
+    parser.add_argument(
+        "--send-inmail-invites",
+        action="store_true",
+        help="Send the assigned sequence first-message as InMail, then send the connection request.",
+    )
+    parser.add_argument(
+        "--sequence-id",
+        type=int,
+        help="Use this sequence for a targeted InMail test without changing the lead's stored ownership.",
+    )
+    parser.add_argument(
+        "--test-override",
+        action="store_true",
+        help="Explicitly bypass queue/history gates for one --lead-id InMail test; never changes lifecycle fields.",
+    )
     args = parser.parse_args()
     if not args.account_id:
         parser.error("--account-id is required so browser state, queues, and limits cannot cross accounts.")
@@ -5886,8 +6236,9 @@ async def main() -> None:
     mode = (
         "followup" if args.followup
         else ("message_only" if args.message_only
+        else ("inmail_and_invites" if args.send_inmail_invites
         else ("send_invites" if args.send_invites
-        else "connect_message"))
+        else "connect_message")))
     )
     logger.operation_start(f"sender-{mode}", input_data={"lead_id": args.lead_id, "mode": mode, "account_id": args.account_id})
 
@@ -5895,7 +6246,11 @@ async def main() -> None:
         client = get_supabase_client()
         configure_runtime_account(client, args.account_id)
 
-        daily_limit = CURRENT_DAILY_INVITE_LIMIT if args.send_invites else CURRENT_DAILY_MESSAGE_LIMIT
+        daily_limit = (
+            CURRENT_DAILY_INVITE_LIMIT
+            if args.send_invites or args.send_inmail_invites
+            else CURRENT_DAILY_MESSAGE_LIMIT
+        )
         logger.info("Daily send limit computed", data={"limit": daily_limit, "env": os.getenv("DAILY_SEND_LIMIT"), "default": DAILY_SEND_DEFAULT})
         if args.send_invites:
             already_sent = connect_only_sent_today_count(client)
@@ -5904,7 +6259,9 @@ async def main() -> None:
         else:
             already_sent = sent_today_count(client)
 
-        if already_sent >= daily_limit:
+        if args.send_inmail_invites:
+            already_sent = max(connect_only_sent_today_count(client), sent_today_count(client))
+        if already_sent >= daily_limit and not (args.send_inmail_invites and args.test_override):
             logger.warn("Daily send limit reached", data={"limit": daily_limit, "sent": already_sent})
             return
 
@@ -6143,6 +6500,69 @@ async def main() -> None:
                         "retry": retry_count,
                         "failed": failed_count,
                         "total": len(leads_to_process),
+                    },
+                )
+            finally:
+                await shutdown(playwright, browser)
+                logger.info("Browser closed")
+            return
+
+        if args.send_inmail_invites:
+            validate_inmail_test_override(args.lead_id, args.test_override)
+            if args.test_override:
+                lead = fetch_lead_by_id(client, args.lead_id)
+                if not lead:
+                    logger.warn("Requested InMail test lead not found for Katharina", {"leadId": args.lead_id})
+                    return
+                leads_to_process = [lead]
+            else:
+                leads_to_process = fetch_inmail_and_invite_queue(client, remaining, args.batch_id)
+                if not leads_to_process:
+                    logger.info("No NEW or FAILED invite_and_inmail leads to process", {"batchId": args.batch_id})
+                    return
+
+            logger.info(
+                f"inmail_and_invites: processing {len(leads_to_process)} leads",
+                data={"leadIds": [lead.get("id") for lead in leads_to_process], "testOverride": args.test_override},
+            )
+            playwright, browser, context = await open_browser(headless=False)
+            try:
+                logger.info("Browser opened, authenticating for InMail + invite flow...")
+                await ensure_linkedin_auth(context, client)
+                sent_count = 0
+                failed_count = 0
+                already_sent_count = 0
+                for lead in leads_to_process:
+                    lead_id = str(lead.get("id") or "")
+                    try:
+                        if not args.test_override and not _mark_inmail_processing(client, lead_id):
+                            continue
+                        result = await process_inmail_and_invite_one(
+                            context,
+                            client,
+                            lead,
+                            sequence_id_override=args.sequence_id,
+                            test_override=args.test_override,
+                        )
+                        if result == "already_sent":
+                            already_sent_count += 1
+                        elif result.startswith("test_sent:") or result == "sent":
+                            sent_count += 1
+                        else:
+                            failed_count += 1
+                    except Exception as exc:
+                        logger.error("Failed to process InMail + invite lead", {"leadId": lead_id}, error=exc)
+                        failed_count += 1
+                    if not args.test_override:
+                        await random_pause(2, 4)
+                logger.operation_complete(
+                    "sender-inmail-and-invites",
+                    result={
+                        "sent": sent_count,
+                        "alreadySent": already_sent_count,
+                        "failed": failed_count,
+                        "total": len(leads_to_process),
+                        "testOverride": args.test_override,
                     },
                 )
             finally:

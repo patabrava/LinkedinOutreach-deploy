@@ -56,7 +56,7 @@ const emptyDraft = (): Draft => ({
 });
 
 const MESSAGE_FIELDS: MessageFieldKey[] = ["connect_note", "first_message", "second_message", "third_message"];
-const DEFAULT_CANONICAL_TOKENS = ["{{first_name}}", "{{last_name}}", "{{full_name}}", "{{company_name}}"];
+const DEFAULT_CANONICAL_TOKENS = ["{{first_name}}", "{{last_name}}", "{{full_name}}", "{{company_name}}", "{{salutation}}"];
 
 const EMPTY_FIELD_ERRORS: ValidationErrorsByField = {
   connect_note: [],
