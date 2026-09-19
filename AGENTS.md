@@ -167,5 +167,6 @@ The declaration is a commitment to the chosen process. If evidence changes a sta
 - Disposable PostgreSQL migration tests must wait on a successful query against the target database, not `pg_isready` alone, because the image's temporary init server can accept connections before `POSTGRES_DB` exists.
 - Production containers must start the web UI only unless `START_BACKGROUND_WORKERS=1` is explicitly set; remote-browser images must create a build-validated fixed Chromium executable from pinned Playwright payloads across architectures, and persistent profiles must delete stale `SingletonLock`/`SingletonCookie`/`SingletonSocket` links before launch.
 - Account browser routes must pass noVNC an account-scoped `path=linkedin-browser-<slot>/websockify` and use Traefik forward-auth against the app's strict allowlisted operator session/token before exposing the remote desktop.
+- Sales Navigator/InMail rendering must remove the manual sender name from a terminal sign-off while preserving the closing phrase, because LinkedIn appends the account signature automatically; direct-message rendering keeps the full template, and regression tests must cover multiline and single-line closings.
 <!-- bridgecode:repo-rules:end -->
 <!-- bridgecode:managed:end -->

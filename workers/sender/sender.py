@@ -769,12 +769,40 @@ def validate_inmail_test_override(lead_id: Optional[str], test_override: bool) -
 
 
 def build_sales_navigator_body(message: str) -> str:
-    return (message or "").strip()
+    return strip_sales_navigator_signature(message)
 
 
 def strip_sales_navigator_signature(message: str) -> str:
-    """Legacy helper kept for compatibility with older tests/imports."""
-    return (message or "").strip()
+    """Remove the manual sender name from Sales Navigator message bodies.
+
+    Direct LinkedIn messages keep the complete template. Sales Navigator adds
+    the configured account signature below the body, so retaining a manual
+    sender name would render the sender twice.
+    """
+    lines = [line.rstrip() for line in (message or "").splitlines()]
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    signoff_re = re.compile(
+        r"^(?P<closing>viele grüße|beste grüße|liebe grüße|herzliche grüße|mit freundlichen grüßen|freundliche grüße)(?P<punct>[,!]?)\s*(?P<name>.*)?$",
+        re.I,
+    )
+    if not lines:
+        return ""
+
+    last_idx = len(lines) - 1
+    last_line = lines[last_idx].strip()
+    if last_idx > 0 and signoff_re.match(lines[last_idx - 1].strip()) and last_line:
+        return "\n".join(lines[:last_idx]).strip()
+
+    match = signoff_re.match(last_line)
+    if match and (match.group("name") or "").strip():
+        closing = match.group("closing")
+        punctuation = match.group("punct") or ","
+        lines[last_idx] = f"{closing}{punctuation}"
+        return "\n".join(lines).strip()
+
+    return "\n".join(lines).strip()
 
 
 def _connect_or_pending_label_matches(label: str, lead_name: str = "") -> bool:
@@ -2010,6 +2038,52 @@ async def first_safe_message_target(locator, kind: str):
     return None, count
 
 
+async def find_profile_more_menu_message_target(page: Page, profile_container):
+    """Reveal and return the profile-specific InMail action from More/Mehr.
+
+    Some second-degree profiles expose Sales Navigator only as the localized
+    `Mehr -> Nachricht an <name> senden` menu item, with no visible message
+    button on the profile card.
+    """
+    more_buttons = profile_container.get_by_role(
+        "button",
+        name=re.compile(r"^(More|Mehr)(?:\b|$)", re.I),
+    )
+    more_count = await more_buttons.count()
+    logger.element_search(
+        "profile More/Mehr button",
+        more_count,
+        role="button",
+        context={"surface": "followup"},
+    )
+    if more_count <= 0:
+        return None, 0
+
+    try:
+        await more_buttons.first.click(timeout=8_000)
+        await page.wait_for_timeout(500)
+    except Exception as exc:
+        logger.warn("Could not open profile More/Mehr menu", error=exc)
+        return None, 0
+
+    action_pattern = re.compile(
+        r"(?:Nachricht an .+ senden|Send message to .+|Message .+)",
+        re.I,
+    )
+    for role in ("menuitem", "button", "link"):
+        candidate = page.get_by_role(role, name=action_pattern)
+        target, count = await first_safe_message_target(candidate, f"more_menu_{role}")
+        if target is not None:
+            logger.element_search(
+                "profile More/Mehr message action",
+                1,
+                role=role,
+                context={"surface": "followup", "candidateCount": count},
+            )
+            return target, count
+    return None, 0
+
+
 async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
     """Open a messaging surface for a follow-up send.
 
@@ -2068,6 +2142,14 @@ async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
         target_locator, target_count = await first_safe_message_target(generic_button, "generic_button")
         if target_locator is not None:
             target_kind = "generic_button"
+
+    if target_locator is None:
+        target_locator, target_count = await find_profile_more_menu_message_target(
+            page,
+            profile_container,
+        )
+        if target_locator is not None:
+            target_kind = "more_menu_message"
 
     if target_locator is None:
         raise RuntimeError(
@@ -5558,7 +5640,7 @@ async def process_inmail_and_invite_one(
     sequence_id_override: Optional[int] = None,
     test_override: bool = False,
 ) -> str:
-    """Send the first-touch InMail, then verify/send the connection request."""
+    """Send the connection request first, then send the first-touch InMail."""
     validate_inmail_test_override(str(lead.get("id") or ""), test_override)
     sequence_messages = load_sequence_messages(client, lead, sequence_id_override)
     if not is_inmail_and_invite_sequence(sequence_messages):
@@ -5593,6 +5675,21 @@ async def process_inmail_and_invite_one(
         if unavailable_reason:
             raise RuntimeError(f"LinkedIn profile unavailable: {unavailable_reason}")
 
+        relationship = await probe_connect_only_surface(page, scraper_lead)
+        if relationship == "already_connected":
+            invite_result = "connected"
+        elif relationship == "pending_invite":
+            invite_result = "sent"
+        else:
+            invite_result = await send_connection_request(page, scraper_lead)
+        if invite_result not in {"sent", "connected"}:
+            raise RuntimeError(
+                "Connection request was not confirmed before InMail: "
+                f"{invite_result}"
+            )
+        if invite_result == "sent":
+            _record_inmail_invite_event(client, lead, sequence_id, invite_result)
+
         message_page, surface = await open_followup_message_surface(page)
         if surface != SURFACE_SALES_NAVIGATOR:
             raise RuntimeError(f"Expected Sales Navigator/InMail surface, got {surface}")
@@ -5605,16 +5702,6 @@ async def process_inmail_and_invite_one(
         inmail_sent_at = datetime.now(timezone.utc).isoformat()
         _record_inmail_event(client, lead, sequence_id, test_override=test_override)
 
-        relationship = await probe_connect_only_surface(page, scraper_lead)
-        if relationship == "already_connected":
-            invite_result = "connected"
-        elif relationship == "pending_invite":
-            invite_result = "sent"
-        else:
-            invite_result = await send_connection_request(page, scraper_lead)
-            if invite_result == "sent":
-                invite_result = "sent"
-
         if test_override:
             logger.info(
                 "InMail test override completed without rewriting lead lifecycle",
@@ -5623,8 +5710,6 @@ async def process_inmail_and_invite_one(
             )
             return f"test_sent:{invite_result}"
 
-        if invite_result == "sent":
-            _record_inmail_invite_event(client, lead, sequence_id, invite_result)
         _persist_inmail_success(client, lead, inmail_sent_at, invite_result)
         return "sent" if invite_result in {"sent", "connected"} else invite_result
     except Exception as exc:
@@ -6217,7 +6302,7 @@ async def main() -> None:
     parser.add_argument(
         "--send-inmail-invites",
         action="store_true",
-        help="Send the assigned sequence first-message as InMail, then send the connection request.",
+        help="Send the connection request, then send the assigned sequence first-message as InMail.",
     )
     parser.add_argument(
         "--sequence-id",

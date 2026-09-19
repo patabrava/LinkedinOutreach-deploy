@@ -97,6 +97,122 @@ class InmailCampaignContractTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_inmail_test_override("lead-1", False)
 
+
+class InmailInviteOrderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_connection_request_is_sent_before_inmail(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        lead = {
+            "id": "lead-1",
+            "first_name": "Gabriela",
+            "last_name": "Araújo Reis",
+            "company_name": "DeepL SE",
+            "linkedin_url": "https://www.linkedin.com/in/gabriela-araújo-reis-69bb7055",
+            "sequence_id": 10,
+        }
+        context = MagicMock()
+        page = MagicMock()
+        message_page = MagicMock()
+        for candidate in (page, message_page):
+            candidate.goto = AsyncMock()
+            candidate.wait_for_selector = AsyncMock()
+            candidate.wait_for_timeout = AsyncMock()
+            candidate.close = AsyncMock()
+        context.new_page = AsyncMock(return_value=page)
+        order = []
+
+        async def send_connection(*_args, **_kwargs):
+            order.append("connect")
+            return "sent"
+
+        async def open_inmail(*_args, **_kwargs):
+            order.append("open_inmail")
+            return message_page, sender_module.SURFACE_SALES_NAVIGATOR
+
+        async def send_inmail(*_args, **_kwargs):
+            order.append("send_inmail")
+
+        def record_invite(*_args, **_kwargs):
+            order.append("record_invite")
+
+        with patch.object(
+            sender_module,
+            "load_sequence_messages",
+            return_value={
+                "first_message": "Guten Tag Gabriela Araújo Reis,\n\nTest",
+                "inmail_subject": "Ihre betriebliche Altersvorsorge",
+                "delivery_mode": INMAIL_AND_INVITE_MODE,
+            },
+        ), patch.object(sender_module, "_resolve_launch_sequence_id", return_value=10), patch.object(
+            sender_module, "_inmail_event_exists", return_value=False
+        ), patch.object(
+            sender_module, "linkedin_profile_unavailable_reason", AsyncMock(return_value=None)
+        ), patch.object(
+            sender_module, "probe_connect_only_surface", AsyncMock(return_value="invite_available")
+        ), patch.object(
+            sender_module, "send_connection_request", AsyncMock(side_effect=send_connection)
+        ), patch.object(
+            sender_module, "open_followup_message_surface", AsyncMock(side_effect=open_inmail)
+        ), patch.object(sender_module, "_verify_inmail_recipient", AsyncMock()), patch.object(
+            sender_module, "send_sales_navigator_message", AsyncMock(side_effect=send_inmail)
+        ), patch.object(sender_module, "_record_inmail_event"), patch.object(
+            sender_module, "_record_inmail_invite_event", side_effect=record_invite
+        ), patch.object(
+            sender_module, "logger"
+        ):
+            result = await sender_module.process_inmail_and_invite_one(
+                context,
+                MagicMock(),
+                lead,
+                sequence_id_override=10,
+                test_override=True,
+            )
+
+        self.assertEqual(result, "test_sent:sent")
+        self.assertLess(order.index("connect"), order.index("open_inmail"))
+        self.assertLess(order.index("record_invite"), order.index("open_inmail"))
+        self.assertLess(order.index("open_inmail"), order.index("send_inmail"))
+
+
+class ProfileMoreMenuMessageTest(unittest.IsolatedAsyncioTestCase):
+    async def test_finds_localized_send_message_action_in_more_menu(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        page = MagicMock()
+        profile_container = MagicMock()
+        more_buttons = MagicMock()
+        more_button = MagicMock()
+        more_button.click = AsyncMock()
+        more_buttons.count = AsyncMock(return_value=1)
+        more_buttons.first = more_button
+        profile_container.get_by_role.return_value = more_buttons
+
+        empty = MagicMock()
+        empty.count = AsyncMock(return_value=0)
+        menu_targets = MagicMock()
+        menu_target = MagicMock()
+        menu_targets.count = AsyncMock(return_value=1)
+        menu_targets.nth.return_value = menu_target
+        page.get_by_role.side_effect = lambda role, **_kwargs: (
+            menu_targets if role == "menuitem" else empty
+        )
+        page.wait_for_timeout = AsyncMock()
+
+        async def safe_target(locator, _kind):
+            if locator is menu_targets:
+                return menu_target, 1
+            return None, 0
+
+        with patch.object(sender_module, "first_safe_message_target", side_effect=safe_target):
+            result, count = await sender_module.find_profile_more_menu_message_target(
+                page,
+                profile_container,
+            )
+
+        self.assertIs(result, menu_target)
+        self.assertEqual(count, 1)
+        more_button.click.assert_awaited_once()
+
     def execute(self):
         return self
 
@@ -1015,37 +1131,46 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertEqual(subject, "Kurze Frage zu deiner bAV")
 
-    def test_strip_sales_navigator_signature_preserves_manual_closing_with_name(self):
+    def test_strip_sales_navigator_signature_removes_name_below_manual_closing(self):
         body = (
             "Hi Marina,\n\n"
             "freut mich, dass wir uns hier vernetzen.\n\n"
             "Viele Grüße,\nKatharina"
         )
 
-        self.assertEqual(strip_sales_navigator_signature(body), body)
+        self.assertEqual(
+            strip_sales_navigator_signature(body),
+            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.\n\nViele Grüße,",
+        )
 
-    def test_strip_sales_navigator_signature_preserves_single_line_closing_with_name(self):
+    def test_strip_sales_navigator_signature_removes_name_from_single_line_closing(self):
         body = (
             "Hi Marina,\n\n"
             "freut mich, dass wir uns hier vernetzen.\n\n"
             "Viele Grüße, Katharina"
         )
 
-        self.assertEqual(strip_sales_navigator_signature(body), body)
+        self.assertEqual(
+            strip_sales_navigator_signature(body),
+            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.\n\nViele Grüße,",
+        )
 
     def test_strip_sales_navigator_signature_keeps_non_signature_body(self):
         body = "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen."
 
         self.assertEqual(strip_sales_navigator_signature(body), body)
 
-    def test_build_sales_navigator_body_preserves_signature(self):
+    def test_build_sales_navigator_body_removes_name_added_by_sales_navigator(self):
         message = (
             "Hi Marina,\n\n"
             "freut mich, dass wir uns hier vernetzen.\n\n"
-            "Viele Grüße,\nKatharina"
+            "Viele Grüße\nKatharina"
         )
 
-        self.assertEqual(build_sales_navigator_body(message), message)
+        self.assertEqual(
+            build_sales_navigator_body(message),
+            "Hi Marina,\n\nfreut mich, dass wir uns hier vernetzen.\n\nViele Grüße",
+        )
 
     def test_mark_message_only_processing_locks_connected_without_legacy_timestamp(self):
         lead = {"id": "lead-1", "status": "CONNECTED", "sent_at": None}
