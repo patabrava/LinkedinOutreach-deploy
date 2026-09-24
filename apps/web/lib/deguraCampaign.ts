@@ -17,7 +17,7 @@ export type CampaignReadinessCode =
   | "SIX_ACTIVE_VARIANTS_REQUIRED"
   | "BOOKING_URL_REQUIRED"
   | "PRIVACY_URL_REQUIRED"
-  | "GUIDE_ASSET_REQUIRED";
+  | "GUIDE_URL_REQUIRED";
 
 export type DeguraImportRow = Record<string, unknown> & { linkedin_url?: unknown };
 
@@ -39,6 +39,65 @@ export const DEGURA_SOURCE_SEQUENCE_FAMILY: Readonly<Record<string, DeguraCampai
   "836545727": "B",
   "837149889": "C",
 };
+
+const DEGURA_UTM_CAMPAIGN: Readonly<Record<string, string>> = {
+  DEGURA_A: "degura_a_837149883",
+  DEGURA_B: "degura_b_836545727",
+  DEGURA_C: "degura_c_837149889",
+};
+
+const UTM_KEYS = ["utm_source", "utm_medium", "utm_campaign", "utm_content"] as const;
+
+function normalizeUtmToken(value: unknown): string {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "unknown";
+}
+
+export function buildDeguraUtmUrl(baseUrl: string, input: {
+  campaignKey: string;
+  variantKey: number;
+  context: string;
+  linkType: "guide" | "booking";
+  accountSlot: number;
+}): string {
+  const campaign = DEGURA_UTM_CAMPAIGN[input.campaignKey];
+  if (!campaign || !baseUrl.trim()) return baseUrl;
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.protocol !== "https:") return baseUrl;
+    for (const key of UTM_KEYS) parsed.searchParams.delete(key);
+    const variant = input.variantKey === 1 || input.variantKey === 2 ? `v${input.variantKey}` : "v_unknown";
+    const slot = input.accountSlot === 1 || input.accountSlot === 2 ? `slot${input.accountSlot}` : "slot_unknown";
+    const context = normalizeUtmToken(input.context);
+    const linkSuffix = context === input.linkType || context.endsWith(`_${input.linkType}`) ? "" : `_${input.linkType}`;
+    parsed.searchParams.set("utm_source", "linkedin");
+    parsed.searchParams.set("utm_medium", "social");
+    parsed.searchParams.set("utm_campaign", campaign);
+    parsed.searchParams.set(
+      "utm_content",
+      `${variant}_${context}${linkSuffix}_${slot}`,
+    );
+    return parsed.toString();
+  } catch {
+    return baseUrl;
+  }
+}
+
+function replyTouchContext(sourceTouch: string): string {
+  const contexts: Readonly<Record<string, string>> = {
+    connect_note: "touch1",
+    first_message: "touch2",
+    second_message: "touch3",
+    third_message: "touch4",
+    asset_followup_1: "asset_followup1",
+    asset_followup_2: "asset_followup2",
+  };
+  return contexts[sourceTouch] || normalizeUtmToken(sourceTouch);
+}
 
 const valueFor = (record: Record<string, unknown>, aliases: string[]): string => {
   for (const alias of aliases) {
@@ -87,39 +146,70 @@ export function groupDeguraRowsByFamily<T extends DeguraImportRow>(rows: T[]): R
 }
 
 export function buildDeguraReplyDraft(input: {
+  campaignKey: string;
   route: string;
-  formal: boolean;
+  firstName: string;
+  companyName: string;
   bookingUrl: string;
   guideUrl: string;
+  variantKey: number;
+  sourceTouch: string;
+  accountSlot: number;
 }): string {
-  const { route, formal, bookingUrl, guideUrl } = input;
-  const drafts: Record<string, string> = {
-    appointment: bookingUrl
-      ? `${formal ? "Vielen Dank. Einen passenden Termin können Sie hier auswählen" : "Danke dir. Einen passenden Termin kannst du hier auswählen"}: ${bookingUrl}`
-      : "",
-    guide: `Sehr gern. Hier ist der Leitfaden: ${guideUrl}`.trim(),
-    existing_bav: formal
-      ? `Gut, dass Sie bereits eine bAV haben. Interessant ist dann vor allem, wie viele Mitarbeitende sie tatsächlich nutzen und wie viel Verwaltungsaufwand entsteht. Den Leitfaden finden Sie hier: ${guideUrl}`.trim()
-      : `Gut, dass ihr bereits eine bAV habt. Interessant ist dann vor allem, wie viele Mitarbeitende sie tatsächlich nutzen und wie viel Verwaltungsaufwand entsteht. Den Leitfaden findest du hier: ${guideUrl}`.trim(),
-    not_now: formal
-      ? "Vielen Dank für die klare Rückmeldung. Ich melde mich zu einem späteren Zeitpunkt noch einmal. Bis dahin lasse ich Sie in Ruhe."
-      : "Danke für die klare Rückmeldung. Ich melde mich zu einem späteren Zeitpunkt noch einmal. Bis dahin lasse ich dich in Ruhe.",
-    email_request: formal
-      ? "Gern. An welche E-Mail-Adresse darf ich Ihnen die Informationen schicken?"
-      : "Mach ich. An welche E-Mail-Adresse soll ich dir die Informationen schicken?",
-    internal_clarification: formal
-      ? "Gern. Soll ich Ihnen vorab eine kurze Zusammenfassung der Kosten- und Aufwandsseite für die Geschäftsführung schicken?"
-      : "Klingt gut. Soll ich dir vorab eine kurze Zusammenfassung der Kosten- und Aufwandsseite für die Geschäftsführung schicken?",
-    no_time: "Verstehe ich. Genau deshalb geht es um 30 Minuten und nicht um ein Projekt. Der Aufwand entsteht ohnehin bei Rückfragen, Eintritten und Vertragsänderungen; der Termin bündelt diese Punkte.",
-    employee_disinterest: "Das hören wir oft. Häufig liegt es weniger am Thema als am Einstieg: Wenn der Weg aus PDF, Beratungstermin und Papier besteht, sinkt die Beteiligung. Ein vollständig digitaler Einstieg senkt diese Hürde deutlich.",
-    wrong_person: formal
-      ? "Vielen Dank für den Hinweis. Wer ist bei Ihnen die richtige Ansprechperson für das Thema?"
-      : "Danke für den Hinweis. Wer ist bei euch die richtige Ansprechperson für das Thema?",
-    clear_no: formal
-      ? "Verstanden, vielen Dank für die klare Rückmeldung. Ich melde mich nicht mehr dazu."
-      : "Verstanden, danke dir für die klare Rückmeldung. Ich melde mich nicht mehr dazu.",
+  const { campaignKey, route } = input;
+  const context = `${replyTouchContext(input.sourceTouch)}_reply_${normalizeUtmToken(route)}`;
+  const bookingUrl = buildDeguraUtmUrl(input.bookingUrl, {
+    campaignKey,
+    variantKey: input.variantKey,
+    context,
+    linkType: "booking",
+    accountSlot: input.accountSlot,
+  });
+  const guideUrl = buildDeguraUtmUrl(input.guideUrl, {
+    campaignKey,
+    variantKey: input.variantKey,
+    context,
+    linkType: "guide",
+    accountSlot: input.accountSlot,
+  });
+  const firstName = input.firstName.trim();
+  const formal = campaignKey === "DEGURA_C";
+  const a: Record<string, string> = {
+    appointment: `Sehr gern, ${firstName}. Du kannst dir gerne hier einen Termin mit unserem bAV Experten Toby buchen: ${bookingUrl}`,
+    guide: `Klar, ich schicke dir unseren bAV-Leitfaden für HR-Teams. Dort findest du die wichtigsten Aspekte einer bAV Implementierung. Hier ist der Link: ${guideUrl}\n\nUnd falls du danach Fragen hast, buche dir gerne einen unverbindlichen Termin bei unserem bAV Experten Toby: ${bookingUrl}`,
+    not_now: `Danke für die klare Rückmeldung, ${firstName}.\n\nIch melde mich dann nochmal. Bis dahin lasse ich dich in Ruhe. Falls sich vorher etwas ändert, weißt du, wo ich bin.`,
+    existing_bav: `Gut, dass ihr überhaupt eine habt, ${firstName}. Viele haben das nur auf dem Papier.\n\nInteressanter ist dann meistens: Wie viele deiner Mitarbeitenden nutzen sie wirklich, und wie viel Handarbeit kostet euch die Verwaltung? Wie sieht es mit potenziellen Haftungsfallen aus?\n\nDen Leitfaden schicke ich dir trotzdem, dann liegt er da, wenn du ihn brauchst: ${guideUrl}`,
+    wrong_person: `Danke, ${firstName}, das spart uns beiden Zeit.\n\nMagst du mir den Namen nennen, oder mich kurz weiterleiten? Ich melde mich dann direkt dort und du hast das Thema vom Tisch.`,
+    email_request: `Mach ich, ${firstName}. An welche Adresse soll ich dir die Infos schicken?`,
+    clear_no: `Alles gut, ${firstName}. Danke für die direkte Antwort, ich melde mich nicht mehr. Viel Erfolg.`,
+    internal_clarification: `Klingt gut, ${firstName}. Damit du da nicht mit leeren Händen reingehst: soll ich dir eine Seite schicken, die die Kosten- und Aufwandsseite für die Geschäftsführung zusammenfasst?\n\nSag mir Bescheid, dann hast du sie vor dem Termin.`,
   };
-  return drafts[route] || "";
+  const b: Record<string, string> = {
+    ...a,
+    guide: `Sehr gern, ${firstName}. Hier ist er: ${guideUrl}\n\nWenn du beim Lesen an einer Stelle hängen bleibst, schreib mir einfach. Ich beantworte gerne alle Fragen und freue mich auf den Austausch.`,
+    appointment: `Noch besser, ${firstName}. Du kannst dir gerne hier einen Termin mit unserem bAV Experten Toby buchen: ${bookingUrl}\n\nIch schicke dir den Leitfaden trotzdem mit, dann hast du ihn vor dem Termin: ${guideUrl}`,
+    not_now: `Alles klar, ${firstName}, danke für die Antwort.\n\nDen Leitfaden schicke ich dir trotzdem, dann liegt er da, wenn du ihn brauchst: ${guideUrl}`,
+    internal_clarification: `Gute Idee, ${firstName}. Der Leitfaden ist genau dafür gemacht, er fasst die wesentlichen Aspekte zusammen.\nIch schicke ihn Dir trotzdem, dann liegt er da, wenn du ihn brauchst: ${guideUrl}`,
+  };
+  const c: Record<string, string> = {
+    guide: `Sehr gern, ${firstName}. Hier ist der Leitfaden: ${guideUrl}\n\nWenn beim Lesen eine Frage aufkommt, schreiben Sie mir einfach. Auf Rückfragen zum Leitfaden antworte ich schneller als auf alles andere.`,
+    existing_bav: `Das ist eine gute Ausgangslage, ${firstName}, und häufiger die Ausnahme als die Regel.\n\nZwei Fragen sind dann meistens aufschlussreicher als die nach dem Anbieter: Wie hoch ist die Beteiligungsquote in Ihrer Belegschaft, und wie viele Stunden pro Monat bindet die Verwaltung? Bestehende Verträge übernehmen und digitalisieren wir, ein Anbieterwechsel ist dafür nicht nötig.\n\nWenn beide Zahlen bei Ihnen stimmen, brauchen Sie uns nicht. Wenn nicht, sind 30 Minuten gut investiert.`,
+    clear_no: `Verstanden, ${firstName}. Danke für die klare Antwort, ich melde mich nicht mehr. Alles Gute.`,
+    appointment: `Sehr gern, ${firstName}. Einen passenden Termin mit unserem bAV Experten Toby können Sie hier auswählen: ${bookingUrl}`,
+    not_now: `Vielen Dank für die klare Rückmeldung, ${firstName}. Ich melde mich zu einem späteren Zeitpunkt noch einmal. Bis dahin lasse ich Sie in Ruhe.`,
+    email_request: `Gern, ${firstName}. An welche E-Mail-Adresse darf ich Ihnen die Informationen schicken?`,
+    internal_clarification: `Gern, ${firstName}. Soll ich Ihnen vorab eine kurze Zusammenfassung der Kosten- und Aufwandsseite für die Geschäftsführung schicken?`,
+    wrong_person: `Vielen Dank, ${firstName}. Wer ist bei Ihnen die richtige Ansprechperson für das Thema?`,
+  };
+  const common = formal ? {
+    no_time: `Verstehe ich, ${firstName}. Genau deshalb frage ich nach 30 Minuten und nicht nach einem Projekt.\n\nDer Aufwand entsteht ohnehin, nur verteilt: bei jeder Rückfrage, jedem Eintritt, jeder Vertragsänderung. Die 30 Minuten sind der Versuch, das zu bündeln.`,
+    employee_disinterest: "Das hören wir oft, und meistens stimmt die Beobachtung, nur nicht die Erklärung.\n\nWenn der Einstieg aus einem PDF, einem Beratungstermin und einer Unterschrift auf Papier besteht, sinkt die Beteiligung. Nicht weil das Thema uninteressant ist, sondern weil der Weg dahin unattraktiv ist. Bei einem digitalen Einstieg steigt die Quote deutlich.",
+  } : {
+    no_time: `Verstehe ich, ${firstName}. Genau deshalb frage ich nach 30 Minuten und nicht nach einem Projekt.\n\nDer Aufwand entsteht ohnehin, nur verteilt: bei jeder Rückfrage, jedem Eintritt, jeder Vertragsänderung. Die 30 Minuten sind der Versuch, das zu bündeln.`,
+    employee_disinterest: "Das hören wir oft, und meistens stimmt die Beobachtung, nur nicht die Erklärung.\n\nWenn der Einstieg aus einem PDF, einem Beratungstermin und einer Unterschrift auf Papier besteht, sinkt die Beteiligung. Nicht weil das Thema uninteressant ist, sondern weil der Weg dahin unattraktiv ist. Bei einem digitalen Einstieg steigt die Quote deutlich.",
+  };
+  const campaignDrafts = campaignKey === "DEGURA_A" ? a : campaignKey === "DEGURA_B" ? b : campaignKey === "DEGURA_C" ? c : {};
+  return campaignDrafts[route] || common[route as keyof typeof common] || "";
 }
 
 export type DeguraRejectedRow = {
@@ -131,11 +221,6 @@ export type DeguraRejectedRow = {
     | "DUPLICATE_LINKEDIN_URL"
     | "GLOBAL_SUPPRESSION_ACTIVE";
 };
-
-export function validateGuidePdfBytes(bytes: Uint8Array, maxBytes = 10 * 1024 * 1024): boolean {
-  if (bytes.byteLength < 5 || bytes.byteLength > maxBytes) return false;
-  return String.fromCharCode(...bytes.slice(0, 5)) === "%PDF-";
-}
 
 export function canonicalizeLinkedinUrl(value: unknown): string {
   const raw = typeof value === "string" ? value.trim() : "";
@@ -190,7 +275,6 @@ export function validateCampaignReadiness(input: {
   bookingUrl: string;
   privacyUrl: string;
   guideUrl?: string;
-  guideAssetPresent: boolean;
 }) {
   const accounts = input.accounts.filter((account) => account.is_active !== false);
   const codes: CampaignReadinessCode[] = [];
@@ -208,7 +292,7 @@ export function validateCampaignReadiness(input: {
   if (input.variantCount !== 6) codes.push("SIX_ACTIVE_VARIANTS_REQUIRED");
   if (!isValidHttpsUrl(input.bookingUrl)) codes.push("BOOKING_URL_REQUIRED");
   if (!isValidHttpsUrl(input.privacyUrl)) codes.push("PRIVACY_URL_REQUIRED");
-  if (!input.guideAssetPresent && !isValidHttpsUrl(input.guideUrl || "")) codes.push("GUIDE_ASSET_REQUIRED");
+  if (!isValidHttpsUrl(input.guideUrl || "")) codes.push("GUIDE_URL_REQUIRED");
   return { ready: codes.length === 0, codes };
 }
 

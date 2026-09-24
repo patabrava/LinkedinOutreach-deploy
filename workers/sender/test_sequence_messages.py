@@ -8,7 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from sender import fetch_lead_by_id, load_sequence_messages
+import sender as sender_module
+from sender import fetch_lead_by_id, load_sequence_messages, sanitize_followup_message
 
 
 class FakeResponse:
@@ -79,8 +80,45 @@ class SelectFallbackClient:
 
 
 class LoadSequenceMessagesTest(unittest.TestCase):
+    def setUp(self):
+        self.previous_slot = getattr(sender_module, "CURRENT_ACCOUNT_BROWSER_SLOT", None)
+
     def tearDown(self):
         os.environ.pop("OUTREACH_SEQUENCE_ID", None)
+        if self.previous_slot is None:
+            sender_module.__dict__.pop("CURRENT_ACCOUNT_BROWSER_SLOT", None)
+        else:
+            sender_module.CURRENT_ACCOUNT_BROWSER_SLOT = self.previous_slot
+
+    def test_builds_canonical_aggregate_utm_url_and_preserves_query_and_fragment(self):
+        build_degura_utm_url = getattr(sender_module, "build_degura_utm_url", None)
+        self.assertTrue(callable(build_degura_utm_url), "sender must expose build_degura_utm_url")
+        result = build_degura_utm_url(
+            "https://www.degura.de/bav-leitfaden-confirmation?lang=de&utm_source=old#download",
+            campaign_key="DEGURA_B",
+            variant_key=2,
+            context="Touch 2 / Reply Guide",
+            link_type="guide",
+            account_slot=1,
+        )
+
+        self.assertEqual(
+            result,
+            "https://www.degura.de/bav-leitfaden-confirmation?lang=de&utm_source=linkedin&utm_medium=social&utm_campaign=degura_b_836545727&utm_content=v2_touch_2_reply_guide_slot1#download",
+        )
+        self.assertNotRegex(result, r"camilo|linkedin\.com/in|company|contact-")
+
+    def test_followup_sanitizer_preserves_tracked_url_bytes(self):
+        tracked_url = (
+            "https://calendly.com/toby-weber-degura/videotelefonat-mit-toby-30min"
+            "?utm_source=linkedin&utm_medium=social&utm_campaign=degura_a_837149883"
+            "&utm_content=v1_touch3_booking_slot2"
+        )
+
+        self.assertEqual(
+            sanitize_followup_message(f"Follow-up: {tracked_url}"),
+            f"Follow up: {tracked_url}",
+        )
 
     def test_connect_note_is_hydrated_from_sequence_row(self):
         client = FakeClient(
@@ -132,24 +170,26 @@ class LoadSequenceMessagesTest(unittest.TestCase):
         self.assertEqual(result["connect_note"], "SEQUENZ b ohne Vertrag")
 
     def test_assigned_managed_variant_wins_and_renders_company_name(self):
+        sender_module.CURRENT_ACCOUNT_BROWSER_SLOT = 2
         client = FakeClient(
             {
                 "outreach_sequence_variants": [
                     {
                         "id": 17,
                         "sequence_id": 7,
+                        "variant_key": 2,
                         "connect_note": "Hallo {{first_name}} von {{company_name}}",
-                        "first_message": "Leitfaden für {{company_name}}",
-                        "second_message": "Zweiter Kontakt",
-                        "third_message": "Dritter Kontakt",
-                        "asset_followup_1": "Nachfrage eins",
-                        "asset_followup_2": "Nachfrage zwei",
+                        "first_message": "Leitfaden für {{company_name}}: https://www.degura.de/leitfaden",
+                        "second_message": "Termin: https://calendly.com/degura/demo",
+                        "third_message": "Dritter Kontakt https://www.degura.de/leitfaden",
+                        "asset_followup_1": "Nachfrage eins https://calendly.com/degura/demo",
+                        "asset_followup_2": "Nachfrage zwei https://calendly.com/degura/demo",
                         "is_active": True,
                         "sequence": {
                             "id": 7,
                             "campaign_key": "DEGURA_B",
                             "guide_url": "https://www.degura.de/leitfaden",
-                            "guide_asset_path": "",
+                            "booking_url": "https://calendly.com/degura/demo",
                             "followup_interval_days": 3,
                             "is_active": True,
                         },
@@ -168,8 +208,45 @@ class LoadSequenceMessagesTest(unittest.TestCase):
 
         self.assertEqual(result["source"], "outreach_sequence_variants")
         self.assertEqual(result["connect_note"], "Hallo Mia von ACME")
-        self.assertEqual(result["first_message"], "Leitfaden für ACME")
+        self.assertIn("utm_content=v2_touch2_guide_slot2", result["first_message"])
+        self.assertIn("utm_content=v2_touch3_booking_slot2", result["second_message"])
+        self.assertIn("utm_content=v2_touch4_guide_slot2", result["third_message"])
+        self.assertIn("utm_content=v2_asset_followup1_booking_slot2", result["asset_followup_1"])
+        self.assertIn("utm_content=v2_asset_followup2_booking_slot2", result["asset_followup_2"])
+        self.assertTrue(all("utm_campaign=degura_b_836545727" in result[key] for key in (
+            "first_message", "second_message", "third_message", "asset_followup_1", "asset_followup_2"
+        )))
         self.assertEqual(result["guide_url"], "https://www.degura.de/leitfaden")
+
+    def test_strict_followup_context_does_not_fallback_to_another_active_sequence(self):
+        client = FakeClient(
+            {
+                "outreach_sequences": [
+                    {
+                        "id": 99,
+                        "campaign_key": "UNRELATED_CAMPAIGN",
+                        "first_message": "Wrong campaign {{first_name}}",
+                        "second_message": "Wrong follow-up",
+                        "third_message": "Wrong third touch",
+                        "is_active": True,
+                        "created_at": "2026-04-24T00:00:00Z",
+                    }
+                ],
+                "settings": [],
+            }
+        )
+        lead = {
+            "id": "lead-without-sequence",
+            "first_name": "Mia",
+            "last_name": "Lopez",
+            "outreach_mode": "connect_message",
+        }
+
+        result = load_sequence_messages(client, lead, require_explicit_sequence=True)
+
+        self.assertEqual(result["source"], "missing_explicit_sequence_context")
+        self.assertEqual(result["campaign_key"], "")
+        self.assertEqual(result["second_message"], "")
 
     def test_fetch_lead_by_id_fallback_preserves_sequence_fields(self):
         client = SelectFallbackClient(

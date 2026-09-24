@@ -6,7 +6,6 @@ import {
   distributeDeguraLeads,
   previewDeguraRows,
   validateCampaignReadiness,
-  validateGuidePdfBytes,
 } from "./deguraCampaign";
 import * as deguraCampaign from "./deguraCampaign";
 
@@ -23,12 +22,6 @@ test("canonicalizes LinkedIn profile URLs for global dedupe", () => {
     "https://www.linkedin.com/in/j%c3%b6rg-m%c3%bcller",
   );
   assert.equal(canonicalizeLinkedinUrl("https://linkedin.com/in/not%2Fa-profile"), "");
-});
-
-test("accepts only a PDF signature within the asset size boundary", () => {
-  assert.equal(validateGuidePdfBytes(new TextEncoder().encode("%PDF-1.7")), true);
-  assert.equal(validateGuidePdfBytes(new TextEncoder().encode("not-pdf")), false);
-  assert.equal(validateGuidePdfBytes(new TextEncoder().encode("%PDF-1.7"), 5), false);
 });
 
 test("balances four priority-ordered leads across both accounts and variants without re-sorting", () => {
@@ -101,7 +94,7 @@ test("groups mixed source sequences into A, B and C and orders newest activity f
   });
 });
 
-test("accepts a configured guide URL when no PDF asset is present", () => {
+test("accepts a configured guide URL", () => {
   const result = (validateCampaignReadiness as any)({
     accounts: [
       { browser_slot: 1, daily_invite_limit: 50, daily_message_limit: 50, has_password: true, session_active: true },
@@ -111,37 +104,116 @@ test("accepts a configured guide URL when no PDF asset is present", () => {
     bookingUrl: "https://calendly.com/degura/demo",
     privacyUrl: "https://www.degura.de/datenschutz",
     guideUrl: "https://www.degura.de/bav-leitfaden-confirmation",
-    guideAssetPresent: false,
   });
 
   assert.equal(result.ready, true);
   assert.deepEqual(result.codes, []);
 });
 
+test("requires the guide URL", () => {
+  const result = (validateCampaignReadiness as any)({
+    accounts: [
+      { browser_slot: 1, daily_invite_limit: 50, daily_message_limit: 50, has_password: true, session_active: true },
+      { browser_slot: 2, daily_invite_limit: 50, daily_message_limit: 50, has_password: true, session_active: true },
+    ],
+    variantCount: 6,
+    bookingUrl: "https://calendly.com/degura/demo",
+    privacyUrl: "https://www.degura.de/datenschutz",
+    guideUrl: "",
+  });
+
+  assert.equal(result.ready, false);
+  assert.deepEqual(result.codes, ["GUIDE_URL_REQUIRED"]);
+});
+
+test("builds canonical aggregate DEGURA UTM URLs without personal identifiers", () => {
+  const buildTrackedUrl = (deguraCampaign as any).buildDeguraUtmUrl;
+  const result = typeof buildTrackedUrl === "function" ? buildTrackedUrl(
+    "https://www.degura.de/bav-leitfaden-confirmation?lang=de&utm_source=old#download",
+    {
+      campaignKey: "DEGURA_B",
+      variantKey: 2,
+      context: "Touch 2 / Reply Guide",
+      linkType: "guide",
+      accountSlot: 1,
+    },
+  ) : null;
+
+  assert.equal(
+    result,
+    "https://www.degura.de/bav-leitfaden-confirmation?lang=de&utm_source=linkedin&utm_medium=social&utm_campaign=degura_b_836545727&utm_content=v2_touch_2_reply_guide_slot1#download",
+  );
+  assert.doesNotMatch(String(result), /camilo|linkedin\.com\/in|company|contact-/i);
+});
+
 test("builds deterministic Du and Sie reply drafts for documented safe routes", () => {
   const buildDraft = (deguraCampaign as any).buildDeguraReplyDraft;
-  const informal = typeof buildDraft === "function" ? buildDraft({
-    route: "email_request",
-    formal: false,
+  const campaignA = typeof buildDraft === "function" ? buildDraft({
+    campaignKey: "DEGURA_A",
+    route: "appointment",
+    firstName: "Camilo",
+    companyName: "THE HUB DAO",
     bookingUrl: "https://example.test/demo",
     guideUrl: "https://example.test/guide",
+    variantKey: 1,
+    sourceTouch: "first_message",
+    accountSlot: 2,
   }) : null;
-  const formal = typeof buildDraft === "function" ? buildDraft({
-    route: "existing_bav",
-    formal: true,
+  const campaignB = typeof buildDraft === "function" ? buildDraft({
+    campaignKey: "DEGURA_B",
+    route: "guide",
+    firstName: "Camilo",
+    companyName: "THE HUB DAO",
     bookingUrl: "https://example.test/demo",
     guideUrl: "https://example.test/guide",
+    variantKey: 2,
+    sourceTouch: "second_message",
+    accountSlot: 1,
+  }) : null;
+  const campaignC = typeof buildDraft === "function" ? buildDraft({
+    campaignKey: "DEGURA_C",
+    route: "existing_bav",
+    firstName: "Camilo",
+    companyName: "THE HUB DAO",
+    bookingUrl: "https://example.test/demo",
+    guideUrl: "https://example.test/guide",
+    variantKey: 1,
+    sourceTouch: "first_message",
+    accountSlot: 2,
+  }) : null;
+  const campaignCGuide = typeof buildDraft === "function" ? buildDraft({
+    campaignKey: "DEGURA_C",
+    route: "guide",
+    firstName: "Camilo",
+    companyName: "THE HUB DAO",
+    bookingUrl: "https://example.test/demo",
+    guideUrl: "https://example.test/guide",
+    variantKey: 2,
+    sourceTouch: "third_message",
+    accountSlot: 1,
   }) : null;
   const noTime = typeof buildDraft === "function" ? buildDraft({
+    campaignKey: "DEGURA_A",
     route: "no_time",
-    formal: true,
+    firstName: "Camilo",
+    companyName: "THE HUB DAO",
     bookingUrl: "https://example.test/demo",
     guideUrl: "https://example.test/guide",
+    variantKey: 1,
+    sourceTouch: "first_message",
+    accountSlot: 2,
   }) : null;
 
-  assert.match(informal || "", /An welche E-Mail-Adresse soll ich dir/);
-  assert.match(formal || "", /Den Leitfaden finden Sie hier: https:\/\/example\.test\/guide/);
-  assert.match(noTime || "", /30 Minuten/);
+  assert.equal(campaignA,
+    "Sehr gern, Camilo. Du kannst dir gerne hier einen Termin mit unserem bAV Experten Toby buchen: https://example.test/demo?utm_source=linkedin&utm_medium=social&utm_campaign=degura_a_837149883&utm_content=v1_touch2_reply_appointment_booking_slot2");
+  assert.equal(campaignB,
+    "Sehr gern, Camilo. Hier ist er: https://example.test/guide?utm_source=linkedin&utm_medium=social&utm_campaign=degura_b_836545727&utm_content=v2_touch3_reply_guide_slot1\n\nWenn du beim Lesen an einer Stelle hängen bleibst, schreib mir einfach. Ich beantworte gerne alle Fragen und freue mich auf den Austausch.");
+  assert.equal(campaignC,
+    "Das ist eine gute Ausgangslage, Camilo, und häufiger die Ausnahme als die Regel.\n\nZwei Fragen sind dann meistens aufschlussreicher als die nach dem Anbieter: Wie hoch ist die Beteiligungsquote in Ihrer Belegschaft, und wie viele Stunden pro Monat bindet die Verwaltung? Bestehende Verträge übernehmen und digitalisieren wir, ein Anbieterwechsel ist dafür nicht nötig.\n\nWenn beide Zahlen bei Ihnen stimmen, brauchen Sie uns nicht. Wenn nicht, sind 30 Minuten gut investiert.");
+  assert.equal(campaignCGuide,
+    "Sehr gern, Camilo. Hier ist der Leitfaden: https://example.test/guide?utm_source=linkedin&utm_medium=social&utm_campaign=degura_c_837149889&utm_content=v2_touch4_reply_guide_slot1\n\nWenn beim Lesen eine Frage aufkommt, schreiben Sie mir einfach. Auf Rückfragen zum Leitfaden antworte ich schneller als auf alles andere.");
+  assert.equal(noTime,
+    "Verstehe ich, Camilo. Genau deshalb frage ich nach 30 Minuten und nicht nach einem Projekt.\n\nDer Aufwand entsteht ohnehin, nur verteilt: bei jeder Rückfrage, jedem Eintritt, jeder Vertragsänderung. Die 30 Minuten sind der Versuch, das zu bündeln.");
 });
 
 test("requires exactly two ready accounts and complete campaign config", () => {
@@ -150,7 +222,6 @@ test("requires exactly two ready accounts and complete campaign config", () => {
     variantCount: 0,
     bookingUrl: "",
     privacyUrl: "",
-    guideAssetPresent: false,
   });
 
   assert.deepEqual(result.codes, [
@@ -158,7 +229,7 @@ test("requires exactly two ready accounts and complete campaign config", () => {
     "SIX_ACTIVE_VARIANTS_REQUIRED",
     "BOOKING_URL_REQUIRED",
     "PRIVACY_URL_REQUIRED",
-    "GUIDE_ASSET_REQUIRED",
+    "GUIDE_URL_REQUIRED",
   ]);
 });
 

@@ -3,6 +3,7 @@ export const CANONICAL_SEQUENCE_PLACEHOLDERS = [
   "{{last_name}}",
   "{{full_name}}",
   "{{company_name}}",
+  "{{salutation}}",
 ] as const;
 
 export type SequenceMessageField = "connect_note" | "first_message" | "second_message" | "third_message";

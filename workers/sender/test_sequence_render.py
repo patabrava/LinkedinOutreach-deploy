@@ -40,3 +40,16 @@ def test_legacy_aliases_VORNAME_NACHNAME():
 
 def test_company_name():
     assert render("at {{company_name}}", LEAD) == "at Acme GmbH"
+
+
+def test_salutation():
+    assert render("Guten Tag {{salutation}} {{last_name}}", {**LEAD, "salutation": "Frau"}) == "Guten Tag Frau Müller"
+
+
+def test_missing_salutation_fails_closed():
+    try:
+        render("Guten Tag {{salutation}} {{last_name}}", LEAD)
+    except ValueError as exc:
+        assert "Verified salutation" in str(exc)
+    else:
+        raise AssertionError("A salutation template must not render without verified evidence")

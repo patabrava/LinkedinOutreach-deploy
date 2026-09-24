@@ -12,6 +12,8 @@ Minimal Playwright scraper that enriches leads in Supabase.
 
 ## Usage
 - `python scraper.py --run` enriches up to the remaining daily quota of `NEW` leads by default: it fetches profile + recent activity, writes JSON, and moves status to `ENRICHED`.
+- `python scraper.py --account-id <account-id> --salutation-enrichment --batch-id <batch-id> --limit 0` reads one paused batch and stores only explicit LinkedIn `Frau`/`Herr` evidence in `profile_data`; it never changes outreach status, unpauses leads, or sends messages. Unresolved profiles stay unresolved and must remain paused.
+- Add `--salutation-only-missing` to retry only paused leads without a persisted enrichment result after a transient scraper or profile-identity failure.
 - If `auth.json` is missing, the worker needs a fresh LinkedIn login even if credentials were already saved in Settings. Saving credentials is setup; having a usable session is the separate readiness check.
 
 Safety measures: random waits (3.5–7.2s) and Bezier-like mouse wiggles before actions to reduce bot signatures.

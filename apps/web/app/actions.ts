@@ -22,7 +22,6 @@ import {
   groupDeguraRowsByFamily,
   previewDeguraRows,
   validateCampaignReadiness,
-  validateGuidePdfBytes,
   type DeguraCampaignFamily,
 } from "../lib/deguraCampaign";
 import { aggregateDeguraEvents } from "../lib/deguraAnalytics";
@@ -969,7 +968,7 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
     // Fetch followup with lead data
     const { data: followup, error: fetchError } = await client
       .from("followups")
-      .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, profile_data, sequence_id, batch_id, sequence:outreach_sequences(id, name, campaign_key, tone, booking_url, privacy_url, guide_url, connect_note, first_message, second_message, third_message), batch:lead_batches(id, sequence_id, sequence:outreach_sequences(id, name, campaign_key, tone, booking_url, privacy_url, guide_url, connect_note, first_message, second_message, third_message)))")
+      .select("*, lead:leads(id, first_name, last_name, company_name, linkedin_url, profile_data, sequence_id, sequence_variant_id, batch_id, variant:outreach_sequence_variants(variant_key), sequence:outreach_sequences(id, name, campaign_key, tone, booking_url, privacy_url, guide_url, connect_note, first_message, second_message, third_message), batch:lead_batches(id, sequence_id, sequence:outreach_sequences(id, name, campaign_key, tone, booking_url, privacy_url, guide_url, connect_note, first_message, second_message, third_message)))")
       .eq("id", followupId)
       .single();
 
@@ -979,7 +978,7 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
     }
     const { data: senderAccount } = await client
       .from("linkedin_accounts")
-      .select("display_name, label")
+      .select("display_name, label, browser_slot")
       .eq("id", followup.linkedin_account_id)
       .single();
 
@@ -1005,18 +1004,23 @@ export async function generateFollowupDraft(followupId: string): Promise<{ succe
     const batch = Array.isArray(followup.lead?.batch) ? followup.lead.batch[0] : followup.lead?.batch;
     const batchSequence = Array.isArray(batch?.sequence) ? batch.sequence[0] : batch?.sequence;
     const sequence = leadSequence || batchSequence || null;
+    const leadVariant = Array.isArray(followup.lead?.variant) ? followup.lead.variant[0] : followup.lead?.variant;
 
     if (followup.requires_human) {
       return { success: false, error: `HUMAN_HANDOFF_REQUIRED: ${followup.handoff_reason || followup.reply_route || "manual review"}` };
     }
 
     if (sequence?.campaign_key && followup.reply_route) {
-      const formal = sequence.tone === "sie";
       const deterministicDraft = buildDeguraReplyDraft({
+        campaignKey: String(sequence.campaign_key),
         route: String(followup.reply_route),
-        formal,
+        firstName: String(followup.lead?.first_name || ""),
+        companyName: String(followup.lead?.company_name || ""),
         bookingUrl: String(sequence.booking_url || ""),
         guideUrl: String(sequence.guide_url || ""),
+        variantKey: Number(leadVariant?.variant_key || 0),
+        sourceTouch: String(followup.source_touch || "reply"),
+        accountSlot: Number(senderAccount?.browser_slot || 0),
       });
       if (deterministicDraft) {
         const { error: draftError } = await client
@@ -2153,7 +2157,7 @@ export async function fetchDeguraCampaignStatus() {
   const accounts = await fetchLinkedinAccounts();
   const { data: sequences, error } = await client
     .from("outreach_sequences")
-    .select("id, campaign_key, booking_url, privacy_url, guide_url, guide_asset_path, is_active, outreach_sequence_variants(id, is_active)")
+    .select("id, campaign_key, booking_url, privacy_url, guide_url, is_active, outreach_sequence_variants(id, is_active)")
     .in("campaign_key", ["DEGURA_A", "DEGURA_B", "DEGURA_C"])
     .order("campaign_key", { ascending: true });
   if (error) throw error;
@@ -2168,16 +2172,9 @@ export async function fetchDeguraCampaignStatus() {
   };
   const bookingUrl = singleValue("booking_url");
   const privacyUrl = singleValue("privacy_url");
-  const guideAssetPath = singleValue("guide_asset_path");
   const guideUrl = singleValue("guide_url");
-  let guideAssetPresent = false;
-  try {
-    if (guideAssetPath) guideAssetPresent = validateGuidePdfBytes(fs.readFileSync(guideAssetPath));
-  } catch {
-    guideAssetPresent = false;
-  }
-  const readiness = validateCampaignReadiness({ accounts, variantCount, bookingUrl, privacyUrl, guideUrl, guideAssetPresent });
-  return { ...readiness, accounts, variantCount, bookingUrl, privacyUrl, guideUrl, guideAssetPath };
+  const readiness = validateCampaignReadiness({ accounts, variantCount, bookingUrl, privacyUrl, guideUrl });
+  return { ...readiness, accounts, variantCount, bookingUrl, privacyUrl, guideUrl };
 }
 
 export async function fetchDeguraEventAnalytics(days = 30, accountId?: string, variantId?: number) {
@@ -2216,25 +2213,15 @@ export async function saveDeguraCampaignSettings(
   const client = supabaseAdmin();
   const { data: sequences, error: sequenceError } = await client
     .from("outreach_sequences")
-    .select("id, guide_asset_path")
+    .select("id")
     .in("campaign_key", ["DEGURA_A", "DEGURA_B", "DEGURA_C"]);
   if (sequenceError || (sequences || []).length !== 3) {
     return { success: false, error: "All three DEGURA campaign families must exist before configuration." };
   }
 
-  let guideAssetPath = String(sequences?.[0]?.guide_asset_path || "");
-  const upload = formData.get("guide_pdf");
-  if (upload instanceof File && upload.size > 0) {
-    const bytes = new Uint8Array(await upload.arrayBuffer());
-    if (!validateGuidePdfBytes(bytes)) return { success: false, error: "Guide must be a readable PDF no larger than 10 MB." };
-    const assetRoot = fs.existsSync("/data") ? "/data/campaign-assets" : path.join(process.cwd(), ".campaign-assets");
-    fs.mkdirSync(assetRoot, { recursive: true, mode: 0o700 });
-    guideAssetPath = path.join(assetRoot, "degura-guide.pdf");
-    fs.writeFileSync(guideAssetPath, bytes, { mode: 0o600 });
-  }
   const { error } = await client
     .from("outreach_sequences")
-    .update({ booking_url: bookingUrl, privacy_url: privacyUrl, guide_url: guideUrl, guide_asset_path: guideAssetPath || null })
+    .update({ booking_url: bookingUrl, privacy_url: privacyUrl, guide_url: guideUrl })
     .in("campaign_key", ["DEGURA_A", "DEGURA_B", "DEGURA_C"]);
   if (error) return { success: false, error: error.message };
   revalidatePath("/settings");

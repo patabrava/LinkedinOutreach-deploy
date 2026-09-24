@@ -73,6 +73,17 @@ BEGIN
   IF EXISTS (SELECT 1 FROM outreach_sequence_variants WHERE length(connect_note) > 300) THEN
     RAISE EXCEPTION 'invite note exceeds LinkedIn 300 character limit';
   END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM outreach_sequence_variants variant
+    JOIN outreach_sequences sequence ON sequence.id = variant.sequence_id
+    WHERE sequence.campaign_key = 'DEGURA_A'
+      AND variant.variant_key = 1
+      AND variant.second_message LIKE '%Toby, unser bAV Experte, kann es Dir zeigen: https://calendly.com/toby-weber-degura/videotelefonat-mit-toby-30min%'
+      AND variant.third_message LIKE '%Ansonten, wünsche ich Dir weiterhin viel Erfolg und einen schönen Tag.%'
+  ) THEN
+    RAISE EXCEPTION 'approved DEGURA A1 Version 2 copy missing after migrations';
+  END IF;
 END $$;
 
 DO $$

@@ -1,6 +1,4 @@
 from datetime import datetime
-from pathlib import Path
-import tempfile
 import unittest
 
 from degura_campaign import (
@@ -11,7 +9,6 @@ from degura_campaign import (
     next_touch_at,
     nurture_until,
     route_degura_reply,
-    validate_guide_pdf,
 )
 
 
@@ -28,21 +25,21 @@ class DeguraCampaignTest(unittest.TestCase):
         self.assertEqual(asset_followup_at(start, 1).date().isoformat(), "2026-08-21")
         self.assertEqual(nurture_until(start).date().isoformat(), "2027-02-14")
 
-    def test_pdf_requires_signature(self):
-        with tempfile.TemporaryDirectory() as root:
-            invalid = Path(root) / "guide.pdf"
-            invalid.write_bytes(b"not a pdf")
-            with self.assertRaisesRegex(ValueError, "GUIDE_ASSET_INVALID"):
-                validate_guide_pdf(invalid)
-            valid = Path(root) / "valid.pdf"
-            valid.write_bytes(b"%PDF-1.7\n%%EOF")
-            self.assertEqual(validate_guide_pdf(valid), valid.resolve())
-
     def test_human_only_routes_never_auto_send(self):
-        for text in ("Was kostet das?", "Ist das nach § 1a BetrAVG rechtssicher?", "Das ist eine Frechheit"):
+        for text in (
+            "Was kostet das?",
+            "Ist das nach § 1a BetrAVG rechtssicher?",
+            "Das ist eine Frechheit",
+            "Woher haben Sie meine Daten?",
+        ):
             decision = route_degura_reply(text)
             self.assertTrue(decision.requires_human)
             self.assertIsNone(decision.auto_template_key)
+
+    def test_data_origin_question_uses_privacy_handoff_route(self):
+        decision = route_degura_reply("Woher haben Sie meine Daten?")
+        self.assertEqual(decision.route, "privacy")
+        self.assertEqual(decision.action_order, ("suppress", "handoff"))
 
     def test_clear_no_suppresses_before_close(self):
         decision = route_degura_reply("Nein, bitte nicht mehr kontaktieren.")

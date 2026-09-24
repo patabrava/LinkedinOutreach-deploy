@@ -12,6 +12,7 @@ import re
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
@@ -20,6 +21,7 @@ from supabase import Client, create_client
 # Import shared logger
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from credential_crypto import decrypt_password
+from degura_campaign import event_payload
 from shared_logger import get_logger
 from thread_reader import extract_last_bubble, classify_last_sender
 
@@ -58,8 +60,10 @@ load_runtime_env()
 logger = get_logger("sender")
 CURRENT_ACCOUNT_ID = os.getenv("LINKEDIN_ACCOUNT_ID", "").strip()
 CURRENT_ACCOUNT_DISPLAY_NAME = ""
+CURRENT_ACCOUNT_BROWSER_SLOT = 0
 CURRENT_DAILY_INVITE_LIMIT = DAILY_SEND_DEFAULT if "DAILY_SEND_DEFAULT" in globals() else 50
 CURRENT_DAILY_MESSAGE_LIMIT = DAILY_SEND_DEFAULT if "DAILY_SEND_DEFAULT" in globals() else 50
+VERIFIED_SALUTATIONS = {"Frau", "Herr"}
 
 # Reuse the scraper's persisted auth state to avoid drift between workers.
 def _resolve_scraper_auth_path() -> Path:
@@ -100,11 +104,24 @@ FOLLOWUP_PROCESSING_STALE_MINUTES = 45
 FOLLOWUP_RECENT_SEND_SUPPRESSION_HOURS = 48
 NUDGE_ACTIVE_STATUSES = {"APPROVED", "PROCESSING", "RETRY_LATER"}
 OWN_SENDER_NAME_DEFAULTS = ("Katharina Hoffmann",)
+DEGURA_UTM_CAMPAIGN = {
+    "DEGURA_A": "degura_a_837149883",
+    "DEGURA_B": "degura_b_836545727",
+    "DEGURA_C": "degura_c_837149889",
+}
+DEGURA_MESSAGE_UTM_CONTEXT = {
+    "connect_note": "touch1",
+    "first_message": "touch2",
+    "second_message": "touch3",
+    "third_message": "touch4",
+    "asset_followup_1": "asset_followup1",
+    "asset_followup_2": "asset_followup2",
+}
 
 
 def configure_runtime_account(client: Client, account_id: str) -> None:
     global CURRENT_ACCOUNT_ID, CURRENT_ACCOUNT_DISPLAY_NAME, CURRENT_DAILY_INVITE_LIMIT
-    global CURRENT_DAILY_MESSAGE_LIMIT, AUTH_STATE_PATH
+    global CURRENT_ACCOUNT_BROWSER_SLOT, CURRENT_DAILY_MESSAGE_LIMIT, AUTH_STATE_PATH
     try:
         CURRENT_ACCOUNT_ID = str(uuid.UUID(account_id))
     except ValueError as exc:
@@ -113,7 +130,7 @@ def configure_runtime_account(client: Client, account_id: str) -> None:
     AUTH_STATE_PATH = _resolve_scraper_auth_path()
     response = (
         client.table("linkedin_accounts")
-        .select("display_name, daily_invite_limit, daily_message_limit, is_active")
+        .select("display_name, browser_slot, daily_invite_limit, daily_message_limit, is_active")
         .eq("id", CURRENT_ACCOUNT_ID)
         .single()
         .execute()
@@ -122,6 +139,7 @@ def configure_runtime_account(client: Client, account_id: str) -> None:
     if not account or account.get("is_active") is False:
         raise RuntimeError("LinkedIn account was not found or is disabled.")
     CURRENT_ACCOUNT_DISPLAY_NAME = str(account.get("display_name") or "").strip()
+    CURRENT_ACCOUNT_BROWSER_SLOT = _safe_int(account.get("browser_slot"), 0)
     CURRENT_DAILY_INVITE_LIMIT = max(int(account.get("daily_invite_limit") or 50), 1)
     CURRENT_DAILY_MESSAGE_LIMIT = max(int(account.get("daily_message_limit") or 50), 1)
 NETWORK_OUTAGE_PATTERNS = (
@@ -138,6 +156,8 @@ LEAD_SELECT_FIELDS_CORE = (
     "batch_id, outreach_mode, profile_data"
 )
 LEAD_SELECT_FIELDS_EXTENDED = f"{LEAD_SELECT_FIELDS_CORE}, csv_batch_id, ai_tags"
+INMAIL_AND_INVITE_MODE = "invite_and_inmail"
+INMAIL_TEST_TOUCH_NUMBER = 99
 DIRECT_MESSAGE_COMPOSER_SELECTOR = (
     "div.msg-overlay-conversation-bubble, "
     "section[role='dialog'] div[role='textbox'][contenteditable='true'], "
@@ -721,19 +741,116 @@ def _derive_sales_navigator_subject_from_message(message: str) -> str:
     return _hard_cap_text(subject, 80)
 
 
-def build_sales_navigator_subject(lead: Dict[str, Any], message: str = "") -> str:
+def build_sales_navigator_subject(
+    lead: Dict[str, Any], message: str = "", explicit_subject: str = ""
+) -> str:
     # Sales Navigator/InMail performs best with a short, direct subject line.
     # Keep this stable so the compose window always uses the intended wording.
-    return "Kurze Frage zu deiner bAV"
+    return (explicit_subject or "Kurze Frage zu deiner bAV").strip()
+
+
+def is_inmail_and_invite_sequence(sequence: Optional[Dict[str, Any]]) -> bool:
+    return str((sequence or {}).get("delivery_mode") or "").strip().lower() == INMAIL_AND_INVITE_MODE
+
+
+def is_cop_sales_navigator_followup(
+    lead: Optional[Dict[str, Any]], sequence: Optional[Dict[str, Any]]
+) -> bool:
+    """Allow Sales Navigator reminders only for the explicit COP contract."""
+    lead = lead or {}
+    return (
+        _safe_int(lead.get("batch_id"), 0) == 33
+        and _safe_int(lead.get("sequence_id"), 0) == 10
+        and is_inmail_and_invite_sequence(sequence)
+    )
+
+
+def is_valid_cop_first_touch_event(event: Optional[Dict[str, Any]]) -> bool:
+    """Validate that COP touch 1 was actually delivered through InMail."""
+    event = event or {}
+    metadata = event.get("metadata") or {}
+    return (
+        event.get("event_type") == "touch_sent"
+        and _safe_int(event.get("touch_number"), 0) == 1
+        and metadata.get("surface") == SURFACE_SALES_NAVIGATOR
+        and metadata.get("delivery_mode") == INMAIL_AND_INVITE_MODE
+        and not metadata.get("channel_substitution")
+    )
+
+
+def cop_first_touch_channel_is_valid(client: Client, lead: Dict[str, Any]) -> bool:
+    """Fail closed when COP history proves the first touch used another channel."""
+    try:
+        response = (
+            client.table("outreach_events")
+            .select("event_type, touch_number, metadata")
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+            .eq("lead_id", lead.get("id"))
+            .eq("sequence_id", 10)
+            .eq("event_type", "touch_sent")
+            .eq("touch_number", 1)
+            .limit(10)
+            .execute()
+        )
+    except Exception as exc:
+        logger.warn(
+            "Could not verify COP first-touch channel; blocking follow-up",
+            {"leadId": lead.get("id")},
+            error=exc,
+        )
+        return False
+    rows = response.data or []
+    return bool(rows) and all(is_valid_cop_first_touch_event(row) for row in rows)
+
+
+def inmail_first_touch_already_sent(lead: Dict[str, Any]) -> bool:
+    profile_data = lead.get("profile_data") or {}
+    return isinstance(profile_data, dict) and profile_data.get("inmail_first_touch_sent") is True
+
+
+def validate_inmail_test_override(lead_id: Optional[str], test_override: bool) -> bool:
+    if not test_override:
+        return False
+    if not str(lead_id or "").strip():
+        raise ValueError("--test-override requires --lead-id")
+    return True
 
 
 def build_sales_navigator_body(message: str) -> str:
-    return (message or "").strip()
+    return strip_sales_navigator_signature(message)
 
 
 def strip_sales_navigator_signature(message: str) -> str:
-    """Legacy helper kept for compatibility with older tests/imports."""
-    return (message or "").strip()
+    """Remove the manual sender name from Sales Navigator message bodies.
+
+    Direct LinkedIn messages keep the complete template. Sales Navigator adds
+    the configured account signature below the body, so retaining a manual
+    sender name would render the sender twice.
+    """
+    lines = [line.rstrip() for line in (message or "").splitlines()]
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    signoff_re = re.compile(
+        r"^(?P<closing>viele grüße|beste grüße|liebe grüße|herzliche grüße|mit freundlichen grüßen|freundliche grüße)(?P<punct>[,!]?)\s*(?P<name>.*)?$",
+        re.I,
+    )
+    if not lines:
+        return ""
+
+    last_idx = len(lines) - 1
+    last_line = lines[last_idx].strip()
+    if last_idx > 0 and signoff_re.match(lines[last_idx - 1].strip()) and last_line:
+        return "\n".join(lines[:last_idx]).strip()
+
+    match = signoff_re.match(last_line)
+    if match and (match.group("name") or "").strip():
+        closing = match.group("closing")
+        punctuation = match.group("punct") or ","
+        lines[last_idx] = f"{closing}{punctuation}"
+        return "\n".join(lines).strip()
+
+    return "\n".join(lines).strip()
 
 
 def _connect_or_pending_label_matches(label: str, lead_name: str = "") -> bool:
@@ -854,7 +971,7 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
             client.table("leads")
             .select(LEAD_SELECT_FIELDS_EXTENDED)
             .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
-            .eq("outreach_mode", "connect_only")
+            .or_("outreach_mode.eq.connect_message,outreach_mode.eq.connect_only")
             .is_("sent_at", "null")
             .or_(
                 "connection_sent_at.not.is.null,"
@@ -872,7 +989,7 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
             client.table("leads")
             .select(LEAD_SELECT_FIELDS_CORE)
             .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
-            .eq("outreach_mode", "connect_only")
+            .or_("outreach_mode.eq.connect_message,outreach_mode.eq.connect_only")
             .is_("sent_at", "null")
             .or_(
                 "connection_sent_at.not.is.null,"
@@ -951,12 +1068,15 @@ def fetch_invite_queue(
         client.table("leads")
         .select(
             "id, linkedin_url, first_name, last_name, company_name, "
-            "sequence_id, outreach_mode, batch_id, status, profile_data, lead_batches!inner(batch_intent)"
+            "sequence_id, sequence_variant_id, outreach_mode, batch_id, status, profile_data, "
+            "campaign_paused, source_last_activity_at, lead_batches!inner(batch_intent)"
         )
         .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .in_("status", INVITE_RETRY_STATUSES)
         .is_("connection_sent_at", "null")
+        .eq("campaign_paused", False)
         .in_("lead_batches.batch_intent", ["connect_message", "connect_only"])
+        .order("source_last_activity_at", desc=True, nullsfirst=False)
         .limit(max((limit + len(excluded)) * 5, limit))
     )
     if batch_id is not None:
@@ -977,6 +1097,121 @@ def fetch_invite_queue(
             break
     logger.db_result("select", "leads", query_meta, len(filtered_rows))
     return filtered_rows
+
+
+def fetch_inmail_and_invite_queue(
+    client: Client,
+    limit: int,
+    batch_id: Optional[int] = None,
+) -> list[Dict[str, Any]]:
+    """Fetch only the new sequence delivery mode owned by this account."""
+    def build_query(lead_fields: str):
+        query = (
+            client.table("leads")
+            .select(
+                f"{lead_fields}, "
+                "sequence:outreach_sequences!inner(id, delivery_mode, inmail_subject, is_active)"
+            )
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+            .in_("status", INVITE_RETRY_STATUSES)
+            .is_("sent_at", "null")
+            .is_("connection_sent_at", "null")
+            .eq("campaign_paused", False)
+            .eq("sequence.delivery_mode", INMAIL_AND_INVITE_MODE)
+            .eq("sequence.is_active", True)
+            .order("created_at", desc=False)
+            .limit(max(limit * 3, limit))
+        )
+        if batch_id is not None:
+            query = query.eq("batch_id", batch_id)
+        return query
+
+    try:
+        rows = build_query(LEAD_SELECT_FIELDS_EXTENDED).execute().data or []
+    except Exception as exc:
+        logger.warn("InMail queue extended select failed; retrying core fields", error=exc)
+        rows = build_query(LEAD_SELECT_FIELDS_CORE).execute().data or []
+    result = [row for row in rows if not inmail_first_touch_already_sent(row)]
+    return result[:limit]
+
+
+def _inmail_event_exists(
+    client: Client,
+    lead: Dict[str, Any],
+    sequence_id: Optional[int],
+    test_override: bool,
+) -> bool:
+    """Check the immutable event ledger before opening LinkedIn."""
+    try:
+        response = (
+            client.table("outreach_events")
+            .select("id, sequence_id, touch_number, metadata")
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+            .eq("lead_id", lead.get("id"))
+            .eq("event_type", "touch_sent")
+            .limit(50)
+            .execute()
+        )
+    except Exception as exc:
+        logger.warn("Failed to check InMail idempotency ledger", {"leadId": lead.get("id")}, error=exc)
+        return False
+    for row in response.data or []:
+        metadata = row.get("metadata") or {}
+        if (
+            row.get("sequence_id") == sequence_id
+            and row.get("touch_number") == (INMAIL_TEST_TOUCH_NUMBER if test_override else 1)
+            and metadata.get("delivery_mode") == INMAIL_AND_INVITE_MODE
+            and bool(metadata.get("test_override")) is test_override
+        ):
+            return True
+    return False
+
+
+def _record_inmail_event(
+    client: Client,
+    lead: Dict[str, Any],
+    sequence_id: Optional[int],
+    *,
+    test_override: bool,
+) -> None:
+    touch_number = INMAIL_TEST_TOUCH_NUMBER if test_override else 1
+    payload = event_payload(
+        account_id=CURRENT_ACCOUNT_ID,
+        lead_id=str(lead.get("id") or ""),
+        event_type="touch_sent",
+        sequence_id=sequence_id,
+        variant_id=lead.get("sequence_variant_id") if not test_override else None,
+        touch_number=touch_number,
+        correlation_id=os.getenv("CORRELATION_ID"),
+        metadata={
+            "surface": SURFACE_SALES_NAVIGATOR,
+            "delivery_mode": INMAIL_AND_INVITE_MODE,
+            "test_override": test_override,
+            "first_touch": True,
+        },
+    )
+    client.table("outreach_events").insert(payload).execute()
+
+
+def _mark_inmail_processing(client: Client, lead_id: str) -> bool:
+    response = (
+        client.table("leads")
+        .update({"status": "PROCESSING", "updated_at": datetime.utcnow().isoformat()})
+        .eq("id", lead_id)
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+        .in_("status", INVITE_RETRY_STATUSES)
+        .is_("sent_at", "null")
+        .execute()
+    )
+    return bool(getattr(response, "data", None))
+
+
+def _mark_inmail_failed(client: Client, lead_id: str, error_message: str) -> None:
+    client.table("leads").update({
+        "status": "FAILED",
+        "error_message": str(error_message)[:500],
+        "updated_at": datetime.utcnow().isoformat(),
+    }).eq("id", lead_id).eq("linkedin_account_id", CURRENT_ACCOUNT_ID).execute()
 
 
 def fetch_next_lead(client: Client) -> Optional[Dict[str, Any]]:
@@ -1103,18 +1338,26 @@ def _render_template_message(template: str, lead: Dict[str, Any]) -> str:
     first_name = (lead.get("first_name") or "").strip()
     last_name = (lead.get("last_name") or "").strip()
     company = (lead.get("company_name") or "").strip()
+    profile_data = lead.get("profile_data")
+    profile_salutation = profile_data.get("salutation") if isinstance(profile_data, dict) else None
+    salutation = str(lead.get("salutation") or profile_salutation or "").strip()
+    if re.search(r"\{\{\s*salutation\s*\}\}|\{\s*salutation\s*\}|\[\s*salutation\s*\]", template or ""):
+        if salutation not in VERIFIED_SALUTATIONS:
+            raise ValueError("Verified salutation is required before rendering a salutation template.")
     full_name = " ".join([p for p in [first_name, last_name] if p]).strip()
     replacements = {
         "{{first_name}}": first_name,
         "{{last_name}}": last_name,
         "{{full_name}}": full_name,
         "{{company_name}}": company,
+        "{{salutation}}": salutation,
         "{{VORNAME}}": first_name,
         "{{NACHNAME}}": last_name,
         "{first_name}": first_name,
         "{last_name}": last_name,
         "{full_name}": full_name,
         "{company_name}": company,
+        "{salutation}": salutation,
         "[Name]": first_name or full_name,
         "[name]": first_name or full_name,
     }
@@ -1125,6 +1368,73 @@ def _render_template_message(template: str, lead: Dict[str, Any]) -> str:
     # accidental extra spaces inside each line.
     lines = [re.sub(r"[ \t]{2,}", " ", line).strip() for line in rendered.splitlines()]
     return "\n".join(lines).strip()
+
+
+def _normalize_utm_token(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    ascii_value = "".join(character for character in normalized if not unicodedata.combining(character))
+    return re.sub(r"^_+|_+$", "", re.sub(r"[^a-z0-9]+", "_", ascii_value.lower())) or "unknown"
+
+
+def build_degura_utm_url(
+    base_url: str,
+    *,
+    campaign_key: str,
+    variant_key: int,
+    context: str,
+    link_type: str,
+    account_slot: int,
+) -> str:
+    campaign = DEGURA_UTM_CAMPAIGN.get(campaign_key)
+    if not campaign or not str(base_url or "").strip() or link_type not in {"guide", "booking"}:
+        return base_url
+    try:
+        parsed = urlsplit(base_url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            return base_url
+        query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                 if key not in {"utm_source", "utm_medium", "utm_campaign", "utm_content"}]
+        variant = f"v{variant_key}" if variant_key in {1, 2} else "v_unknown"
+        slot = f"slot{account_slot}" if account_slot in {1, 2} else "slot_unknown"
+        normalized_context = _normalize_utm_token(context)
+        link_suffix = "" if normalized_context == link_type or normalized_context.endswith(f"_{link_type}") else f"_{link_type}"
+        query.extend((
+            ("utm_source", "linkedin"),
+            ("utm_medium", "social"),
+            ("utm_campaign", campaign),
+            ("utm_content", f"{variant}_{normalized_context}{link_suffix}_{slot}"),
+        ))
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
+    except (TypeError, ValueError):
+        return base_url
+
+
+def _render_and_track_sequence_messages(result: Dict[str, Any], lead: Dict[str, Any]) -> None:
+    campaign_key = str(result.get("campaign_key") or "")
+    variant_key = _safe_int(result.get("variant_key"), 0)
+    for message_key, context in DEGURA_MESSAGE_UTM_CONTEXT.items():
+        message = _render_template_message(str(result.get(message_key) or ""), lead)
+        guide_url = str(result.get("guide_url") or "")
+        booking_url = str(result.get("booking_url") or "")
+        if guide_url:
+            message = message.replace(guide_url, build_degura_utm_url(
+                guide_url,
+                campaign_key=campaign_key,
+                variant_key=variant_key,
+                context=context,
+                link_type="guide",
+                account_slot=CURRENT_ACCOUNT_BROWSER_SLOT,
+            ))
+        if booking_url:
+            message = message.replace(booking_url, build_degura_utm_url(
+                booking_url,
+                campaign_key=campaign_key,
+                variant_key=variant_key,
+                context=context,
+                link_type="booking",
+                account_slot=CURRENT_ACCOUNT_BROWSER_SLOT,
+            ))
+        result[message_key] = message
 
 
 def linkedin_absolute_url(href: str) -> str:
@@ -1138,7 +1448,12 @@ def linkedin_absolute_url(href: str) -> str:
     return clean_href
 
 
-def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, Any]:
+def load_sequence_messages(
+    client: Client,
+    lead: Dict[str, Any],
+    sequence_id_override: Optional[int] = None,
+    require_explicit_sequence: bool = False,
+) -> Dict[str, Any]:
     """Resolve sequence messages for a lead, preferring DB templates over defaults."""
     fallback_sender = (CURRENT_ACCOUNT_DISPLAY_NAME.split()[0] if CURRENT_ACCOUNT_DISPLAY_NAME else "Absender")
     result: Dict[str, Any] = {
@@ -1147,23 +1462,29 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
         "second_message": SEQUENCE_DEFAULT_MESSAGES["second_message"].replace("Katharina", fallback_sender),
         "third_message": SEQUENCE_DEFAULT_MESSAGES["third_message"].replace("Katharina", fallback_sender),
         "followup_interval_days": SEQUENCE_INTERVAL_DEFAULT_DAYS,
+        "campaign_key": "",
+        "sequence_id": None,
+        "variant_key": 0,
+        "booking_url": "",
         "guide_url": "",
-        "guide_asset_path": "",
         "asset_followup_1": "",
         "asset_followup_2": "",
+        "delivery_mode": "standard_connect_message",
+        "inmail_subject": "",
         "source": "defaults",
     }
 
-    sequence_id = _resolve_launch_sequence_id(lead)
-    variant_id = lead.get("sequence_variant_id")
+    sequence_id = sequence_id_override or _resolve_launch_sequence_id(lead)
+    variant_id = None if sequence_id_override else lead.get("sequence_variant_id")
     if variant_id:
         try:
             variant_resp = (
                 client.table("outreach_sequence_variants")
                 .select(
-                    "id, sequence_id, connect_note, first_message, second_message, third_message, "
+                    "id, sequence_id, variant_key, connect_note, first_message, second_message, third_message, "
                     "asset_followup_1, asset_followup_2, is_active, "
-                    "sequence:outreach_sequences(id, campaign_key, guide_url, guide_asset_path, followup_interval_days, is_active)"
+                    "sequence:outreach_sequences(id, campaign_key, booking_url, guide_url, followup_interval_days, "
+                    "delivery_mode, inmail_subject, is_active)"
                 )
                 .eq("id", variant_id)
                 .eq("is_active", True)
@@ -1187,16 +1508,20 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
                             "third_message": variant.get("third_message") or "",
                             "asset_followup_1": variant.get("asset_followup_1") or "",
                             "asset_followup_2": variant.get("asset_followup_2") or "",
+                            "campaign_key": sequence.get("campaign_key") or "",
+                            "sequence_id": _safe_int(variant.get("sequence_id") or sequence.get("id"), 0) or None,
+                            "variant_key": _safe_int(variant.get("variant_key"), 0),
+                            "booking_url": sequence.get("booking_url") or "",
                             "guide_url": sequence.get("guide_url") or "",
-                            "guide_asset_path": sequence.get("guide_asset_path") or "",
                             "followup_interval_days": _safe_int(
                                 sequence.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS
                             ),
+                            "delivery_mode": sequence.get("delivery_mode") or result["delivery_mode"],
+                            "inmail_subject": sequence.get("inmail_subject") or "",
                             "source": "outreach_sequence_variants",
                         }
                     )
-                    for message_key in ("connect_note", "first_message", "second_message", "third_message", "asset_followup_1", "asset_followup_2"):
-                        result[message_key] = _render_template_message(str(result[message_key]), lead)
+                    _render_and_track_sequence_messages(result, lead)
                     return result
         except Exception as exc:
             logger.warn(
@@ -1225,19 +1550,29 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
                 error=exc,
             )
 
-    require_explicit_sequence = str(lead.get("outreach_mode") or "").lower() == "connect_only"
+    require_explicit_sequence = require_explicit_sequence or (
+        str(lead.get("outreach_mode") or "").lower() == "connect_only"
+    )
     rows: list[Dict[str, Any]] = []
     try:
         query = client.table("outreach_sequences").select(
-            "id, connect_note, first_message, second_message, third_message, followup_interval_days, is_active, created_at"
+            "id, campaign_key, booking_url, guide_url, connect_note, first_message, second_message, third_message, "
+            "followup_interval_days, delivery_mode, inmail_subject, is_active, created_at"
         )
         query = query.eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         if sequence_id is not None:
             query = query.eq("id", sequence_id)
+        elif require_explicit_sequence:
+            logger.error(
+                "Follow-up has no explicit sequence context; refusing active-sequence fallback",
+                {"leadId": lead.get("id")},
+                data={"batchId": lead.get("batch_id"), "sequenceVariantId": lead.get("sequence_variant_id")},
+            )
         else:
             query = query.eq("is_active", True).order("created_at", desc=False).limit(1)
-        resp = query.execute()
-        rows = resp.data or []
+        if sequence_id is not None or not require_explicit_sequence:
+            resp = query.execute()
+            rows = resp.data or []
     except Exception as exc:
         logger.warn("Failed to load sequence messages", {"leadId": lead.get("id"), "sequenceId": sequence_id}, error=exc)
         rows = []
@@ -1250,9 +1585,15 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
                 "first_message": row.get("first_message") or result["first_message"],
                 "second_message": row.get("second_message") or result["second_message"],
                 "third_message": row.get("third_message") or result["third_message"],
+                "campaign_key": row.get("campaign_key") or "",
+                "sequence_id": _safe_int(row.get("id"), 0) or sequence_id,
+                "booking_url": row.get("booking_url") or "",
+                "guide_url": row.get("guide_url") or "",
                 "followup_interval_days": _safe_int(
                     row.get("followup_interval_days"), SEQUENCE_INTERVAL_DEFAULT_DAYS
                 ),
+                "delivery_mode": row.get("delivery_mode") or result["delivery_mode"],
+                "inmail_subject": row.get("inmail_subject") or "",
                 "source": "outreach_sequences",
             }
         )
@@ -1268,11 +1609,13 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
                 "first_message": "",
                 "second_message": "",
                 "third_message": "",
-                "source": "missing_connect_only_sequence",
+                "source": "missing_explicit_sequence_context"
+                if require_explicit_sequence
+                else "missing_connect_only_sequence",
             }
         )
         logger.error(
-            "Connect-only lead has no resolvable sequence; refusing active-sequence fallback",
+            "Lead has no resolvable explicit sequence; refusing active-sequence fallback",
             {"leadId": lead.get("id")},
             data={"leadSequenceId": lead.get("sequence_id"), "batchId": lead.get("batch_id")},
         )
@@ -1320,10 +1663,7 @@ def load_sequence_messages(client: Client, lead: Dict[str, Any]) -> Dict[str, An
             except Exception:
                 continue
 
-    result["connect_note"] = _render_template_message(str(result["connect_note"]), lead)
-    result["first_message"] = _render_template_message(str(result["first_message"]), lead)
-    result["second_message"] = _render_template_message(str(result["second_message"]), lead)
-    result["third_message"] = _render_template_message(str(result["third_message"]), lead)
+    _render_and_track_sequence_messages(result, lead)
     if result["followup_interval_days"] < 1:
         result["followup_interval_days"] = SEQUENCE_INTERVAL_DEFAULT_DAYS
     return result
@@ -1768,6 +2108,52 @@ async def first_safe_message_target(locator, kind: str):
     return None, count
 
 
+async def find_profile_more_menu_message_target(page: Page, profile_container):
+    """Reveal and return the profile-specific InMail action from More/Mehr.
+
+    Some second-degree profiles expose Sales Navigator only as the localized
+    `Mehr -> Nachricht an <name> senden` menu item, with no visible message
+    button on the profile card.
+    """
+    more_buttons = profile_container.get_by_role(
+        "button",
+        name=re.compile(r"^(More|Mehr)(?:\b|$)", re.I),
+    )
+    more_count = await more_buttons.count()
+    logger.element_search(
+        "profile More/Mehr button",
+        more_count,
+        role="button",
+        context={"surface": "followup"},
+    )
+    if more_count <= 0:
+        return None, 0
+
+    try:
+        await more_buttons.first.click(timeout=8_000)
+        await page.wait_for_timeout(500)
+    except Exception as exc:
+        logger.warn("Could not open profile More/Mehr menu", error=exc)
+        return None, 0
+
+    action_pattern = re.compile(
+        r"(?:Nachricht an .+ senden|Send message to .+|Message .+)",
+        re.I,
+    )
+    for role in ("menuitem", "button", "link"):
+        candidate = page.get_by_role(role, name=action_pattern)
+        target, count = await first_safe_message_target(candidate, f"more_menu_{role}")
+        if target is not None:
+            logger.element_search(
+                "profile More/Mehr message action",
+                1,
+                role=role,
+                context={"surface": "followup", "candidateCount": count},
+            )
+            return target, count
+    return None, 0
+
+
 async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
     """Open a messaging surface for a follow-up send.
 
@@ -1828,6 +2214,14 @@ async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
             target_kind = "generic_button"
 
     if target_locator is None:
+        target_locator, target_count = await find_profile_more_menu_message_target(
+            page,
+            profile_container,
+        )
+        if target_locator is not None:
+            target_kind = "more_menu_message"
+
+    if target_locator is None:
         raise RuntimeError(
             "No messaging surface found. Check if profile is 3rd-degree or has restrictions."
         )
@@ -1885,6 +2279,44 @@ async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
 def normalize_typed_text(text: str) -> str:
     normalized = (text or "").replace("\r\n", "\n").replace("\xa0", " ")
     return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _pick_invite_dialog_candidate(candidates: list[Dict[str, Any]]) -> Optional[int]:
+    """Choose the visible LinkedIn invitation modal, ignoring unrelated overlays."""
+    visible_fallbacks: list[int] = []
+    for index, candidate in enumerate(candidates):
+        if not candidate.get("visible"):
+            continue
+        visible_fallbacks.append(index)
+        for button in candidate.get("buttons") or []:
+            label = f"{button.get('text') or ''} {button.get('aria') or ''}"
+            if button.get("visible") and re.search(
+                r"(Einladung\s+senden|Send\s+invitation)", label, re.I
+            ):
+                return index
+    for index in visible_fallbacks:
+        if "send-invite" in str(candidates[index].get("className") or ""):
+            return index
+    return visible_fallbacks[-1] if visible_fallbacks else None
+
+
+async def find_invite_dialog(page: Page):
+    dialogs = page.locator("section[role='dialog'], div[role='dialog']")
+    candidates = await dialogs.evaluate_all(
+        """els => els.map((dialog) => ({
+            visible: !!(dialog.offsetWidth || dialog.offsetHeight || dialog.getClientRects().length),
+            className: dialog.className || '',
+            buttons: Array.from(dialog.querySelectorAll('button')).map((button) => ({
+                text: (button.innerText || button.textContent || '').trim(),
+                aria: button.getAttribute('aria-label') || '',
+                visible: !!(button.offsetWidth || button.offsetHeight || button.getClientRects().length)
+            }))
+        }))"""
+    )
+    index = _pick_invite_dialog_candidate(candidates)
+    if index is None:
+        raise RuntimeError("Could not find the visible connection invitation dialog")
+    return dialogs.nth(index)
 
 
 def typed_text_matches(actual_text: str, expected_text: str) -> Tuple[bool, Dict[str, Any]]:
@@ -2058,7 +2490,7 @@ async def fill_text_field(page: Page, selector_name: str, locator, value: str) -
     await locator.wait_for(state="visible", timeout=10_000)
     await focus_text_field(page, locator, selector_name)
     await clear_text_field(page, locator)
-    await human_type(page, value)
+    await insert_composer_text(page, locator, value)
     await page.wait_for_timeout(500)
     actual_text = await read_text_field_text(locator) or ""
     matched, verification = typed_text_matches(actual_text, value)
@@ -3265,7 +3697,7 @@ async def send_message(
             raise RuntimeError("Could not find note textbox in connection request dialog")
 
         # Find and click Send button in the dialog
-        dialog = page.locator("section[role='dialog'], div[role='dialog']").first
+        dialog = await find_invite_dialog(page)
         # Support both English and German
         send_btn = dialog.locator(
             "button:has-text('Send invitation'), button:has-text('Send'), button:has-text('Einladung senden'), button:has-text('Senden'), button[aria-label*='Send']"
@@ -3861,7 +4293,7 @@ def fetch_approved_followups(
             .select(
                 "id, lead_id, status, followup_type, attempt, draft_text, sent_text, next_send_at, "
                 "last_message_text, last_message_from, updated_at, "
-                "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
+                "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, batch_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
             )
             .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
             .eq("status", "APPROVED")
@@ -3879,7 +4311,7 @@ def fetch_approved_followups(
                 .select(
                     "id, lead_id, status, followup_type, draft_text, sent_text, next_send_at, "
                     "last_message_text, last_message_from, updated_at, "
-                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
+                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, batch_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
                 )
                 .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
                 .eq("status", "APPROVED")
@@ -3896,7 +4328,7 @@ def fetch_approved_followups(
                 .select(
                     "id, lead_id, status, draft_text, sent_text, next_send_at, "
                     "last_message_text, last_message_from, updated_at, "
-                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
+                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, batch_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
                 )
                 .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
                 .eq("status", "APPROVED")
@@ -3979,7 +4411,7 @@ def fetch_followup_by_id(client: Client, followup_id: str) -> Optional[Dict[str,
     select_cols = (
         "id, lead_id, status, followup_type, draft_text, sent_text, next_send_at, "
         "last_message_text, last_message_from, updated_at, "
-        "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
+        "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, batch_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
     )
     resp = client.table("followups").select(select_cols).eq("linkedin_account_id", CURRENT_ACCOUNT_ID).eq("id", followup_id).limit(1).execute()
     rows = resp.data or []
@@ -4054,9 +4486,12 @@ def sanitize_followup_message(text: str) -> str:
     """Apply safety filters for direct-message followups without invite-note truncation."""
     if not text:
         return ""
-    # Remove dashes and apostrophes (same as outreach no-dash rule)
-    sanitized = re.sub(r"[\-\u2010-\u2015\u2212]+", " ", text)
-    sanitized = re.sub(r"['`\u2018\u2019]+", " ", sanitized)
+    # Apply prose cleanup outside URLs so destination paths and query values stay valid.
+    parts = re.split(r"(https?://[^\s]+)", text)
+    for index in range(0, len(parts), 2):
+        parts[index] = re.sub(r"[\-\u2010-\u2015\u2212]+", " ", parts[index])
+        parts[index] = re.sub(r"['`\u2018\u2019]+", " ", parts[index])
+    sanitized = "".join(parts)
     sanitized = sanitized.replace("\r\n", "\n").replace("\r", "\n")
     lines = [re.sub(r"[ \t]{2,}", " ", line).strip() for line in sanitized.splitlines()]
     sanitized = "\n".join(lines).strip()
@@ -4109,7 +4544,7 @@ def resolve_followup_message(client: Client, followup: Dict[str, Any]) -> Tuple[
     if next_step not in (2, 3):
         return default_message, None, "followup_draft_text_unknown_step"
 
-    sequence_messages = load_sequence_messages(client, lead)
+    sequence_messages = load_sequence_messages(client, lead, require_explicit_sequence=True)
     message_key = "second_message" if next_step == 2 else "third_message"
     candidate = sanitize_followup_message(str(sequence_messages.get(message_key) or ""))
     if candidate:
@@ -4160,6 +4595,51 @@ def mark_followup_sent(
             "sequenceStep": step_to_set,
         },
     )
+
+
+def record_followup_touch_event(
+    client: Client,
+    followup: Dict[str, Any],
+    lead: Dict[str, Any],
+    sequence_messages: Dict[str, Any],
+    resolved_step: Optional[int],
+    surface: str,
+) -> None:
+    """Record a verified follow-up with its exact campaign and delivery surface."""
+    sequence_id = _safe_int(sequence_messages.get("sequence_id") or lead.get("sequence_id"), 0) or None
+    touch_number = resolved_step or _step_from_followup(followup.get("followup_type"), followup.get("attempt"))
+    if sequence_id is None or touch_number is None:
+        raise RuntimeError("Verified follow-up is missing sequence or touch context.")
+
+    payload = event_payload(
+        account_id=CURRENT_ACCOUNT_ID,
+        lead_id=str(lead.get("id") or followup.get("lead_id") or ""),
+        event_type="touch_sent",
+        sequence_id=sequence_id,
+        variant_id=lead.get("sequence_variant_id"),
+        touch_number=touch_number,
+        correlation_id=os.getenv("CORRELATION_ID"),
+        metadata={
+            "campaign_key": sequence_messages.get("campaign_key") or None,
+            "delivery_mode": sequence_messages.get("delivery_mode") or "",
+            "surface": surface,
+            "followup_id": followup.get("id"),
+            "attempt": followup.get("attempt"),
+            "sequence_step": resolved_step,
+            "verified": True,
+        },
+    )
+    try:
+        client.table("outreach_events").insert(payload).execute()
+    except Exception as exc:
+        error_text = str(exc)
+        if "23505" in error_text and "idx_outreach_events_delivery_idempotency" in error_text:
+            logger.info(
+                "Follow-up touch event already recorded; continuing idempotently",
+                {"followupId": followup.get("id"), "leadId": lead.get("id")},
+            )
+            return
+        raise
 
 
 def mark_followup_skipped(client: Client, followup_id: str, reason: str) -> None:
@@ -4390,9 +4870,10 @@ def schedule_missing_due_nudges(client: Client, limit: int = 1000) -> int:
             client.table("leads")
             .select(
                 "id, linkedin_url, first_name, last_name, company_name, status, sent_at, last_reply_at, "
-                "sequence_id, sequence_step, sequence_last_sent_at, outreach_mode, connection_sent_at, "
+                "sequence_id, sequence_variant_id, sequence_step, sequence_last_sent_at, outreach_mode, connection_sent_at, "
                 "connection_accepted_at, batch_id"
             )
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
             .eq("status", "SENT")
             .is_("last_reply_at", "null")
             .limit(limit)
@@ -4404,7 +4885,7 @@ def schedule_missing_due_nudges(client: Client, limit: int = 1000) -> int:
 
     scheduled = 0
     for lead in resp.data or []:
-        sequence_messages = load_sequence_messages(client, lead)
+        sequence_messages = load_sequence_messages(client, lead, require_explicit_sequence=True)
         attempt, base_time, reason = _next_due_nudge_for_lead(lead, sequence_messages, now_utc)
         if attempt is None or base_time is None:
             if reason not in {"not_due", "sequence_complete", "lead_replied"}:
@@ -4601,6 +5082,23 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
         mark_followup_failed(client, followup_id, error_msg, permanent=True)
         return "failed"
 
+    followup_type = str(followup.get("followup_type") or "").upper()
+    sequence_messages: Dict[str, Any] = {}
+    if followup_type == "NUDGE":
+        sequence_messages = load_sequence_messages(client, lead, require_explicit_sequence=True)
+        if not sequence_messages.get("sequence_id"):
+            error_msg = "missing_explicit_followup_sequence_context"
+            logger.error(error_msg, {"followupId": followup_id, "leadId": lead_id})
+            mark_followup_failed(client, followup_id, error_msg, permanent=True)
+            return "failed"
+        if is_cop_sales_navigator_followup(lead, sequence_messages) and not cop_first_touch_channel_is_valid(
+            client, lead
+        ):
+            error_msg = "cop_first_touch_channel_mismatch_requires_human_review"
+            logger.error(error_msg, {"followupId": followup_id, "leadId": lead_id})
+            mark_followup_failed(client, followup_id, error_msg, permanent=True)
+            return "failed"
+
     message, resolved_step, source = resolve_followup_message(client, followup)
     if not message:
         error_msg = "Followup has no draft_text to send"
@@ -4608,7 +5106,6 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
         mark_followup_failed(client, followup_id, error_msg, permanent=True)
         return "failed"
 
-    followup_type = str(followup.get("followup_type") or "").upper()
     if followup_type == "NUDGE" and resolved_step not in (2, 3):
         logger.warn(
             "Skipping nudge because queue attempt conflicts with current sequence state",
@@ -4636,8 +5133,13 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
         await random_pause()
 
         message_page, surface = await open_followup_message_surface(page)
-        if surface != SURFACE_MESSAGE:
+        is_cop_followup = is_cop_sales_navigator_followup(lead, sequence_messages)
+        if is_cop_followup and followup_type != "NUDGE":
+            raise RuntimeError("cop_reply_requires_human_handling")
+        if surface == SURFACE_SALES_NAVIGATOR and not is_cop_followup:
             raise RuntimeError(f"followup_surface_not_direct_message:{surface}")
+        if surface == SURFACE_MESSAGE and is_cop_followup:
+            raise RuntimeError("cop_followup_requires_sales_navigator_inmail")
 
         # --- Just-in-time direct-message thread guard ---
         if followup_type == "REPLY":
@@ -4728,39 +5230,68 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
             )
 
         logger.message_send_start(lead_id or "unknown", {"followupId": followup_id}, message)
-        try:
-            await send_message(message_page, message, surface, lead=lead)
-        except Exception as send_error:
-            if not is_direct_thread_mismatch_error(send_error):
-                raise
-            logger.warn(
-                "Direct message surface opened a stale or mismatched thread; closing overlays and retrying once",
-                {"followupId": followup_id, "leadId": lead_id},
-                error=send_error,
+        if surface == SURFACE_SALES_NAVIGATOR:
+            await _verify_inmail_recipient(message_page, lead)
+            await send_sales_navigator_message(
+                message_page,
+                build_sales_navigator_subject(
+                    lead,
+                    message,
+                    str(sequence_messages.get("inmail_subject") or "").strip(),
+                ),
+                build_sales_navigator_body(message),
             )
-            await close_existing_chat_overlays(message_page)
-            if message_page is not page:
-                try:
-                    await message_page.close()
-                except Exception:
-                    pass
-                message_page = None
-            await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
-            await page.wait_for_timeout(1_000)
-            await close_existing_chat_overlays(page)
-            message_page, surface = await open_followup_message_surface(page)
-            if surface != SURFACE_MESSAGE:
-                raise RuntimeError(f"followup_surface_not_direct_message:{surface}")
-            await send_message(message_page, message, surface, lead=lead)
+            await verify_latest_outbound_message(
+                message_page,
+                build_sales_navigator_body(message),
+            )
+        else:
+            try:
+                await send_message(message_page, message, surface, lead=lead)
+            except Exception as send_error:
+                if not is_direct_thread_mismatch_error(send_error):
+                    raise
+                logger.warn(
+                    "Direct message surface opened a stale or mismatched thread; closing overlays and retrying once",
+                    {"followupId": followup_id, "leadId": lead_id},
+                    error=send_error,
+                )
+                await close_existing_chat_overlays(message_page)
+                if message_page is not page:
+                    try:
+                        await message_page.close()
+                    except Exception:
+                        pass
+                    message_page = None
+                await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
+                await page.wait_for_timeout(1_000)
+                await close_existing_chat_overlays(page)
+                message_page, surface = await open_followup_message_surface(page)
+                if surface != SURFACE_MESSAGE:
+                    raise RuntimeError(f"followup_surface_not_direct_message:{surface}")
+                await send_message(message_page, message, surface, lead=lead)
 
         mark_followup_sent(client, followup_id, message, followup, sequence_step=resolved_step)
+        if followup_type == "NUDGE":
+            record_followup_touch_event(
+                client,
+                followup,
+                lead,
+                sequence_messages,
+                resolved_step,
+                surface,
+            )
         if followup_type == "NUDGE" and resolved_step == 2 and lead_id:
             next_base = _utc_now()
             lead_for_next = dict(lead)
             lead_for_next["sequence_step"] = 2
             lead_for_next["sequence_last_sent_at"] = next_base.isoformat()
             try:
-                sequence_messages = load_sequence_messages(client, lead_for_next)
+                sequence_messages = load_sequence_messages(
+                    client,
+                    lead_for_next,
+                    require_explicit_sequence=True,
+                )
                 schedule_nudge_followup(
                     client,
                     lead_for_next,
@@ -5177,6 +5708,225 @@ async def process_invite_one(
         "updated_at": datetime.utcnow().isoformat(),
     }).eq("id", lead_id).execute()
     return outcome
+
+
+# ------------------------- INMAIL + INVITE FLOW -------------------------
+async def _verify_inmail_recipient(page: Page, lead: Dict[str, Any]) -> None:
+    """Require the opened composer to still identify the requested profile."""
+    raw_first_name = str(lead.get("first_name") or "")
+    raw_last_name = str(lead.get("last_name") or "")
+    first_name = normalize_linkedin_person_name(raw_first_name)
+    last_name = normalize_linkedin_person_name(raw_last_name)
+    expected_tokens = [token for token in (first_name, last_name) if token]
+    if not expected_tokens:
+        raise RuntimeError("InMail recipient cannot be verified because the lead has no name.")
+    german_last_name = normalize_linkedin_person_name(
+        raw_last_name.translate(str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "Ä": "Ae", "Ö": "Oe", "Ü": "Ue", "ß": "ss"}))
+    )
+    last_name_variants = {variant for variant in (last_name, german_last_name) if variant}
+    first_tokens = first_name.split()
+    last_initial = last_name[:1]
+    for attempt in range(5):
+        body_text = await page.locator("body").inner_text(timeout=5_000)
+        normalized_body = normalize_linkedin_person_name(body_text)
+        if first_name in normalized_body and any(variant in normalized_body for variant in last_name_variants):
+            return
+
+        body_tokens = normalized_body.split()
+        privacy_abbreviation_matches = any(
+            body_tokens[index:index + len(first_tokens)] == first_tokens
+            and index + len(first_tokens) < len(body_tokens)
+            and body_tokens[index + len(first_tokens)] == last_initial
+            for index in range(len(body_tokens) - len(first_tokens))
+        )
+        if privacy_abbreviation_matches:
+            return
+        if attempt < 4:
+            await page.wait_for_timeout(500)
+    raise RuntimeError("InMail composer recipient did not match the requested lead.")
+
+
+def _persist_inmail_success(
+    client: Client,
+    lead: Dict[str, Any],
+    inmail_sent_at: str,
+    invite_result: str,
+) -> None:
+    lead_id = str(lead.get("id") or "")
+    if invite_result == "sent":
+        payload = {
+            "status": "CONNECT_ONLY_SENT",
+            "connection_sent_at": inmail_sent_at,
+            "sent_at": inmail_sent_at,
+            "sequence_step": 1,
+            "sequence_started_at": lead.get("sequence_started_at") or inmail_sent_at,
+            "sequence_last_sent_at": inmail_sent_at,
+            "error_message": None,
+            "profile_data": {
+                **(lead.get("profile_data") if isinstance(lead.get("profile_data"), dict) else {}),
+                "inmail_first_touch_sent": True,
+            },
+            "updated_at": inmail_sent_at,
+        }
+    elif invite_result == "connected":
+        payload = {
+            "status": "SENT",
+            "sent_at": inmail_sent_at,
+            "connection_accepted_at": lead.get("connection_accepted_at") or inmail_sent_at,
+            "sequence_step": 1,
+            "sequence_started_at": lead.get("sequence_started_at") or inmail_sent_at,
+            "sequence_last_sent_at": inmail_sent_at,
+            "error_message": None,
+            "profile_data": {
+                **(lead.get("profile_data") if isinstance(lead.get("profile_data"), dict) else {}),
+                "inmail_first_touch_sent": True,
+            },
+            "updated_at": inmail_sent_at,
+        }
+    else:
+        payload = {
+            "status": "SENT",
+            "sent_at": inmail_sent_at,
+            "sequence_step": 1,
+            "sequence_started_at": lead.get("sequence_started_at") or inmail_sent_at,
+            "sequence_last_sent_at": inmail_sent_at,
+            "error_message": None,
+            "profile_data": {
+                **(lead.get("profile_data") if isinstance(lead.get("profile_data"), dict) else {}),
+                "inmail_first_touch_sent": True,
+                "inmail_invite_result": invite_result,
+            },
+            "updated_at": inmail_sent_at,
+        }
+    client.table("leads").update(payload).eq("id", lead_id).eq(
+        "linkedin_account_id", CURRENT_ACCOUNT_ID
+    ).execute()
+
+
+def _record_inmail_invite_event(
+    client: Client,
+    lead: Dict[str, Any],
+    sequence_id: Optional[int],
+    invite_result: str,
+) -> None:
+    try:
+        client.table("outreach_events").insert(event_payload(
+            account_id=CURRENT_ACCOUNT_ID,
+            lead_id=str(lead.get("id") or ""),
+            event_type="invite_sent",
+            sequence_id=sequence_id,
+            variant_id=lead.get("sequence_variant_id"),
+            touch_number=1,
+            correlation_id=os.getenv("CORRELATION_ID"),
+            metadata={
+                "surface": "connection_request",
+                "delivery_mode": INMAIL_AND_INVITE_MODE,
+                "invite_result": invite_result,
+            },
+        )).execute()
+    except Exception as exc:
+        error_text = str(exc)
+        if "23505" in error_text and "idx_outreach_events_delivery_idempotency" in error_text:
+            logger.info("Invite event already recorded; continuing idempotently", {"leadId": lead.get("id")})
+            return
+        raise
+
+
+async def process_inmail_and_invite_one(
+    context: BrowserContext,
+    client: Client,
+    lead: Dict[str, Any],
+    *,
+    sequence_id_override: Optional[int] = None,
+    test_override: bool = False,
+) -> str:
+    """Send the connection request first, then send the first-touch InMail."""
+    validate_inmail_test_override(str(lead.get("id") or ""), test_override)
+    sequence_messages = load_sequence_messages(client, lead, sequence_id_override)
+    if not is_inmail_and_invite_sequence(sequence_messages):
+        raise RuntimeError("Lead is not assigned to the invite_and_inmail delivery mode.")
+    sequence_id = sequence_id_override or _resolve_launch_sequence_id(lead)
+    if _inmail_event_exists(client, lead, sequence_id, test_override):
+        logger.info("Skipping already-recorded InMail first touch", {"leadId": lead.get("id")})
+        return "already_sent"
+
+    message = str(sequence_messages.get("first_message") or "").strip()
+    subject = str(sequence_messages.get("inmail_subject") or "").strip()
+    if not message or not subject:
+        raise RuntimeError("InMail campaign requires both first_message and inmail_subject.")
+
+    lead_id = str(lead.get("id") or "")
+    profile_url = normalize_linkedin_profile_url(str(lead.get("linkedin_url") or ""))
+    scraper_lead = ScraperLead(
+        id=lead_id,
+        linkedin_url=profile_url,
+        first_name=lead.get("first_name"),
+        last_name=lead.get("last_name"),
+        company_name=lead.get("company_name"),
+    )
+    page = await context.new_page()
+    message_page: Optional[Page] = None
+    inmail_sent_at = datetime.now(timezone.utc).isoformat()
+    try:
+        await page.goto(profile_url, wait_until="domcontentloaded", timeout=60_000)
+        await page.wait_for_selector("main", timeout=15_000)
+        await page.wait_for_timeout(1_000)
+        unavailable_reason = await linkedin_profile_unavailable_reason(page)
+        if unavailable_reason:
+            raise RuntimeError(f"LinkedIn profile unavailable: {unavailable_reason}")
+
+        relationship = await probe_connect_only_surface(page, scraper_lead)
+        if relationship == "already_connected":
+            invite_result = "connected"
+        elif relationship == "pending_invite":
+            invite_result = "sent"
+        else:
+            invite_result = await send_connection_request(page, scraper_lead)
+        if invite_result not in {"sent", "connected"}:
+            logger.warn(
+                "Connection request was not confirmed; continuing with authorized InMail",
+                {"leadId": lead_id, "inviteResult": invite_result},
+            )
+        if invite_result == "sent":
+            _record_inmail_invite_event(client, lead, sequence_id, invite_result)
+
+        message_page, surface = await open_followup_message_surface(page)
+        if surface != SURFACE_SALES_NAVIGATOR:
+            raise RuntimeError(f"Expected Sales Navigator/InMail surface, got {surface}")
+        await _verify_inmail_recipient(message_page, lead)
+        await send_sales_navigator_message(
+            message_page,
+            build_sales_navigator_subject(lead, message, subject),
+            build_sales_navigator_body(message),
+        )
+        inmail_sent_at = datetime.now(timezone.utc).isoformat()
+        _record_inmail_event(client, lead, sequence_id, test_override=test_override)
+
+        if test_override:
+            logger.info(
+                "InMail test override completed without rewriting lead lifecycle",
+                {"leadId": lead_id},
+                {"inviteResult": invite_result, "sequenceId": sequence_id},
+            )
+            return f"test_sent:{invite_result}"
+
+        _persist_inmail_success(client, lead, inmail_sent_at, invite_result)
+        return "sent"
+    except Exception as exc:
+        logger.error("Failed InMail + invite first touch", {"leadId": lead_id}, error=exc)
+        if not test_override:
+            _mark_inmail_failed(client, lead_id, str(exc))
+        raise
+    finally:
+        if message_page is not None and message_page is not page:
+            try:
+                await message_page.close()
+            except Exception:
+                pass
+        try:
+            await page.close()
+        except Exception:
+            pass
 
 
 # ------------------------- MESSAGE-ONLY FLOW -------------------------
@@ -5749,6 +6499,21 @@ async def main() -> None:
         action="store_true",
         help="Process NEW sequence-driven leads (connect_message/connect_only) and send LinkedIn connection invites.",
     )
+    parser.add_argument(
+        "--send-inmail-invites",
+        action="store_true",
+        help="Send the connection request, then send the assigned sequence first-message as InMail.",
+    )
+    parser.add_argument(
+        "--sequence-id",
+        type=int,
+        help="Use this sequence for a targeted InMail test without changing the lead's stored ownership.",
+    )
+    parser.add_argument(
+        "--test-override",
+        action="store_true",
+        help="Explicitly bypass queue/history gates for one --lead-id InMail test; never changes lifecycle fields.",
+    )
     args = parser.parse_args()
     if not args.account_id:
         parser.error("--account-id is required so browser state, queues, and limits cannot cross accounts.")
@@ -5756,8 +6521,9 @@ async def main() -> None:
     mode = (
         "followup" if args.followup
         else ("message_only" if args.message_only
+        else ("inmail_and_invites" if args.send_inmail_invites
         else ("send_invites" if args.send_invites
-        else "connect_message"))
+        else "connect_message")))
     )
     logger.operation_start(f"sender-{mode}", input_data={"lead_id": args.lead_id, "mode": mode, "account_id": args.account_id})
 
@@ -5765,7 +6531,11 @@ async def main() -> None:
         client = get_supabase_client()
         configure_runtime_account(client, args.account_id)
 
-        daily_limit = CURRENT_DAILY_INVITE_LIMIT if args.send_invites else CURRENT_DAILY_MESSAGE_LIMIT
+        daily_limit = (
+            CURRENT_DAILY_INVITE_LIMIT
+            if args.send_invites or args.send_inmail_invites
+            else CURRENT_DAILY_MESSAGE_LIMIT
+        )
         logger.info("Daily send limit computed", data={"limit": daily_limit, "env": os.getenv("DAILY_SEND_LIMIT"), "default": DAILY_SEND_DEFAULT})
         if args.send_invites:
             already_sent = connect_only_sent_today_count(client)
@@ -5774,7 +6544,9 @@ async def main() -> None:
         else:
             already_sent = sent_today_count(client)
 
-        if already_sent >= daily_limit:
+        if args.send_inmail_invites:
+            already_sent = max(connect_only_sent_today_count(client), sent_today_count(client))
+        if already_sent >= daily_limit and not (args.send_inmail_invites and args.test_override):
             logger.warn("Daily send limit reached", data={"limit": daily_limit, "sent": already_sent})
             return
 
@@ -5797,7 +6569,7 @@ async def main() -> None:
                     .select(
                         "id, lead_id, status, followup_type, draft_text, sent_text, next_send_at, "
                         "last_message_text, last_message_from, updated_at, "
-                        "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
+                        "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, batch_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
                     )
                     .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
                     .eq("lead_id", args.lead_id)
@@ -6013,6 +6785,69 @@ async def main() -> None:
                         "retry": retry_count,
                         "failed": failed_count,
                         "total": len(leads_to_process),
+                    },
+                )
+            finally:
+                await shutdown(playwright, browser)
+                logger.info("Browser closed")
+            return
+
+        if args.send_inmail_invites:
+            validate_inmail_test_override(args.lead_id, args.test_override)
+            if args.test_override:
+                lead = fetch_lead_by_id(client, args.lead_id)
+                if not lead:
+                    logger.warn("Requested InMail test lead not found for Katharina", {"leadId": args.lead_id})
+                    return
+                leads_to_process = [lead]
+            else:
+                leads_to_process = fetch_inmail_and_invite_queue(client, remaining, args.batch_id)
+                if not leads_to_process:
+                    logger.info("No NEW or FAILED invite_and_inmail leads to process", {"batchId": args.batch_id})
+                    return
+
+            logger.info(
+                f"inmail_and_invites: processing {len(leads_to_process)} leads",
+                data={"leadIds": [lead.get("id") for lead in leads_to_process], "testOverride": args.test_override},
+            )
+            playwright, browser, context = await open_browser(headless=False)
+            try:
+                logger.info("Browser opened, authenticating for InMail + invite flow...")
+                await ensure_linkedin_auth(context, client)
+                sent_count = 0
+                failed_count = 0
+                already_sent_count = 0
+                for lead in leads_to_process:
+                    lead_id = str(lead.get("id") or "")
+                    try:
+                        if not args.test_override and not _mark_inmail_processing(client, lead_id):
+                            continue
+                        result = await process_inmail_and_invite_one(
+                            context,
+                            client,
+                            lead,
+                            sequence_id_override=args.sequence_id,
+                            test_override=args.test_override,
+                        )
+                        if result == "already_sent":
+                            already_sent_count += 1
+                        elif result.startswith("test_sent:") or result == "sent":
+                            sent_count += 1
+                        else:
+                            failed_count += 1
+                    except Exception as exc:
+                        logger.error("Failed to process InMail + invite lead", {"leadId": lead_id}, error=exc)
+                        failed_count += 1
+                    if not args.test_override:
+                        await random_pause(2, 4)
+                logger.operation_complete(
+                    "sender-inmail-and-invites",
+                    result={
+                        "sent": sent_count,
+                        "alreadySent": already_sent_count,
+                        "failed": failed_count,
+                        "total": len(leads_to_process),
+                        "testOverride": args.test_override,
                     },
                 )
             finally:

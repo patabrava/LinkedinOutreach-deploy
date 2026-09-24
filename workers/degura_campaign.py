@@ -1,17 +1,15 @@
-"""Deterministic DEGURA scheduling, asset and reply safety contracts."""
+"""Deterministic DEGURA scheduling and reply safety contracts."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
 import calendar
 import re
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 BERLIN = ZoneInfo("Europe/Berlin")
-MAX_GUIDE_BYTES = 10 * 1024 * 1024
 
 HUMAN_ONLY_ROUTES = {
     "price",
@@ -96,19 +94,6 @@ def out_of_office_resume(return_at: datetime) -> datetime:
     return add_business_days(return_at, 1)
 
 
-def validate_guide_pdf(path_value: object, max_bytes: int = MAX_GUIDE_BYTES) -> Path:
-    path = Path(str(path_value or "")).expanduser()
-    if not path.is_file():
-        raise ValueError("GUIDE_ASSET_INVALID: Guide PDF is missing or unreadable.")
-    size = path.stat().st_size
-    if size < 5 or size > max_bytes:
-        raise ValueError("GUIDE_ASSET_INVALID: Guide PDF size is invalid.")
-    with path.open("rb") as handle:
-        if handle.read(5) != b"%PDF-":
-            raise ValueError("GUIDE_ASSET_INVALID: Guide asset is not a PDF.")
-    return path.resolve()
-
-
 def route_degura_reply(
     text: object,
     *,
@@ -126,7 +111,7 @@ def route_degura_reply(
         return ReplyDecision("asset_reply", True, "asset_followup_reply", ("handoff",))
 
     checks = (
-        ("privacy", r"datenschutz|dsgvo|auskunft|daten löschen"),
+        ("privacy", r"datenschutz|dsgvo|auskunft|daten löschen|woher.{0,40}(?:daten|kontakt)|meine daten|profil gefunden"),
         ("angry", r"belästig|unverschämt|frech|anwalt|beschwerde"),
         ("price", r"preis|kosten|kostet|angebot"),
         ("competitor", r"wettbewerb|konkurrent|versus|vs\.?|vergleich"),
