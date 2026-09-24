@@ -82,8 +82,15 @@ const buildReachabilityProbeUrl = (browserUrl: string): string | null => {
   }
 };
 
-const isRemoteBrowserReachable = async (browserUrl: string): Promise<boolean> => {
-  const probeUrl = buildReachabilityProbeUrl(browserUrl);
+export const remoteBrowserProbeUrl = (slot: 1 | 2, browserUrl: string): string | null => {
+  if (browserUrl === remoteBrowserPath(slot)) {
+    return `http://linkedin-browser-${slot}:6080/vnc.html`;
+  }
+  return buildReachabilityProbeUrl(browserUrl);
+};
+
+const isRemoteBrowserReachable = async (slot: 1 | 2, browserUrl: string): Promise<boolean> => {
+  const probeUrl = remoteBrowserProbeUrl(slot, browserUrl);
   if (!probeUrl) {
     return false;
   }
@@ -102,7 +109,7 @@ const isRemoteBrowserReachable = async (browserUrl: string): Promise<boolean> =>
 
 export const resolveRemoteBrowserUrl = async (slot: 1 | 2): Promise<string | null> => {
   for (const candidate of getRemoteBrowserUrlCandidates(slot)) {
-    if (await isRemoteBrowserReachable(candidate)) {
+    if (await isRemoteBrowserReachable(slot, candidate)) {
       return candidate;
     }
   }
