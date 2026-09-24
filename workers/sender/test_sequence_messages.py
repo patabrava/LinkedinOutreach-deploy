@@ -218,6 +218,36 @@ class LoadSequenceMessagesTest(unittest.TestCase):
         )))
         self.assertEqual(result["guide_url"], "https://www.degura.de/leitfaden")
 
+    def test_strict_followup_context_does_not_fallback_to_another_active_sequence(self):
+        client = FakeClient(
+            {
+                "outreach_sequences": [
+                    {
+                        "id": 99,
+                        "campaign_key": "UNRELATED_CAMPAIGN",
+                        "first_message": "Wrong campaign {{first_name}}",
+                        "second_message": "Wrong follow-up",
+                        "third_message": "Wrong third touch",
+                        "is_active": True,
+                        "created_at": "2026-04-24T00:00:00Z",
+                    }
+                ],
+                "settings": [],
+            }
+        )
+        lead = {
+            "id": "lead-without-sequence",
+            "first_name": "Mia",
+            "last_name": "Lopez",
+            "outreach_mode": "connect_message",
+        }
+
+        result = load_sequence_messages(client, lead, require_explicit_sequence=True)
+
+        self.assertEqual(result["source"], "missing_explicit_sequence_context")
+        self.assertEqual(result["campaign_key"], "")
+        self.assertEqual(result["second_message"], "")
+
     def test_fetch_lead_by_id_fallback_preserves_sequence_fields(self):
         client = SelectFallbackClient(
             {

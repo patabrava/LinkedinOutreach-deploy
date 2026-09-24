@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import type { LinkedinCredentialSummary } from "../app/actions";
+import { formatLinkedinAccountIdentity } from "../lib/linkedinAccountIdentity";
 import type { LinkedinAuthStatus } from "../lib/linkedinAuthSession";
 import { getOperatorApiHeaders } from "../lib/operatorToken";
 import { LinkedinCredentialsForm } from "./LinkedinCredentialsForm";
@@ -180,7 +181,14 @@ export function LoginLauncher({ accountId, existingCreds, authStatus }: Props) {
   return (
     <div className="card" style={{ alignSelf: "flex-start" }}>
       <div className="pill">LinkedIn Session</div>
-      <h3 className="section-title-tight">{existingCreds.label || existingCreds.email || "LINKEDIN ACCOUNT"}</h3>
+      <h3 className="section-title-tight">
+        {formatLinkedinAccountIdentity({
+          label: existingCreds.label || "",
+          email: existingCreds.email || "",
+          display_name: existingCreds.display_name || "",
+          browser_slot: existingCreds.browser_slot || 1,
+        })}
+      </h3>
       <div className="muted" style={{ marginBottom: 8 }}>
         Sender: {existingCreds.display_name || "Not set"} · Account ID: {accountId.slice(0, 8)}
       </div>

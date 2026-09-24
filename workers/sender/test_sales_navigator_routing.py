@@ -18,12 +18,16 @@ from sender import (
     DIRECT_MESSAGE_SCOPED_SEND_ROOT_SELECTORS,
     DIRECT_MESSAGE_SEND_BUTTON_SELECTOR,
     MESSAGE_ONLY_PROCESSING_STATUSES,
+    _persist_inmail_success,
+    _record_inmail_invite_event,
+    _verify_inmail_recipient,
     _pick_invite_dialog_candidate,
     _pick_send_button_candidate,
     classify_connect_only_surface,
     classify_connect_only_probe_surface,
     connect_only_sent_today_count,
     direct_thread_text_matches_lead,
+    fetch_inmail_and_invite_queue,
     fetch_invite_queue,
     fetch_message_only_leads,
     build_sales_navigator_body,
@@ -34,6 +38,8 @@ from sender import (
     _is_invite_candidate,
     _is_message_only_candidate,
     is_inmail_and_invite_sequence,
+    is_cop_sales_navigator_followup,
+    is_valid_cop_first_touch_event,
     inmail_first_touch_already_sent,
     validate_inmail_test_override,
     mark_connect_only_limit_reached,
@@ -47,6 +53,7 @@ from sender import (
     promote_connect_only_to_connected,
     resolve_followup_batch_limit,
     send_sales_navigator_message,
+    SURFACE_SALES_NAVIGATOR,
     sender_name_is_own_account,
     strip_sales_navigator_signature,
     typed_text_matches,
@@ -94,11 +101,101 @@ class InmailCampaignContractTest(unittest.TestCase):
         self.assertTrue(validate_inmail_test_override("lead-1", True))
         with self.assertRaises(ValueError):
             validate_inmail_test_override(None, True)
-        with self.assertRaises(ValueError):
-            validate_inmail_test_override("lead-1", False)
+        self.assertFalse(validate_inmail_test_override("lead-1", False))
+        self.assertFalse(validate_inmail_test_override(None, False))
+
+    def test_inmail_queue_retries_core_fields_when_optional_columns_are_missing(self):
+        client = FakeInviteQueueClient(
+            [
+                {
+                    "id": "lead-1",
+                    "status": "NEW",
+                    "profile_data": {},
+                    "sequence": {
+                        "id": 10,
+                        "delivery_mode": INMAIL_AND_INVITE_MODE,
+                        "is_active": True,
+                    },
+                }
+            ],
+            fail_extended=True,
+        )
+
+        rows = fetch_inmail_and_invite_queue(client, 10, batch_id=33)
+
+        self.assertEqual([row["id"] for row in rows], ["lead-1"])
+        self.assertEqual(len(client.calls), 2)
+        self.assertIn("csv_batch_id", client.calls[0]["selected"])
+        self.assertNotIn("csv_batch_id", client.calls[1]["selected"])
+        self.assertIn(("eq", "batch_id", 33), client.calls[1]["filters"])
+
+    def test_duplicate_invite_event_is_idempotent(self):
+        class DuplicateInviteInsert:
+            def execute(self):
+                raise RuntimeError(
+                    "{'code': '23505', 'details': 'idx_outreach_events_delivery_idempotency'}"
+                )
+
+        class DuplicateInviteTable:
+            def insert(self, _payload):
+                return DuplicateInviteInsert()
+
+        class DuplicateInviteClient:
+            def table(self, table_name):
+                self.assertEqual(table_name, "outreach_events")
+                return DuplicateInviteTable()
+
+            assertEqual = unittest.TestCase().assertEqual
+
+        _record_inmail_invite_event(
+            DuplicateInviteClient(),
+            {"id": "lead-1", "sequence_variant_id": None},
+            10,
+            "sent",
+        )
 
 
 class InmailInviteOrderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_recipient_verification_accepts_linkedin_privacy_abbreviation(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        page = MagicMock()
+        page.locator.return_value.inner_text = AsyncMock(return_value="Neue Nachricht an Laura D.")
+
+        await _verify_inmail_recipient(
+            page,
+            {"first_name": "Laura", "last_name": "Degeratu"},
+        )
+
+    async def test_recipient_verification_rejects_wrong_surname_initial(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        page = MagicMock()
+        page.locator.return_value.inner_text = AsyncMock(return_value="Neue Nachricht an Laura X.")
+        page.wait_for_timeout = AsyncMock()
+
+        with self.assertRaises(RuntimeError):
+            await _verify_inmail_recipient(
+                page,
+                {"first_name": "Laura", "last_name": "Degeratu"},
+            )
+
+    async def test_recipient_verification_waits_for_delayed_composer_identity(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        page = MagicMock()
+        page.locator.return_value.inner_text = AsyncMock(
+            side_effect=["Nachricht wird geladen", "Neue Nachricht an Bianca Schmueser"]
+        )
+        page.wait_for_timeout = AsyncMock()
+
+        await _verify_inmail_recipient(
+            page,
+            {"first_name": "Bianca", "last_name": "Schmüser"},
+        )
+
+        page.wait_for_timeout.assert_awaited_once()
+
     async def test_connection_request_is_sent_before_inmail(self):
         from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -172,6 +269,64 @@ class InmailInviteOrderTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(order.index("connect"), order.index("open_inmail"))
         self.assertLess(order.index("record_invite"), order.index("open_inmail"))
         self.assertLess(order.index("open_inmail"), order.index("send_inmail"))
+
+    async def test_unconfirmed_connection_attempt_does_not_block_inmail(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        lead = {
+            "id": "lead-1",
+            "first_name": "Simon",
+            "last_name": "Mayr",
+            "company_name": "The Mobility House",
+            "linkedin_url": "https://www.linkedin.com/in/simon-mayr",
+            "sequence_id": 10,
+        }
+        context = MagicMock()
+        page = MagicMock()
+        message_page = MagicMock()
+        for candidate in (page, message_page):
+            candidate.goto = AsyncMock()
+            candidate.wait_for_selector = AsyncMock()
+            candidate.wait_for_timeout = AsyncMock()
+            candidate.close = AsyncMock()
+        context.new_page = AsyncMock(return_value=page)
+
+        with patch.object(
+            sender_module,
+            "load_sequence_messages",
+            return_value={
+                "first_message": "Guten Tag Simon Mayr,\n\nTest",
+                "inmail_subject": "Ihre betriebliche Altersvorsorge",
+                "delivery_mode": INMAIL_AND_INVITE_MODE,
+            },
+        ), patch.object(sender_module, "_resolve_launch_sequence_id", return_value=10), patch.object(
+            sender_module, "_inmail_event_exists", return_value=False
+        ), patch.object(
+            sender_module, "linkedin_profile_unavailable_reason", AsyncMock(return_value=None)
+        ), patch.object(
+            sender_module, "probe_connect_only_surface", AsyncMock(return_value="invite_available")
+        ), patch.object(
+            sender_module, "send_connection_request", AsyncMock(return_value="send_failed")
+        ), patch.object(
+            sender_module,
+            "open_followup_message_surface",
+            AsyncMock(return_value=(message_page, sender_module.SURFACE_SALES_NAVIGATOR)),
+        ), patch.object(sender_module, "_verify_inmail_recipient", AsyncMock()), patch.object(
+            sender_module, "send_sales_navigator_message", AsyncMock()
+        ) as send_inmail, patch.object(sender_module, "_record_inmail_event"), patch.object(
+            sender_module, "_record_inmail_invite_event"
+        ) as record_invite, patch.object(sender_module, "logger"):
+            result = await sender_module.process_inmail_and_invite_one(
+                context,
+                MagicMock(),
+                lead,
+                sequence_id_override=10,
+                test_override=True,
+            )
+
+        self.assertEqual(result, "test_sent:send_failed")
+        send_inmail.assert_awaited_once()
+        record_invite.assert_not_called()
 
 
 class ProfileMoreMenuMessageTest(unittest.IsolatedAsyncioTestCase):
@@ -428,12 +583,15 @@ class FakeInviteQueueQuery:
 
     def execute(self):
         self.client.calls.append({"selected": self.selected, "filters": list(self.filters)})
+        if self.client.fail_extended and "csv_batch_id" in str(self.selected or ""):
+            raise RuntimeError("column leads.csv_batch_id does not exist")
         return FakeResponse(self.client.rows)
 
 
 class FakeInviteQueueClient:
-    def __init__(self, rows):
+    def __init__(self, rows, fail_extended=False):
         self.rows = list(rows)
+        self.fail_extended = fail_extended
         self.calls = []
 
     def table(self, _table_name):
@@ -612,6 +770,35 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         self.assertTrue(editor.clicked)
         self.assertEqual(editor.filled, [("Hi Daniel,\n\nvolle Nachricht", 10_000)])
         self.assertEqual(page.keyboard.inserted, [])
+        self.assertEqual(page.keyboard.typed, [])
+
+    def test_sales_navigator_field_uses_atomic_insert_not_slow_keyboard_type(self):
+        from unittest.mock import AsyncMock, patch
+
+        class Locator:
+            async def wait_for(self, **_kwargs):
+                return None
+
+            async def click(self):
+                return None
+
+        async def run():
+            page = FakePage()
+            locator = Locator()
+            with patch.object(sender_module, "focus_text_field", AsyncMock()), \
+                patch.object(sender_module, "clear_text_field", AsyncMock()), \
+                patch.object(sender_module, "read_text_field_text", AsyncMock(return_value="Hello\n\nWorld")):
+                await sender_module.fill_text_field(
+                    page,
+                    "Sales Navigator body",
+                    locator,
+                    "Hello\n\nWorld",
+                )
+            return page
+
+        page = asyncio.run(run())
+
+        self.assertEqual(page.keyboard.inserted, ["Hello\n\nWorld"])
         self.assertEqual(page.keyboard.typed, [])
 
     def test_direct_thread_text_matches_hyphenated_lead_name(self):
@@ -1453,6 +1640,27 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             persist_invite_sent(client, "lead-1", "connect_only")
 
+    def test_inmail_success_remains_sent_when_connection_attempt_is_unconfirmed(self):
+        lead = {
+            "id": "lead-1",
+            "status": "PROCESSING",
+            "profile_data": {"existing": True},
+        }
+        client = FakeInvitePersistClient(lead)
+
+        _persist_inmail_success(
+            client,
+            lead,
+            "2026-09-19T10:00:00+00:00",
+            "send_failed",
+        )
+
+        self.assertEqual(client.lead["status"], "SENT")
+        self.assertEqual(client.lead["sent_at"], "2026-09-19T10:00:00+00:00")
+        self.assertIsNone(client.lead.get("connection_sent_at"))
+        self.assertTrue(client.lead["profile_data"]["inmail_first_touch_sent"])
+        self.assertEqual(client.lead["profile_data"]["inmail_invite_result"], "send_failed")
+
     def test_classify_connect_only_surface_prefers_message_surface(self):
         self.assertEqual(
             classify_connect_only_surface(
@@ -1760,6 +1968,8 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
             "last_name": "Schulz",
             "company_name": "Acme",
             "linkedin_url": "https://www.linkedin.com/in/marina-schulz",
+            "batch_id": 30,
+            "sequence_id": 7,
         }
         return {
             "id": "fu-1",
@@ -1772,6 +1982,53 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
             "attempt": 2,
             "lead": lead,
         }
+
+    def test_only_cop_batch_33_sequence_10_is_allowed_to_use_sales_navigator_followups(self):
+        self.assertTrue(
+            is_cop_sales_navigator_followup(
+                {"batch_id": 33, "sequence_id": 10},
+                {"delivery_mode": INMAIL_AND_INVITE_MODE},
+            )
+        )
+        self.assertFalse(
+            is_cop_sales_navigator_followup(
+                {"batch_id": 30, "sequence_id": 7},
+                {"delivery_mode": INMAIL_AND_INVITE_MODE},
+            )
+        )
+        self.assertFalse(
+            is_cop_sales_navigator_followup(
+                {"batch_id": 33, "sequence_id": 10},
+                {"delivery_mode": "standard_connect_message"},
+            )
+        )
+
+    def test_cop_first_touch_must_be_sales_navigator_inmail(self):
+        self.assertTrue(
+            is_valid_cop_first_touch_event(
+                {
+                    "event_type": "touch_sent",
+                    "touch_number": 1,
+                    "metadata": {
+                        "surface": SURFACE_SALES_NAVIGATOR,
+                        "delivery_mode": INMAIL_AND_INVITE_MODE,
+                    },
+                }
+            )
+        )
+        self.assertFalse(
+            is_valid_cop_first_touch_event(
+                {
+                    "event_type": "touch_sent",
+                    "touch_number": 1,
+                    "metadata": {
+                        "surface": "message",
+                        "delivery_mode": INMAIL_AND_INVITE_MODE,
+                        "channel_substitution": "direct_message",
+                    },
+                }
+            )
+        )
 
     def _build_mock_page(self):
         from unittest.mock import AsyncMock, MagicMock
@@ -1848,6 +2105,12 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
         mocks["extract_last_bubble"] = stack.enter_context(
             patch.object(sender_mod, "extract_last_bubble", AsyncMock(return_value=None))
         )
+        mocks["verify_latest_outbound_message"] = stack.enter_context(
+            patch.object(sender_mod, "verify_latest_outbound_message", AsyncMock(return_value={"verified": True}))
+        )
+        mocks["_verify_inmail_recipient"] = stack.enter_context(
+            patch.object(sender_mod, "_verify_inmail_recipient", AsyncMock())
+        )
         mocks["classify_last_sender"] = stack.enter_context(
             patch.object(sender_mod, "classify_last_sender", MagicMock(return_value="us"))
         )
@@ -1863,10 +2126,72 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
                 )),
             )
         )
+        mocks["load_sequence_messages"] = stack.enter_context(
+            patch.object(
+                sender_mod,
+                "load_sequence_messages",
+                MagicMock(
+                    return_value={
+                        "sequence_id": 7,
+                        "campaign_key": "DEGURA_A",
+                        "delivery_mode": "standard_connect_message",
+                        "inmail_subject": "",
+                        "second_message": "Hi Marina, second touch",
+                        "third_message": "Hi Marina, third touch",
+                    }
+                ),
+            )
+        )
         mocks["random_pause"] = stack.enter_context(
             patch.object(sender_mod, "random_pause", AsyncMock())
         )
         return stack, mocks
+
+    async def test_cop_nudge_uses_sales_navigator_and_campaign_specific_sequence(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from sender import process_followup_one, SURFACE_SALES_NAVIGATOR
+
+        page = self._build_mock_page()
+        sales_page = self._build_mock_page()
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        client = MagicMock()
+        followup = self._build_followup()
+        followup["lead"]["batch_id"] = 33
+        followup["lead"]["sequence_id"] = 10
+
+        stack, mocks = self._patches(
+            surface_result=(sales_page, SURFACE_SALES_NAVIGATOR),
+        )
+        mocks["load_sequence_messages"].return_value = {
+            "sequence_id": 10,
+            "campaign_key": "COP_SALES_NAVIGATOR",
+            "delivery_mode": INMAIL_AND_INVITE_MODE,
+            "inmail_subject": "Ihre bAV-Frage",
+            "second_message": "COP reminder two",
+            "third_message": "COP reminder three",
+        }
+        mocks["extract_last_bubble"].return_value = {
+            "sender": "Katharina Hoffmann",
+            "text": "Previous approved InMail",
+            "is_outbound": True,
+        }
+
+        with stack:
+            result = await process_followup_one(context, client, followup)
+
+        self.assertEqual(result, "sent")
+        mocks["_verify_inmail_recipient"].assert_awaited_once_with(sales_page, followup["lead"])
+        mocks["send_sales_navigator_message"].assert_awaited_once()
+        sent_subject, sent_body = mocks["send_sales_navigator_message"].call_args.args[1:]
+        self.assertEqual(sent_subject, "Ihre bAV-Frage")
+        self.assertNotIn("\nKatharina", sent_body)
+        mocks["verify_latest_outbound_message"].assert_awaited_once_with(
+            sales_page,
+            sent_body,
+        )
+        mocks["mark_followup_sent"].assert_called_once()
+
 
     async def test_retries_when_sales_navigator_composer_detected(self):
         from unittest.mock import AsyncMock, MagicMock
