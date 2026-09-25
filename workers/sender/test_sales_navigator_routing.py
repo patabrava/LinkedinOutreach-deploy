@@ -36,6 +36,7 @@ from sender import (
     is_network_outage_error,
     linkedin_absolute_url,
     _is_invite_candidate,
+    _invite_requires_note,
     _is_message_only_candidate,
     is_inmail_and_invite_sequence,
     is_cop_sales_navigator_followup,
@@ -84,6 +85,17 @@ class InviteDialogSelectionTest(unittest.TestCase):
         ]
 
         self.assertEqual(_pick_invite_dialog_candidate(dialogs), 2)
+
+
+class InviteModeContractTest(unittest.TestCase):
+    def test_canonical_connect_message_requires_approved_connection_note(self):
+        self.assertTrue(_invite_requires_note("connect_message"))
+
+    def test_legacy_message_alias_still_requires_approved_connection_note(self):
+        self.assertTrue(_invite_requires_note("message"))
+
+    def test_connect_only_sends_without_note(self):
+        self.assertFalse(_invite_requires_note("connect_only"))
 
 
 class InmailCampaignContractTest(unittest.TestCase):

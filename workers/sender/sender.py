@@ -1044,6 +1044,11 @@ def _is_invite_candidate(lead: Dict[str, Any]) -> bool:
     return outreach_mode in {"connect_only", "message", "connect_message"}
 
 
+def _invite_requires_note(outreach_mode: Any) -> bool:
+    """Treat canonical connect_message and its legacy DB alias identically."""
+    return str(outreach_mode or "").strip().lower() in {"connect_message", "message"}
+
+
 def fetch_invite_queue(
     client: Client,
     limit: int,
@@ -5631,16 +5636,17 @@ async def process_invite_one(
 
     lead_id = str(lead.get("id") or "")
     sequence_id = lead.get("sequence_id")
-    outreach_mode = lead.get("outreach_mode")  # "message" | "connect_only"
+    outreach_mode = lead.get("outreach_mode")
+    invite_requires_note = _invite_requires_note(outreach_mode)
 
     note_text: str = ""
-    if outreach_mode == "message":
+    if invite_requires_note:
         template = _fetch_sequence_connect_note(client, sequence_id)
         note_text = render(template, lead).strip()
 
     page = await context.new_page()
     try:
-        if outreach_mode == "message" and note_text:
+        if invite_requires_note and note_text:
             outcome = await _send_invite_with_note(page, lead, note_text)
         else:
             scraper_lead = ScraperLead(
