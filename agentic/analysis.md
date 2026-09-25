@@ -19,13 +19,15 @@ Publish campaign-isolated analytics for the current DEGURA outreach: one overvie
 - 68 web regression tests pass, including new exact-scope, cross-join exclusion, persisted-outcome, and page-authentication checks.
 - Changed TypeScript files pass focused ESLint.
 - The production Next.js build passes with the repository's `--no-lint` production command; the unscoped default build remains blocked by the pre-existing global lint backlog.
-- Authenticated browser acceptance passes for the index and both campaign pages with no console warnings or errors.
+- Docker Compose resolves the public Supabase URL/key into Next build args while keeping the service-role credential out of the image build.
+- Authenticated production browser acceptance passes for the index and both campaign pages with no console warnings or errors.
 - Live Supabase readback during browser acceptance showed 2,015 leads across regular A/B/C and 102 COP leads with 101 verified first touches, 4 replies, and a 4.0% recorded reply rate.
+- Hostinger action `116662926` deployed commit `f949f03`; the app and both persistent browser-slot containers are healthy and `/api/health` returns HTTP 200.
 
 ## Locality Budget
 
-`{files: 8 implementation/test files plus this canonical ledger and one prevention-rule update, LOC/file: all changed/new files under 2,000, deps: 0}`
+`{files: 10 implementation/test/deployment files plus this canonical ledger and one prevention-rule update, LOC/file: all changed/new files under 2,000, deps: 0}`
 
-## Remaining Work
+## Current Work
 
-Commit the reviewed paths only, push the release branch, deploy the repo-backed revision to the existing Hostinger VPS project without replacing environment or persistent volumes, and verify the authenticated live routes.
+No active implementation or release work remains.
