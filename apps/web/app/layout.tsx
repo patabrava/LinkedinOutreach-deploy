@@ -1,4 +1,5 @@
 import "./globals.css";
+import "./analytics/campaign-analytics.css";
 import type { Metadata } from "next";
 import { headers } from "next/headers";
 

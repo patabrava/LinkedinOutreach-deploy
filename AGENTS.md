@@ -89,6 +89,7 @@ END_LLM_FRIENDLY_PLAN_TEST_DEBUG
 - Inbox search must verify the opened thread still belongs to the searched lead and normalize hyphenated LinkedIn names before reply classification; otherwise the scanner can reuse a stale open conversation, stamp unrelated leads as scanned, and miss real replies.
 - Local dev UI lag can come from client polling: never add unconditional `router.refresh()` loops or per-update full refreshes on realtime feeds; use local state patches plus slow visible-tab fallback polling so `/leads` does not continuously refetch heavy Supabase rows.
 - LinkedIn direct-message and Sales Navigator popup composers must insert multiline outbound text atomically with `keyboard.insert_text()` (with locator `fill()` fallback), never slow per-character `keyboard.type()`; click the exact composer submit button (`Senden`/`Send`, not the send-options toggle), verify the latest LinkedIn bubble matches the full expected text, and never use keyboard send fallbacks (`Meta+Enter`, `Control+Enter`, plain `Enter`) or the first newline can send only the greeting.
+- Campaign analytics activity rows must materialize only dates containing a visualized invite, touch, or reply event; ledger-only outcomes stay in outcome totals and must not create empty zero-activity dates.
 
 <!-- bridgecode:managed:start version="4.1.0" schema="1" -->
 At the start of every new chat/task, read this entire `AGENTS.md` and every file recursively under `bridgecode/` before any substantive response or task action, so the complete Bridgecode operating layer is active in context.
