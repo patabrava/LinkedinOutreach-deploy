@@ -42,7 +42,8 @@ RUN npm run build:web \
     && /app/workers/scraper/venv/bin/pip install -e /app/workers/scraper \
     && python3 -m venv /app/workers/sender/venv \
     && /app/workers/sender/venv/bin/pip install --upgrade pip setuptools wheel \
-    && /app/workers/sender/venv/bin/pip install -e /app/workers/sender \
+    && /app/workers/sender/venv/bin/pip install -e /app/workers/sender -e /app/workers/scraper \
+    && /app/workers/sender/venv/bin/python -c "import sys; sys.path.insert(0, '/app/workers/sender'); import sender" \
     && /app/workers/scraper/venv/bin/python -m playwright install --with-deps chromium
 
 RUN chmod +x /app/scripts/container-entrypoint.sh /app/run_all.sh
