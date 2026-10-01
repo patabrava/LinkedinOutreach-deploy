@@ -23,7 +23,7 @@ exec "${CHROMIUM_BIN}" \
   --disable-features=Translate,AutomationControlled \
   --no-sandbox \
   --disable-setuid-sandbox \
-  --remote-debugging-address=0.0.0.0 \
-  --remote-debugging-port=9222 \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port=9224 \
   --user-data-dir="${CHROME_USER_DATA_DIR}" \
   "${LINKEDIN_LOGIN_URL}"

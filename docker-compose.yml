@@ -70,7 +70,7 @@ services:
       traefik.http.middlewares.linkedin-browser-1-strip.stripprefix.prefixes: /linkedin-browser-1
       traefik.http.services.linkedin-browser-1.loadbalancer.server.port: "6080"
     healthcheck:
-      test: ["CMD-SHELL", "timeout 3 bash -c '</dev/tcp/127.0.0.1/9222'"]
+      test: ["CMD-SHELL", "curl --max-time 3 -fsS http://127.0.0.1:9222/json/version >/dev/null"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -102,7 +102,7 @@ services:
       traefik.http.middlewares.linkedin-browser-2-strip.stripprefix.prefixes: /linkedin-browser-2
       traefik.http.services.linkedin-browser-2.loadbalancer.server.port: "6080"
     healthcheck:
-      test: ["CMD-SHELL", "timeout 3 bash -c '</dev/tcp/127.0.0.1/9222'"]
+      test: ["CMD-SHELL", "curl --max-time 3 -fsS http://127.0.0.1:9222/json/version >/dev/null"]
       interval: 30s
       timeout: 5s
       retries: 3
