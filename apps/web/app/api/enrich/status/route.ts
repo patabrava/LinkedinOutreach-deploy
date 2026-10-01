@@ -61,6 +61,51 @@ export async function GET(request: Request) {
     const client = supabaseAdmin();
     const counts = createInitialCounts();
 
+    if (requestedMode === "message") {
+      const sequenceId = Number(url.searchParams.get("sequenceId"));
+      const scopedSequence = Number.isInteger(sequenceId) && sequenceId > 0 ? sequenceId : null;
+      const inviteQueue = (countOnly = false) => {
+        let query = client.from("leads")
+          .select(countOnly ? "id" : "id, linkedin_url, first_name, last_name, company_name",
+            countOnly ? { count: "exact", head: true } : {})
+          .eq("linkedin_account_id", account.id)
+          .or("outreach_mode.eq.connect_message,outreach_mode.eq.message")
+          .in("status", ["NEW", "FAILED", "PROCESSING"])
+          .is("connection_sent_at", null)
+          .eq("campaign_paused", false);
+        if (scopedSequence) query = query.eq("sequence_id", scopedSequence);
+        return query;
+      };
+      const startOfDay = new Date();
+      startOfDay.setUTCHours(0, 0, 0, 0);
+      const [{ count: queueRemaining, error: queueError }, { data: nextLead, error: nextError }, { count: completedToday, error: sentError }] = await Promise.all([
+        inviteQueue(true),
+        inviteQueue().order("source_last_activity_at", { ascending: false, nullsFirst: false }).limit(1).maybeSingle(),
+        client.from("leads").select("id", { count: "exact", head: true })
+          .eq("linkedin_account_id", account.id).not("connection_sent_at", "is", null)
+          .gte("connection_sent_at", startOfDay.toISOString()),
+      ]);
+      if (queueError || nextError || sentError) throw queueError || nextError || sentError;
+      const cap = account.dailyInviteLimit;
+      const sent = completedToday || 0;
+      const remainingToday = Math.max(0, cap - sent);
+      return NextResponse.json({
+        ok: true,
+        mode: requestedMode,
+        workerActive: listActiveWorkers({ kinds: ["scraper_outreach", "sender_outreach"], accountId: account.id }).length > 0,
+        counts,
+        remaining: queueRemaining || 0,
+        completed: sent,
+        dailyCap: cap,
+        completedToday: sent,
+        remainingToday,
+        queueRemaining: queueRemaining || 0,
+        nextLead: nextLead || null,
+        limitReached: remainingToday === 0,
+        limitMessage: remainingToday === 0 ? `Daily invite cap reached (${sent}/${cap}). More invites can be sent tomorrow.` : null,
+      });
+    }
+
     logger.debug("Fetching status counts for all lead statuses", { correlationId });
 
     await Promise.all(

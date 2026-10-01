@@ -18,12 +18,15 @@ const getDefaultSequenceId = (sequences: OutreachSequenceRow[]): number | null =
 
 export function LeadRunControls({ sequences, accounts }: Props) {
   const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
-  const accountSequences = useMemo(() => sequences.filter((sequence) => sequence.linkedin_account_id === accountId), [sequences, accountId]);
+  const accountSequences = useMemo(
+    () => sequences.filter((sequence) => sequence.linkedin_account_id === accountId || sequence.is_managed_campaign),
+    [sequences, accountId],
+  );
   const defaultSequenceId = useMemo(() => getDefaultSequenceId(accountSequences), [accountSequences]);
   const [sequenceId, setSequenceId] = useState<number | null>(defaultSequenceId);
   const changeAccount = (nextAccountId: string) => {
     setAccountId(nextAccountId);
-    setSequenceId(getDefaultSequenceId(sequences.filter((sequence) => sequence.linkedin_account_id === nextAccountId)));
+    setSequenceId(getDefaultSequenceId(sequences.filter((sequence) => sequence.linkedin_account_id === nextAccountId || sequence.is_managed_campaign)));
   };
 
   return (
@@ -70,13 +73,13 @@ export function LeadRunControls({ sequences, accounts }: Props) {
           <StartEnrichmentButton mode="message" variant="dashboard" sequenceId={sequenceId} accountId={accountId} />
         </div>
 
-        <div className="action-stack__row">
+        {!accountSequences.find((sequence) => sequence.id === sequenceId)?.is_managed_campaign && <div className="action-stack__row">
           <div className="action-stack__header">
             <strong>CONNECT ONLY</strong>
             <div className="muted">Send connection requests without a note for connect-only batches.</div>
           </div>
           <StartEnrichmentButton mode="connect_only" variant="dashboard" sequenceId={sequenceId} accountId={accountId} />
-        </div>
+        </div>}
       </div>
     </div>
   );

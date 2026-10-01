@@ -88,6 +88,22 @@ class InviteDialogSelectionTest(unittest.TestCase):
 
 
 class InviteModeContractTest(unittest.TestCase):
+    def test_confirmed_note_invite_records_account_and_assigned_variant(self):
+        from unittest.mock import MagicMock, patch
+
+        client = MagicMock()
+        lead = {"id": "lead-1", "sequence_id": 9, "sequence_variant_id": 6}
+        with patch.object(sender_module, "CURRENT_ACCOUNT_ID", "sandra-account"):
+            sender_module.record_confirmed_invite_event(client, lead, "connect_message")
+
+        payload = client.table.return_value.insert.call_args.args[0]
+        self.assertEqual(payload["event_type"], "invite_sent")
+        self.assertEqual(payload["linkedin_account_id"], "sandra-account")
+        self.assertEqual(payload["sequence_id"], 9)
+        self.assertEqual(payload["sequence_variant_id"], 6)
+        self.assertEqual(payload["metadata"]["surface"], "connect_note")
+        self.assertTrue(payload["metadata"]["verified"])
+
     def test_canonical_connect_message_requires_approved_connection_note(self):
         self.assertTrue(_invite_requires_note("connect_message"))
 
@@ -342,6 +358,29 @@ class InmailInviteOrderTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ProfileMoreMenuMessageTest(unittest.IsolatedAsyncioTestCase):
+    async def test_invite_only_never_opens_a_message_surface(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        page = MagicMock()
+        profile = MagicMock()
+        profile.wait_for = AsyncMock()
+        page.get_by_test_id.return_value = profile
+        message_button = MagicMock()
+        message_button.count = AsyncMock(return_value=1)
+        message_link = MagicMock()
+        message_link.count = AsyncMock(return_value=1)
+        empty = MagicMock()
+        empty.count = AsyncMock(return_value=0)
+        profile.get_by_role.side_effect = [message_button, message_link, empty, empty, empty]
+        profile.locator.return_value = empty
+
+        with patch.object(sender_module, "close_existing_chat_overlays", AsyncMock()), patch.object(sender_module, "wiggle_mouse", AsyncMock()):
+            with self.assertRaises(RuntimeError):
+                await sender_module.open_message_surface(page, invite_only=True)
+
+        message_button.count.assert_not_awaited()
+        message_link.count.assert_not_awaited()
+
     async def test_finds_localized_send_message_action_in_more_menu(self):
         from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1494,6 +1533,15 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertIn(("eq", "campaign_paused", False), client.calls[0]["filters"])
 
+    def test_fetch_invite_queue_scopes_selected_sequence_at_database_boundary(self):
+        client = FakeInviteQueueClient(
+            [{"id": "lead-new", "status": "NEW", "outreach_mode": "connect_message", "profile_data": {}}]
+        )
+
+        fetch_invite_queue(client, 10, sequence_id=9)
+
+        self.assertIn(("eq", "sequence_id", 9), client.calls[0]["filters"])
+
     def test_fetch_invite_queue_orders_most_recent_source_activity_first(self):
         client = FakeInviteQueueClient(
             [{"id": "lead-new", "status": "NEW", "outreach_mode": "connect_message", "profile_data": {}}]
@@ -1572,13 +1620,13 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
             )
         )
 
-    def test_connect_only_sent_today_count_uses_connection_sent_at_for_connect_only_rows(self):
+    def test_connect_only_sent_today_count_counts_all_invites_by_connection_timestamp(self):
         client = FakeCountClient(count=7)
 
         result = connect_only_sent_today_count(client)
 
         self.assertEqual(result, 7)
-        self.assertTrue(any(item[0] == "eq" and item[1] == "outreach_mode" and item[2] == "connect_only" for item in client.calls[0]))
+        self.assertFalse(any(item[0] == "eq" and item[1] == "outreach_mode" for item in client.calls[0]))
         self.assertTrue(any(item[0] == "not_is" and item[1] == "connection_sent_at" and item[2] == "null" for item in client.calls[0]))
 
     def test_mark_connect_only_limit_reached_persists_pause_metadata(self):

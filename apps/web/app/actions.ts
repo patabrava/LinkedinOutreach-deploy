@@ -508,6 +508,7 @@ export type OutreachSequenceRow = {
   third_message: string;
   followup_interval_days: number;
   is_active: boolean;
+  is_managed_campaign: boolean;
   created_at: string;
   updated_at: string;
   variants?: OutreachSequenceVariantRow[];
@@ -544,7 +545,7 @@ export async function fetchOutreachSequences(): Promise<OutreachSequenceRow[]> {
   const client = supabaseAdmin();
   const { data, error } = await client
     .from("outreach_sequences")
-    .select("id, linkedin_account_id, name, connect_note, first_message, second_message, third_message, followup_interval_days, is_active, created_at, updated_at")
+    .select("id, linkedin_account_id, name, connect_note, first_message, second_message, third_message, followup_interval_days, is_active, is_managed_campaign, created_at, updated_at")
     .order("created_at", { ascending: true });
   if (error) {
     throw error;

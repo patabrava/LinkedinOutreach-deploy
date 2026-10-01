@@ -54,7 +54,8 @@ export async function POST(request: Request) {
     const systemPython = "/opt/local/bin/python3";
     const pythonCmd = fs.existsSync(venvPython) ? venvPython : (fs.existsSync(systemPython) ? systemPython : "python3");
 
-    const args = ["sender.py", "--send-invites", "--account-id", account.id, ...batchArg];
+    const args = ["sender.py", "--send-invites", "--account-id", account.id, ...batchArg,
+      ...(launchSequenceId ? ["--sequence-id", String(launchSequenceId)] : [])];
     logger.workerSpawn("sender", args, { correlationId, batchId, sequenceId: launchSequenceId });
 
     const logPath = path.join(repoRoot, ".logs", "sender-spawn.log");

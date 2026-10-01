@@ -86,7 +86,8 @@ export function StartEnrichmentButton({ mode = "message", variant = "details", s
     }
     try {
       const separator = modeConfig.statusUrl.includes("?") ? "&" : "?";
-      const res = await fetch(`${modeConfig.statusUrl}${separator}accountId=${encodeURIComponent(accountId)}`, {
+      const selectedSequence = sequenceId == null ? "" : `&sequenceId=${encodeURIComponent(sequenceId)}`;
+      const res = await fetch(`${modeConfig.statusUrl}${separator}accountId=${encodeURIComponent(accountId)}${selectedSequence}`, {
         cache: "no-store",
         headers: getOperatorApiHeaders(),
       });
@@ -111,7 +112,7 @@ export function StartEnrichmentButton({ mode = "message", variant = "details", s
         setStatusLoading(false);
       }
     }
-  }, [modeConfig.statusUrl, accountId]);
+  }, [modeConfig.statusUrl, accountId, sequenceId]);
 
   useEffect(() => {
     refreshStatus();

@@ -31,9 +31,10 @@ from scraper import (  # noqa: E402
     Lead as ScraperLead,
     WeeklyInviteLimitReached,
     capture_connect_failure_screenshot,
-    confirm_connection_request_sent,
+    confirm_connection_request_sent_with_profile_recheck,
     detect_weekly_invite_limit,
     normalize_person_name as normalize_linkedin_person_name,
+    open_invite_dialog_from_anchor,
     send_connection_request,
 )
 
@@ -502,14 +503,13 @@ def connect_only_sent_today_count(client: Client) -> int:
     logger.db_query(
         "select-count",
         "leads",
-        {"outreach_mode": "connect_only", "metric": "connection_sent_at"},
+        {"metric": "connection_sent_at"},
         {"since": start_iso},
     )
     resp = (
         client.table("leads")
         .select("id", count="exact")
         .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
-        .eq("outreach_mode", "connect_only")
         .not_.is_("connection_sent_at", "null")
         .gte("connection_sent_at", start_iso)
         .execute()
@@ -518,10 +518,10 @@ def connect_only_sent_today_count(client: Client) -> int:
     logger.db_result(
         "select-count",
         "leads",
-        {"outreach_mode": "connect_only", "metric": "connection_sent_at"},
+        {"metric": "connection_sent_at"},
         count,
     )
-    logger.info("Connect-only invites sent today", data={"count": count})
+    logger.info("Invites sent today", data={"count": count})
     return count
 
 
@@ -1054,6 +1054,7 @@ def fetch_invite_queue(
     limit: int,
     batch_id: Optional[int] = None,
     exclude_ids: Optional[set[str]] = None,
+    sequence_id: Optional[int] = None,
 ) -> list[Dict[str, Any]]:
     """Fetch sequence-driven leads eligible for connect-invite send.
 
@@ -1067,6 +1068,8 @@ def fetch_invite_queue(
     }
     if batch_id is not None:
         query_meta["batch_id"] = batch_id
+    if sequence_id is not None:
+        query_meta["sequence_id"] = sequence_id
     logger.db_query("select", "leads", query_meta)
     excluded = exclude_ids or set()
     query = (
@@ -1086,6 +1089,8 @@ def fetch_invite_queue(
     )
     if batch_id is not None:
         query = query.eq("batch_id", batch_id)
+    if sequence_id is not None:
+        query = query.eq("sequence_id", sequence_id)
     response = query.execute()
     rows = sorted(
         response.data or [],
@@ -1725,7 +1730,15 @@ async def click_and_resolve_active_page(page: Page, locator, timeout_ms: int = 8
                 pass
 
 
-async def open_message_surface(page: Page) -> str:
+def _connect_invite_anchor_selectors() -> tuple[str, ...]:
+    return (
+        "a[href*='/preload/custom-invite/']",
+        "a[aria-label*='Vernetzen'][href*='/preload/custom-invite/']",
+        "a[aria-label*='Einladen'][href*='/preload/custom-invite/']",
+    )
+
+
+async def open_message_surface(page: Page, *, invite_only: bool = False) -> str:
     """Open a messaging surface on a LinkedIn profile page.
 
     CRITICAL: All selectors must be scoped to lazy-column test ID to avoid
@@ -1758,7 +1771,7 @@ async def open_message_surface(page: Page) -> str:
 
     # PATH 1a: Explicit "Nachricht an <Name>" button (localized message button)
     message_btn = profile_container.get_by_role("button", name=re.compile(r"(Nachricht an|Message to)", re.I))
-    message_btn_count = await message_btn.count()
+    message_btn_count = 0 if invite_only else await message_btn.count()
     logger.element_search("Nachricht an / Message to button", message_btn_count, role="button", context={"path": "1a"})
 
     if message_btn_count > 0:
@@ -1779,7 +1792,7 @@ async def open_message_surface(page: Page) -> str:
     # PATH 1b: Try Message link (for existing connections)
     # Scoped to profile container to avoid inbox Message buttons
     message_link = profile_container.get_by_role("link", name=re.compile(r"(Message|Nachricht)", re.I))
-    message_link_count = await message_link.count()
+    message_link_count = 0 if invite_only else await message_link.count()
     logger.element_search("Message/Nachricht link", message_link_count, role="link", context={"path": "1b"})
 
     if message_link_count > 0:
@@ -1827,7 +1840,35 @@ async def open_message_surface(page: Page) -> str:
             logger.element_click("Invite link", success=False)
             logger.path_attempt("Invite link", 2, success=False)
 
-    # PATH 3: Direct Vernetzen / Als Kontakt button on profile card
+    # PATH 3: LinkedIn currently renders the primary Vernetzen action as an anchor.
+    for css in _connect_invite_anchor_selectors():
+        direct_connect_anchor = profile_container.locator(css)
+        if await direct_connect_anchor.count() == 0:
+            continue
+        try:
+            opened = await open_invite_dialog_from_anchor(
+                page,
+                direct_connect_anchor.first,
+                "https://www.linkedin.com",
+            )
+            if not opened:
+                continue
+            add_note_btn = page.get_by_role(
+                "button",
+                name=re.compile(r"(Nachricht hinzufügen|Add a note|Notiz hinzufügen)", re.I),
+            )
+            if await add_note_btn.count() > 0:
+                await add_note_btn.first.click(timeout=6_000)
+                await page.wait_for_timeout(500)
+                logger.path_attempt("Direct Connect anchor -> Add note", 3, success=True)
+                return "connect_note"
+            logger.path_attempt("Direct Connect anchor (no note)", 3, success=True)
+            return "connect"
+        except Exception as exc:
+            logger.warn("Direct Connect anchor flow failed", data={"selector": css}, error=exc)
+            logger.path_attempt("Direct Connect anchor", 3, success=False)
+
+    # PATH 3b: Direct Vernetzen / Als Kontakt button on profile card
     direct_connect_btn = profile_container.get_by_role(
         "button",
         name=re.compile(r"(Vernetzen|Als Kontakt|als Kontakt)", re.I),
@@ -5437,22 +5478,57 @@ def persist_invite_sent(client: Client, lead_id: str, outreach_mode: Optional[st
     logger.db_result("update", "leads", {"leadId": lead_id}, 1)
 
 
-def _fetch_sequence_connect_note(client: Client, sequence_id: Any) -> str:
-    if not sequence_id:
+def record_confirmed_invite_event(client: Client, lead: Dict[str, Any], outreach_mode: Optional[str]) -> None:
+    """Record a verified invite without turning a completed LinkedIn send into a retry."""
+    payload = event_payload(
+        account_id=CURRENT_ACCOUNT_ID,
+        lead_id=str(lead.get("id") or ""),
+        event_type="invite_sent",
+        sequence_id=lead.get("sequence_id"),
+        variant_id=lead.get("sequence_variant_id"),
+        touch_number=1,
+        correlation_id=os.getenv("CORRELATION_ID"),
+        metadata={
+            "surface": "connect_note" if _invite_requires_note(outreach_mode) else "connection_request",
+            "delivery_mode": "standard_connect_message",
+            "verified": True,
+        },
+    )
+    try:
+        client.table("outreach_events").insert(payload).execute()
+    except Exception as exc:
+        if "23505" in str(exc) and "idx_outreach_events_delivery_idempotency" in str(exc):
+            logger.info("Invite event already recorded", {"leadId": lead.get("id")})
+            return
+        logger.error("Confirmed invite event could not be recorded", {"leadId": lead.get("id")}, error=exc)
+
+
+def _fetch_sequence_connect_note(client: Client, lead: Dict[str, Any]) -> str:
+    if not isinstance(lead, dict) or not lead.get("sequence_id"):
         return ""
     try:
-        resp = (
-            client.table("outreach_sequences")
-            .select("connect_note")
-            .eq("id", sequence_id)
-            .single()
-            .execute()
+        messages = load_sequence_messages(
+            client,
+            lead,
+            require_explicit_sequence=True,
         )
+        if lead.get("sequence_variant_id") and messages.get("source") != "outreach_sequence_variants":
+            logger.error(
+                "Assigned sequence variant could not be resolved; refusing invite send",
+                {"leadId": lead.get("id"), "sequenceVariantId": lead.get("sequence_variant_id")},
+            )
+            return ""
+        return str(messages.get("connect_note") or "").strip()
     except Exception as exc:
-        logger.warn("Failed to load sequence connect_note", {"sequenceId": sequence_id}, error=exc)
+        logger.warn(
+            "Failed to load sequence connect_note",
+            {
+                "leadId": lead.get("id") if isinstance(lead, dict) else None,
+                "sequenceId": lead.get("sequence_id") if isinstance(lead, dict) else None,
+            },
+            error=exc,
+        )
         return ""
-    data = getattr(resp, "data", None) or {}
-    return str(data.get("connect_note") or "")
 
 
 async def _send_invite_with_note(page: Page, lead: Dict[str, Any], note_text: str) -> str:
@@ -5474,7 +5550,7 @@ async def _send_invite_with_note(page: Page, lead: Dict[str, Any], note_text: st
         return "failed"
 
     try:
-        surface = await open_message_surface(page)
+        surface = await open_message_surface(page, invite_only=True)
     except Exception as exc:
         screenshot_path = await capture_connect_failure_screenshot(page, "all_paths_exhausted", lead_id)
         logger.error(
@@ -5512,7 +5588,7 @@ async def _send_invite_with_note(page: Page, lead: Dict[str, Any], note_text: st
     if limit_reason:
         await capture_connect_failure_screenshot(page, "weekly_invite_limit_reached", lead_id)
         return "limit_reached"
-    if not await confirm_connection_request_sent(page):
+    if not await confirm_connection_request_sent_with_profile_recheck(page, profile_url):
         screenshot_path = await capture_connect_failure_screenshot(page, "invite_send_unconfirmed", lead_id)
         logger.warn(
             "Invite-with-note send was not confirmed after click",
@@ -5641,8 +5717,19 @@ async def process_invite_one(
 
     note_text: str = ""
     if invite_requires_note:
-        template = _fetch_sequence_connect_note(client, sequence_id)
-        note_text = render(template, lead).strip()
+        template = _fetch_sequence_connect_note(client, lead)
+        note_text = render(template, lead).strip() if template else ""
+        if not note_text:
+            client.table("leads").update({
+                "status": "FAILED",
+                "error_message": "missing_approved_connect_note",
+                "updated_at": datetime.utcnow().isoformat(),
+            }).eq("id", lead_id).execute()
+            logger.error(
+                "Invite requires an approved connect note; refusing no-note fallback",
+                {"leadId": lead_id, "sequenceId": sequence_id, "sequenceVariantId": lead.get("sequence_variant_id")},
+            )
+            return "paused"
 
     page = await context.new_page()
     try:
@@ -5700,6 +5787,7 @@ async def process_invite_one(
 
     if outcome == "sent":
         persist_invite_sent(client, lead_id, outreach_mode)
+        record_confirmed_invite_event(client, lead, outreach_mode)
         logger.message_send_complete(lead_id, {"mode": "send-invites", "outreach_mode": outreach_mode})
         return "sent"
 
@@ -6513,7 +6601,7 @@ async def main() -> None:
     parser.add_argument(
         "--sequence-id",
         type=int,
-        help="Use this sequence for a targeted InMail test without changing the lead's stored ownership.",
+        help="Filter invitation queue by assigned sequence, or use this sequence for a targeted InMail test.",
     )
     parser.add_argument(
         "--test-override",
@@ -6881,7 +6969,7 @@ async def main() -> None:
                     return
                 leads_to_process = [lead]
             else:
-                leads_to_process = fetch_invite_queue(client, remaining, args.batch_id)
+                leads_to_process = fetch_invite_queue(client, remaining, args.batch_id, sequence_id=args.sequence_id)
                 if not leads_to_process:
                     logger.info("No NEW or FAILED sequence-driven leads to invite", {"batchId": args.batch_id})
                     return
@@ -6974,6 +7062,7 @@ async def main() -> None:
                         next_remaining,
                         args.batch_id,
                         exclude_ids=attempted_invite_ids,
+                        sequence_id=args.sequence_id,
                     )
                     if leads_to_process:
                         logger.info(

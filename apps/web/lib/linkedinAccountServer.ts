@@ -39,12 +39,24 @@ export async function getLinkedinAccountForBatch(batchId: unknown, requestedAcco
   }
   const { data, error } = await supabaseAdmin()
     .from("lead_batches")
-    .select("linkedin_account_id")
+    .select("linkedin_account_id, sequence_id")
     .eq("id", batchId)
     .single();
   if (error || !data?.linkedin_account_id) throw new Error("Lead batch was not found or has no sender account.");
-  if (requestedAccountId && requireLinkedinAccountId(requestedAccountId) !== data.linkedin_account_id) {
-    throw new Error("Selected sender does not own this lead batch.");
+  if (requestedAccountId) {
+    const accountId = requireLinkedinAccountId(requestedAccountId);
+    if (accountId !== data.linkedin_account_id) {
+      const { data: assignedLead, error: leadError } = await supabaseAdmin()
+        .from("leads")
+        .select("id")
+        .eq("batch_id", batchId)
+        .eq("sequence_id", data.sequence_id)
+        .eq("linkedin_account_id", accountId)
+        .limit(1)
+        .maybeSingle();
+      if (leadError || !assignedLead) throw new Error("Selected sender has no assigned leads in this batch.");
+    }
+    return getLinkedinAccountRuntime(accountId);
   }
   return getLinkedinAccountRuntime(data.linkedin_account_id);
 }
