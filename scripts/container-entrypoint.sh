@@ -10,14 +10,14 @@ mkdir -p /app/.logs /data/scraper /data/sender /data/home "$PLAYWRIGHT_BROWSERS_
 ln -sfn /data/scraper/auth.json /app/workers/scraper/auth.json
 ln -sfn /data/sender/auth.json /app/workers/sender/auth.json
 
-if [ -z "$(ls -A "$PLAYWRIGHT_BROWSERS_PATH" 2>/dev/null)" ]; then
-  if [ "$PLAYWRIGHT_BROWSERS_SEED_PATH" != "$PLAYWRIGHT_BROWSERS_PATH" ] && [ -n "$(ls -A "$PLAYWRIGHT_BROWSERS_SEED_PATH" 2>/dev/null)" ]; then
-    echo "[playwright] hydrating runtime browser cache from image seed"
-    cp -a "$PLAYWRIGHT_BROWSERS_SEED_PATH"/. "$PLAYWRIGHT_BROWSERS_PATH"/
-  else
-    echo "[playwright] browser cache missing, installing chromium into $PLAYWRIGHT_BROWSERS_PATH"
-    /app/workers/scraper/venv/bin/python -m playwright install chromium
-  fi
+if [ "$PLAYWRIGHT_BROWSERS_SEED_PATH" != "$PLAYWRIGHT_BROWSERS_PATH" ] && [ -n "$(ls -A "$PLAYWRIGHT_BROWSERS_SEED_PATH" 2>/dev/null)" ]; then
+  echo "[playwright] reconciling runtime browser cache with image seed"
+  # Persistent caches may contain only an older Playwright browser revision.
+  # Merge missing revision files on every boot, including nonempty volumes.
+  cp -an "$PLAYWRIGHT_BROWSERS_SEED_PATH"/. "$PLAYWRIGHT_BROWSERS_PATH"/
+elif [ -z "$(ls -A "$PLAYWRIGHT_BROWSERS_PATH" 2>/dev/null)" ]; then
+  echo "[playwright] browser cache missing, installing chromium into $PLAYWRIGHT_BROWSERS_PATH"
+  /app/workers/scraper/venv/bin/python -m playwright install chromium
 fi
 
 export HOME="${HOME:-/data/home}"
