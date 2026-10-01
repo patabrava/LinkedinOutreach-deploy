@@ -8,9 +8,11 @@ from dataclasses import asdict, dataclass
 import os
 from pathlib import Path
 import shutil
+import socket
 import sys
 import uuid
 from typing import Literal, Optional, Tuple
+from urllib.parse import urlsplit
 
 from playwright.async_api import Browser, BrowserContext, Playwright, TimeoutError, async_playwright
 
@@ -182,6 +184,19 @@ def _resolve_credentials_saved(explicit: Optional[bool]) -> bool:
 def _candidate_remote_browser_cdp_urls() -> list[str]:
     """Return a de-duplicated list of CDP endpoints to try in order."""
     configured = os.getenv("LINKEDIN_BROWSER_CDP_URL", "").strip()
+    if os.getenv("LINKEDIN_ACCOUNT_ID", "").strip():
+        if not configured:
+            raise RuntimeError("An account-scoped CDP endpoint is required for remote session capture.")
+        endpoint = urlsplit(configured)
+        if endpoint.scheme not in {"http", "https"} or not endpoint.hostname or endpoint.username:
+            raise RuntimeError("The selected remote browser CDP endpoint is invalid.")
+        try:
+            address = socket.gethostbyname(endpoint.hostname)
+            netloc = f"{address}:{endpoint.port}" if endpoint.port else address
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("Unable to resolve the selected remote browser; no account fallback is allowed.") from exc
+        # Chromium requires localhost or an IP Host header in CDP discovery.
+        return [endpoint._replace(netloc=netloc).geturl()]
     candidates = [
         configured,
         REMOTE_BROWSER_CDP_URL,
