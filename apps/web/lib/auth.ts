@@ -15,11 +15,15 @@ export const PROTECTED_ROUTE_PREFIXES = [
   "/settings",
 ] as const;
 
+// Public, read-only aggregate reports; descendants and operator pages stay gated.
+const PUBLIC_ANALYTICS_ROUTES = new Set(["/analytics", "/analytics/regular", "/analytics/sales-navigator"]);
+
 export const isProtectedRoute = (pathname: string): boolean =>
-  pathname === "/" || PROTECTED_ROUTE_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+  !PUBLIC_ANALYTICS_ROUTES.has(pathname) &&
+  (pathname === "/" || PROTECTED_ROUTE_PREFIXES.some((prefix) => pathname.startsWith(prefix)));
 
 export const isAuthPublicRoute = (pathname: string): boolean =>
-  pathname === LOGIN_PATH || pathname.startsWith("/api/") || pathname.startsWith("/_next/") || pathname === "/favicon.ico";
+  PUBLIC_ANALYTICS_ROUTES.has(pathname) || pathname === LOGIN_PATH || pathname.startsWith("/api/") || pathname.startsWith("/_next/") || pathname === "/favicon.ico";
 
 const hasSupabaseSessionConfig = (): boolean => isSupabaseAuthConfigured();
 

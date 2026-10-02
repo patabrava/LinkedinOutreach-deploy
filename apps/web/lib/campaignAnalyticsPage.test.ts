@@ -11,8 +11,9 @@ test("analytics overview links to both isolated campaign pages", () => {
   assert.match(analyticsIndex, /\/analytics\/sales-navigator/);
 });
 
-test("campaign pages are server-authenticated and use campaign-scoped analytics", () => {
-  assert.match(campaignPage, /requireServerSession/);
+test("analytics reports are public and use campaign-scoped analytics", () => {
+  assert.doesNotMatch(analyticsIndex, /requireServerSession/);
+  assert.doesNotMatch(campaignPage, /requireServerSession/);
   assert.match(campaignPage, /fetchCampaignAnalytics\(campaign, validDays\)/);
   assert.match(campaignPage, /Only persisted campaign events/);
   assert.doesNotMatch(campaignPage, /infer/i);

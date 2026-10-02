@@ -6,7 +6,6 @@ import {
     fetchDailyMetrics,
 } from "../actions";
 import { buildConversionFunnel } from "../../lib/analyticsFunnel";
-import { requireServerSession } from "../../lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -20,7 +19,6 @@ type PageProps = {
 };
 
 export default async function AnalyticsPage({ searchParams }: PageProps) {
-    await requireServerSession("/analytics");
     const daysParam = searchParams?.days;
     const days = daysParam ? parseInt(daysParam, 10) : 7;
     const validDays = [7, 30, 90].includes(days) ? days : 7;

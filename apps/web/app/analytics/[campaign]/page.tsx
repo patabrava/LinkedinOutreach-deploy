@@ -2,7 +2,6 @@ import type { CSSProperties } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
-import { requireServerSession } from "../../../lib/auth";
 import {
   CAMPAIGN_ANALYTICS_SCOPES,
   type CampaignAnalytics,
@@ -79,7 +78,6 @@ function ActivityLedger({ analytics }: { analytics: CampaignAnalytics }) {
 export default async function CampaignAnalyticsPage({ params, searchParams }: PageProps) {
   if (!isCampaign(params.campaign)) notFound();
   const campaign = params.campaign;
-  await requireServerSession(`/analytics/${campaign}`);
   const parsedDays = Number(searchParams?.days || 30);
   const validDays = [7, 30, 90].includes(parsedDays) ? parsedDays : 30;
   const analytics = await fetchCampaignAnalytics(campaign, validDays);
