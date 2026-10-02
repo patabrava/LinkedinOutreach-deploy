@@ -21,6 +21,7 @@ function load(name, imports) {
 test("shared campaign queries include both senders while rejecting mismatched event ownership", async () => {
   const now = new Date().toISOString();
   const rows = {
+    linkedin_accounts: ["owner", "second", "empty"].map((id) => ({ id, display_name: id === "owner" ? "Katharina" : id === "second" ? "Sandra" : "Empty sender", is_active: true })),
     lead_batches: [30, 31, 32].map((id) => ({ id, sequence_id: id - 23, linkedin_account_id: "owner" })),
     outreach_sequences: [7, 8, 9].map((id) => ({ id, linkedin_account_id: "owner", delivery_mode: "standard_connect_message" })),
     leads: ["owner", "second"].map((account) => ({ id: account, batch_id: 30, sequence_id: 7, linkedin_account_id: account, status: "SENT", connection_sent_at: now, sent_at: now })),
@@ -55,4 +56,10 @@ test("shared campaign queries include both senders while rejecting mismatched ev
   assert.equal(result.invitesSent, 2);
   assert.equal(result.followupTouchesSent, 1);
   assert.equal(result.repliesReceived, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.accounts.map((row) => [row.label, row.leadCount, row.invitesSent, row.firstTouchesSent, row.followupTouchesSent, row.messagesSent]))), [
+    ["Empty sender", 0, 0, 0, 0, 0], ["Katharina", 1, 1, 1, 0, 1], ["Sandra", 1, 1, 1, 1, 2],
+  ]);
+  for (const metric of ["leadCount", "invitesSent", "firstTouchesSent", "followupTouchesSent", "repliesReceived"]) {
+    assert.equal(result.accounts.reduce((sum, row) => sum + row[metric], 0), result[metric]);
+  }
 });

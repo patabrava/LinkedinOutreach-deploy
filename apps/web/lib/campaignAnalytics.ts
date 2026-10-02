@@ -63,6 +63,18 @@ export type CampaignDailyActivity = {
   replies: number;
 };
 
+export type CampaignAccountAnalytics = {
+  accountId: string;
+  label: string;
+  leadCount: number;
+  invitesSent: number;
+  firstTouchesSent: number;
+  followupTouchesSent: number;
+  messagesSent: number;
+  repliesReceived: number;
+  responseRate: number;
+};
+
 export type CampaignAnalytics = {
   scope: CampaignAnalyticsScope;
   days: number;
@@ -80,6 +92,7 @@ export type CampaignAnalytics = {
   sequenceStops: number;
   statusCounts: Record<string, number>;
   sequences: CampaignSequenceAnalytics[];
+  accounts: CampaignAccountAnalytics[];
   dailyActivity: CampaignDailyActivity[];
 };
 
@@ -181,6 +194,7 @@ export function aggregateCampaignAnalytics(input: {
   leads: CampaignAnalyticsLead[];
   events: CampaignAnalyticsEvent[];
   days: number;
+  accounts?: { id: string; label: string }[];
 }): CampaignAnalytics {
   const pairKeys = new Set(input.scope.sequences.map((sequence) => `${sequence.batchId}:${sequence.sequenceId}`));
   const scopedLeads = input.leads.filter((lead) => pairKeys.has(`${lead.batch_id}:${lead.sequence_id}`));
@@ -233,6 +247,24 @@ export function aggregateCampaignAnalytics(input: {
     };
   });
 
+  const accountLabels = new Map((input.accounts || []).map((account) => [account.id, account.label]));
+  for (const lead of scopedLeads) {
+    if (!accountLabels.has(lead.linkedin_account_id)) accountLabels.set(lead.linkedin_account_id, "Unlabelled sender");
+  }
+  const accounts = [...accountLabels].map(([accountId, label]) => {
+    const accountEvents = scopedEvents.filter((event) => event.linkedin_account_id === accountId);
+    const firstTouches = uniqueLeadCount(accountEvents, "touch_sent", 1);
+    const followups = accountEvents.filter((event) => event.event_type === "touch_sent" && (event.touch_number || 0) > 1).length;
+    const replies = uniqueLeadCount(accountEvents, "reply_received");
+    return {
+      accountId, label,
+      leadCount: scopedLeads.filter((lead) => lead.linkedin_account_id === accountId).length,
+      invitesSent: uniqueLeadCount(accountEvents, "invite_sent"),
+      firstTouchesSent: firstTouches, followupTouchesSent: followups, messagesSent: firstTouches + followups,
+      repliesReceived: replies, responseRate: roundedRate(replies, firstTouches),
+    };
+  }).sort((a, b) => a.label.localeCompare(b.label));
+
   return {
     scope: input.scope,
     days: input.days,
@@ -252,6 +284,7 @@ export function aggregateCampaignAnalytics(input: {
     sequenceStops: uniqueLeadCount(scopedEvents, "sequence_stopped"),
     statusCounts,
     sequences,
+    accounts,
     dailyActivity: [...daily.values()].sort((a, b) => a.date.localeCompare(b.date)),
   };
 }

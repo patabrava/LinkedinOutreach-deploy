@@ -18,3 +18,10 @@ test("analytics reports are public and use campaign-scoped analytics", () => {
   assert.match(campaignPage, /Sends are reconciled from persisted lead timestamps/);
   assert.doesNotMatch(campaignPage, /infer/i);
 });
+
+test("campaign pages show sender breakdowns and combined totals", () => {
+  assert.match(campaignPage, /ACCOUNT PERFORMANCE/);
+  assert.match(campaignPage, /analytics\.accounts\.map/);
+  assert.match(campaignPage, /TOTAL · ALL SENDERS/);
+  assert.match(campaignPage, /MESSAGES TOTAL/);
+});

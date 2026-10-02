@@ -138,6 +138,50 @@ export default async function CampaignAnalyticsPage({ params, searchParams }: Pa
         <Metric label="Reply rate" value={percent(analytics.responseRate)} note="Replies / first touches" emphasis />
       </section>
 
+      <section className="campaign-panel" aria-labelledby="accounts-heading">
+        <div className="campaign-panel__heading">
+          <div>
+            <span className="campaign-kicker">Both senders · combined totals</span>
+            <h2 id="accounts-heading">ACCOUNT PERFORMANCE</h2>
+          </div>
+          <span className="campaign-panel__aside">{validDays} days · UTC</span>
+        </div>
+        <div className="campaign-table-wrap">
+          <table className="campaign-table">
+            <thead>
+              <tr><th>SENDER</th><th>LEADS</th><th>INVITES</th><th>FIRST MESSAGES</th><th>FOLLOW-UPS</th><th>MESSAGES TOTAL</th><th>REPLIES</th><th>REPLY RATE</th></tr>
+            </thead>
+            <tbody>
+              {analytics.accounts.map((account) => (
+                <tr key={account.accountId}>
+                  <th scope="row">{account.label}</th>
+                  <td>{number(account.leadCount)}</td>
+                  <td>{number(account.invitesSent)}</td>
+                  <td>{number(account.firstTouchesSent)}</td>
+                  <td>{number(account.followupTouchesSent)}</td>
+                  <td>{number(account.messagesSent)}</td>
+                  <td>{number(account.repliesReceived)}</td>
+                  <td><strong>{percent(account.responseRate)}</strong></td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <th scope="row">TOTAL · ALL SENDERS</th>
+                <td>{number(analytics.leadCount)}</td>
+                <td>{number(analytics.invitesSent)}</td>
+                <td>{number(analytics.firstTouchesSent)}</td>
+                <td>{number(analytics.followupTouchesSent)}</td>
+                <td>{number(analytics.firstTouchesSent + analytics.followupTouchesSent)}</td>
+                <td>{number(analytics.repliesReceived)}</td>
+                <td><strong>{percent(analytics.responseRate)}</strong></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <p className="campaign-ledger-note">Lead counts cover the full campaign cohort. Activity uses the selected window. Messages total = first messages + follow-ups; invites are counted separately. A zero row means no recorded activity for that sender in this campaign.</p>
+      </section>
+
       <section className="campaign-panel" aria-labelledby="sequence-heading">
         <div className="campaign-panel__heading">
           <div>

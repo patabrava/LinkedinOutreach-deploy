@@ -91,6 +91,13 @@ export async function fetchCampaignAnalytics(
     ),
   );
   const leads = leadPages.flat();
+  // Public reporting needs display names only: never fetch account email or credentials.
+  const { data: accountData, error: accountError } = await client.from("linkedin_accounts")
+    .select("id, display_name, sender_display_name, label, is_active");
+  if (accountError) throw accountError;
+  const owners = new Set(leads.map((lead) => lead.linkedin_account_id));
+  const accounts = (accountData || []).filter((account) => account.is_active || owners.has(account.id))
+    .map((account) => ({ id: account.id, label: account.display_name?.trim() || account.sender_display_name?.trim() || account.label?.trim() || "Unlabelled sender" }));
   const leadIds = new Set(leads.map((lead) => lead.id));
   const since = new Date();
   since.setUTCDate(since.getUTCDate() - (safeDays - 1));
@@ -125,5 +132,5 @@ export async function fetchCampaignAnalytics(
   const reconciled = reconcileCampaignEvents({
     leads, events, followups: followupPages.flat(), since: since.toISOString(), until: until.toISOString(),
   });
-  return aggregateCampaignAnalytics({ scope, leads, events: reconciled, days: safeDays });
+  return aggregateCampaignAnalytics({ scope, leads, events: reconciled, days: safeDays, accounts });
 }
