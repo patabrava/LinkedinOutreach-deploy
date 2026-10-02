@@ -41,7 +41,7 @@ function ActivityLedger({ analytics }: { analytics: CampaignAnalytics }) {
     <section className="campaign-panel campaign-activity" aria-labelledby="activity-heading">
       <div className="campaign-panel__heading">
         <div>
-          <span className="campaign-kicker">Event ledger</span>
+          <span className="campaign-kicker">Reconciled send records</span>
           <h2 id="activity-heading">RECORDED ACTIVITY</h2>
         </div>
         <span className="campaign-panel__aside">Last 14 active days</span>
@@ -132,8 +132,8 @@ export default async function CampaignAnalyticsPage({ params, searchParams }: Pa
 
       <section className="campaign-metrics" aria-label="Campaign performance">
         <Metric label="Campaign leads" value={number(analytics.leadCount)} note="Exact batch cohort" />
-        <Metric label="Invites sent" value={number(analytics.invitesSent)} note="Unique recorded leads" />
-        <Metric label="First touches" value={number(analytics.firstTouchesSent)} note="Verified touch 1" />
+        <Metric label="Invites sent" value={number(analytics.invitesSent)} note="Sent records + reconciled events" />
+        <Metric label="First touches" value={number(analytics.firstTouchesSent)} note="Sent records + reconciled events" />
         <Metric label="Replies" value={number(analytics.repliesReceived)} note="Unique recorded leads" />
         <Metric label="Reply rate" value={percent(analytics.responseRate)} note="Replies / first touches" emphasis />
       </section>
@@ -187,7 +187,7 @@ export default async function CampaignAnalyticsPage({ params, searchParams }: Pa
             <div><dt>APPOINTMENTS SHOWED</dt><dd>{number(analytics.appointmentsShowed)}</dd></div>
             <div><dt>SEQUENCES STOPPED</dt><dd>{number(analytics.sequenceStops)}</dd></div>
           </dl>
-          <p className="campaign-ledger-note">Only persisted campaign events are shown. Booking and attendance outcomes require their own recorded events.</p>
+          <p className="campaign-ledger-note">Sends are reconciled from persisted lead timestamps, sent follow-up records, and campaign events without double-counting. Booking and attendance outcomes require their own recorded events.</p>
         </section>
       </div>
 

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   aggregateCampaignAnalytics,
+  reconcileCampaignEvents,
   CAMPAIGN_ANALYTICS_SCOPES,
   type CampaignAnalyticsEvent,
   type CampaignAnalyticsLead,
@@ -39,6 +40,49 @@ test("defines the regular and Sales Navigator campaigns as exact batch and seque
     CAMPAIGN_ANALYTICS_SCOPES["sales-navigator"].sequences.map(({ batchId, sequenceId }) => [batchId, sequenceId]),
     [[33, 10]],
   );
+});
+
+test("reconciles persisted sends with ledger events without counting the same delivery twice", () => {
+  const sent = "2026-09-24T10:00:00Z";
+  const reconciled = reconcileCampaignEvents({
+    leads: [{ ...leads[0], connection_sent_at: sent, sent_at: sent }],
+    events: [
+      { ...events[0], occurred_at: sent },
+      { ...events[1], occurred_at: sent },
+      { ...events[2], occurred_at: sent, metadata: { followup_id: "fu-1" } },
+      { ...events[2], occurred_at: sent, metadata: { followup_id: "fu-1" } },
+    ],
+    followups: [
+      { id: "fu-1", lead_id: "a-1", linkedin_account_id: accountId, status: "SENT", sent_at: sent, attempt: 1 },
+      { id: "fu-2", lead_id: "a-1", linkedin_account_id: accountId, status: "SENT", sent_at: sent, attempt: 2 },
+      { id: "unsent", lead_id: "a-1", linkedin_account_id: accountId, status: "APPROVED", sent_at: sent, attempt: 2 },
+      { id: "wrong-owner", lead_id: "a-1", linkedin_account_id: "other", status: "SENT", sent_at: sent, attempt: 2 },
+    ],
+    since: "2026-09-01T00:00:00Z", until: "2026-10-01T00:00:00Z",
+  });
+  const result = aggregateCampaignAnalytics({ scope: CAMPAIGN_ANALYTICS_SCOPES.regular, leads: [leads[0]], events: reconciled, days: 30 });
+  assert.equal(result.invitesSent, 1);
+  assert.equal(result.firstTouchesSent, 1);
+  assert.equal(result.followupTouchesSent, 2);
+  assert.deepEqual(result.dailyActivity, [{ date: "2026-09-24", invites: 1, touches: 3, replies: 0 }]);
+});
+
+test("reconciliation excludes outside-window timestamps and preserves event-only evidence", () => {
+  const reconciled = reconcileCampaignEvents({
+    leads: [{ ...leads[0], connection_sent_at: "2026-08-31T23:59:59Z", sent_at: "invalid" }],
+    events: [
+      { ...events[0], occurred_at: "2026-09-24T10:00:00Z" },
+      { ...events[1], occurred_at: "2026-09-24T10:00:00Z" },
+      { ...events[1], linkedin_account_id: "other" },
+      { ...events[2], touch_number: 99 },
+    ],
+    followups: [{ id: "outside", lead_id: "a-1", linkedin_account_id: accountId, status: "SENT", sent_at: "2026-10-01T00:00:00Z", attempt: 1 }],
+    since: "2026-09-01T00:00:00Z", until: "2026-10-01T00:00:00Z",
+  });
+  const result = aggregateCampaignAnalytics({ scope: CAMPAIGN_ANALYTICS_SCOPES.regular, leads: [leads[0]], events: reconciled, days: 30 });
+  assert.equal(result.invitesSent, 0);
+  assert.equal(result.firstTouchesSent, 1);
+  assert.equal(result.followupTouchesSent, 0);
 });
 
 test("aggregates only leads and persisted events belonging to exact campaign triples", () => {

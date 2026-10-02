@@ -3,11 +3,13 @@ import "server-only";
 import { supabaseAdmin } from "./supabaseAdmin";
 import {
   aggregateCampaignAnalytics,
+  reconcileCampaignEvents,
   CAMPAIGN_ANALYTICS_SCOPES,
   type CampaignAnalytics,
   type CampaignAnalyticsEvent,
   type CampaignAnalyticsKind,
   type CampaignAnalyticsLead,
+  type CampaignAnalyticsFollowup,
 } from "./campaignAnalytics";
 
 type CampaignBatchRow = {
@@ -81,7 +83,7 @@ export async function fetchCampaignAnalytics(
       fetchPaged<CampaignAnalyticsLead>(() =>
         client
           .from("leads")
-          .select("id, batch_id, sequence_id, linkedin_account_id, status")
+          .select("id, batch_id, sequence_id, linkedin_account_id, status, connection_sent_at, sent_at, last_reply_at")
           .eq("batch_id", triple.batchId)
           .eq("sequence_id", triple.sequenceId)
           .order("id", { ascending: true }),
@@ -101,7 +103,7 @@ export async function fetchCampaignAnalytics(
       fetchPaged<CampaignAnalyticsEvent>(() =>
         client
           .from("outreach_events")
-          .select("lead_id, sequence_id, linkedin_account_id, event_type, touch_number, occurred_at")
+          .select("lead_id, sequence_id, linkedin_account_id, event_type, touch_number, occurred_at, metadata")
           .eq("sequence_id", triple.sequenceId)
           .gte("occurred_at", since.toISOString())
           .lt("occurred_at", until.toISOString())
@@ -112,6 +114,16 @@ export async function fetchCampaignAnalytics(
   // Batch/sequence owners describe the shared family, not every lead's sender.
   // The aggregator checks each event against its lead's exact account ownership.
   const events = eventPages.flat().filter((event) => leadIds.has(event.lead_id));
-
-  return aggregateCampaignAnalytics({ scope, leads, events, days: safeDays });
+  const followupPages = await Promise.all(triples.map((triple) =>
+    fetchPaged<CampaignAnalyticsFollowup>(() => client.from("followups")
+      .select("id, lead_id, linkedin_account_id, status, sent_at, attempt, leads!inner(batch_id, sequence_id)")
+      .eq("leads.batch_id", triple.batchId)
+      .eq("leads.sequence_id", triple.sequenceId)
+      .eq("status", "SENT")
+      .order("id", { ascending: true })),
+  ));
+  const reconciled = reconcileCampaignEvents({
+    leads, events, followups: followupPages.flat(), since: since.toISOString(), until: until.toISOString(),
+  });
+  return aggregateCampaignAnalytics({ scope, leads, events: reconciled, days: safeDays });
 }

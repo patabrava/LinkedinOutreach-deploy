@@ -23,6 +23,18 @@ export type CampaignAnalyticsLead = {
   sequence_id: number | null;
   linkedin_account_id: string;
   status: string;
+  connection_sent_at?: string | null;
+  sent_at?: string | null;
+  last_reply_at?: string | null;
+};
+
+export type CampaignAnalyticsFollowup = {
+  id: string;
+  lead_id: string;
+  linkedin_account_id: string | null;
+  status: string;
+  sent_at: string | null;
+  attempt: number | null;
 };
 
 export type CampaignAnalyticsEvent = {
@@ -32,6 +44,7 @@ export type CampaignAnalyticsEvent = {
   event_type: string;
   touch_number: number | null;
   occurred_at: string;
+  metadata?: { followup_id?: string | null } | null;
 };
 
 export type CampaignSequenceAnalytics = CampaignSequenceScope & {
@@ -99,6 +112,60 @@ export const CAMPAIGN_ANALYTICS_SCOPES: Record<CampaignAnalyticsKind, CampaignAn
 
 const roundedRate = (numerator: number, denominator: number): number =>
   denominator > 0 ? Math.round((numerator / denominator) * 1000) / 10 : 0;
+
+// Reconcile reporting in memory. Never backfill or mutate the outreach ledger.
+export function reconcileCampaignEvents(input: {
+  leads: CampaignAnalyticsLead[];
+  events: CampaignAnalyticsEvent[];
+  followups: CampaignAnalyticsFollowup[];
+  since: string;
+  until: string;
+}): CampaignAnalyticsEvent[] {
+  const owners = new Map(input.leads.map((lead) => [lead.id, lead]));
+  const start = Date.parse(input.since);
+  const end = Date.parse(input.until);
+  const inWindow = (value?: string | null) => {
+    const time = Date.parse(value || "");
+    return Number.isFinite(time) && time >= start && time < end;
+  };
+  const validTimestamp = (value?: string | null) => Number.isFinite(Date.parse(value || ""));
+  const deliveries = new Map<string, CampaignAnalyticsEvent>();
+  const eventKey = (event: CampaignAnalyticsEvent) => {
+    if (event.event_type === "invite_sent") return `invite:${event.lead_id}`;
+    if (event.event_type === "touch_sent" && event.touch_number === 1) return `first:${event.lead_id}`;
+    if (event.metadata?.followup_id) return `followup:${event.lead_id}:${event.metadata.followup_id}`;
+    return `${event.lead_id}:${event.event_type}:${event.touch_number}:${event.occurred_at}`;
+  };
+  for (const event of input.events) {
+    const lead = owners.get(event.lead_id);
+    // Touch 99 is the explicit COP InMail test override, not a sequence follow-up.
+    if (!lead || event.sequence_id !== lead.sequence_id || event.linkedin_account_id !== lead.linkedin_account_id ||
+      !inWindow(event.occurred_at) || (event.event_type === "touch_sent" && event.touch_number === 99)) continue;
+    deliveries.set(eventKey(event), event);
+  }
+  const record = (lead: CampaignAnalyticsLead, eventType: string, timestamp: string, touch: number | null, key: string) => {
+    deliveries.delete(key);
+    if (inWindow(timestamp)) deliveries.set(key, {
+      lead_id: lead.id, sequence_id: lead.sequence_id, linkedin_account_id: lead.linkedin_account_id,
+      event_type: eventType, touch_number: touch, occurred_at: new Date(timestamp).toISOString(),
+    });
+  };
+  for (const lead of input.leads) {
+    if (validTimestamp(lead.connection_sent_at)) record(lead, "invite_sent", lead.connection_sent_at!, 1, `invite:${lead.id}`);
+    if (validTimestamp(lead.sent_at)) record(lead, "touch_sent", lead.sent_at!, 1, `first:${lead.id}`);
+    if (inWindow(lead.last_reply_at) && ![...deliveries.values()].some((event) => event.lead_id === lead.id && event.event_type === "reply_received")) {
+      record(lead, "reply_received", lead.last_reply_at!, null, `reply:${lead.id}`);
+    }
+  }
+  for (const followup of input.followups) {
+    const lead = owners.get(followup.lead_id);
+    // Legacy null account rows inherit the owning lead; explicit mismatches fail closed.
+    if (!lead || (followup.linkedin_account_id && followup.linkedin_account_id !== lead.linkedin_account_id) ||
+      followup.status !== "SENT" || !validTimestamp(followup.sent_at)) continue;
+    record(lead, "touch_sent", followup.sent_at!, Math.max(2, (followup.attempt || 1) + 1), `followup:${lead.id}:${followup.id}`);
+  }
+  return [...deliveries.values()];
+}
 
 const uniqueLeadCount = (events: CampaignAnalyticsEvent[], eventType: string, touchNumber?: number): number => {
   const leadIds = new Set(

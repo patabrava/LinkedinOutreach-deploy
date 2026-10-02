@@ -23,17 +23,19 @@ test("shared campaign queries include both senders while rejecting mismatched ev
   const rows = {
     lead_batches: [30, 31, 32].map((id) => ({ id, sequence_id: id - 23, linkedin_account_id: "owner" })),
     outreach_sequences: [7, 8, 9].map((id) => ({ id, linkedin_account_id: "owner", delivery_mode: "standard_connect_message" })),
-    leads: ["owner", "second"].map((account) => ({ id: account, batch_id: 30, sequence_id: 7, linkedin_account_id: account, status: "SENT" })),
+    leads: ["owner", "second"].map((account) => ({ id: account, batch_id: 30, sequence_id: 7, linkedin_account_id: account, status: "SENT", connection_sent_at: now, sent_at: now })),
+    followups: [{ id: "fu-second", lead_id: "second", linkedin_account_id: "second", status: "SENT", sent_at: now, attempt: 1, leads: { batch_id: 30, sequence_id: 7 } }],
     outreach_events: ["owner", "second"].map((account) => ({ lead_id: account, sequence_id: 7, linkedin_account_id: account, event_type: "touch_sent", touch_number: 1, occurred_at: now })).concat([
       { lead_id: "owner", sequence_id: 7, linkedin_account_id: "second", event_type: "reply_received", occurred_at: now },
       { lead_id: "outside", sequence_id: 7, linkedin_account_id: "second", event_type: "reply_received", occurred_at: now },
+      { lead_id: "second", sequence_id: 7, linkedin_account_id: "second", event_type: "touch_sent", touch_number: 2, occurred_at: now, metadata: { followup_id: "fu-second" } },
     ]),
   };
   const client = { from(table) {
     let data = rows[table];
     const query = {
       select() { return query; },
-      eq(key, value) { data = data.filter((row) => row[key] === value); return query; },
+      eq(key, value) { data = data.filter((row) => key.split(".").reduce((part, field) => part?.[field], row) === value); return query; },
       in(key, values) { data = data.filter((row) => values.includes(row[key])); return query; },
       gte(key, value) { data = data.filter((row) => row[key] >= value); return query; },
       lt(key, value) { data = data.filter((row) => row[key] < value); return query; },
@@ -50,5 +52,7 @@ test("shared campaign queries include both senders while rejecting mismatched ev
   const result = await fetchCampaignAnalytics("regular", 30);
   assert.equal(result.leadCount, 2);
   assert.equal(result.firstTouchesSent, 2);
+  assert.equal(result.invitesSent, 2);
+  assert.equal(result.followupTouchesSent, 1);
   assert.equal(result.repliesReceived, 0);
 });

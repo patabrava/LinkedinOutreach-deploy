@@ -15,6 +15,6 @@ test("analytics reports are public and use campaign-scoped analytics", () => {
   assert.doesNotMatch(analyticsIndex, /requireServerSession/);
   assert.doesNotMatch(campaignPage, /requireServerSession/);
   assert.match(campaignPage, /fetchCampaignAnalytics\(campaign, validDays\)/);
-  assert.match(campaignPage, /Only persisted campaign events/);
+  assert.match(campaignPage, /Sends are reconciled from persisted lead timestamps/);
   assert.doesNotMatch(campaignPage, /infer/i);
 });
