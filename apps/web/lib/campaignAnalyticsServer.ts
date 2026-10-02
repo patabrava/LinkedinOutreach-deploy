@@ -84,7 +84,6 @@ export async function fetchCampaignAnalytics(
           .select("id, batch_id, sequence_id, linkedin_account_id, status")
           .eq("batch_id", triple.batchId)
           .eq("sequence_id", triple.sequenceId)
-          .eq("linkedin_account_id", triple.accountId)
           .order("id", { ascending: true }),
       ),
     ),
@@ -104,13 +103,14 @@ export async function fetchCampaignAnalytics(
           .from("outreach_events")
           .select("lead_id, sequence_id, linkedin_account_id, event_type, touch_number, occurred_at")
           .eq("sequence_id", triple.sequenceId)
-          .eq("linkedin_account_id", triple.accountId)
           .gte("occurred_at", since.toISOString())
           .lt("occurred_at", until.toISOString())
           .order("occurred_at", { ascending: true }),
       ),
     ),
   );
+  // Batch/sequence owners describe the shared family, not every lead's sender.
+  // The aggregator checks each event against its lead's exact account ownership.
   const events = eventPages.flat().filter((event) => leadIds.has(event.lead_id));
 
   return aggregateCampaignAnalytics({ scope, leads, events, days: safeDays });
