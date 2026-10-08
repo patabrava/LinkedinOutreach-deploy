@@ -11,6 +11,7 @@ import time
 import random
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
@@ -38,7 +39,7 @@ from auth import (
 
 # Import shared logger
 from credential_crypto import decrypt_password
-from degura_campaign import event_payload, out_of_office_resume, route_degura_reply
+from degura_campaign import ReplyDecision, event_payload, out_of_office_resume, route_degura_reply
 from shared_logger import get_logger
 
 # Load the scraper-local env first, then the shared worker/repository env files.
@@ -791,6 +792,88 @@ def profile_identity_matches_lead(profile_name: Optional[str], lead: Lead) -> bo
     return scraped == expected_full or bool(expected_first and expected_last and expected_first in scraped and expected_last in scraped)
 
 
+def normalize_cop_company_name(value: object) -> str:
+    """Compare complete employer names while ignoring typography and legal forms."""
+    text = str(value or "").casefold().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
+    text = "".join(character for character in unicodedata.normalize("NFKD", text) if not unicodedata.combining(character))
+    words = re.findall(r"[a-z0-9]+", text)
+    while words:
+        if len(words) >= 2 and words[-2:] == ["co", "kg"]:
+            words = words[:-2]
+        elif words[-1] in {"gmbh", "ag", "se", "kg", "mbh", "ltd", "limited", "inc", "llc"}:
+            words.pop()
+        else:
+            break
+    return " ".join(words)
+
+
+# COP operator-approved brand/group aliases, reviewed 8 October 2026.
+# Sources: all eyes on screens company site, Highsnobiety imprint, AMORELIE
+# legal identity, fritz-kola company history, and A-Z Gartenhaus registry entry.
+COP_EMPLOYER_ALIAS_GROUPS = (
+    ("AdScanner", "all eyes on screens"),
+    ("Titel Media", "Highsnobiety"),
+    ("Sonoma Internet", "AMORELIE"),
+    ("fritz-kola", "fritz-kulturgüter"),
+    ("Garden & House BidCo", "A-Z Gartenhaus"),
+)
+COP_EMPLOYER_DESCRIPTORS = frozenset({
+    "group", "germany", "deutschland", "global", "service", "services",
+    "ai", "dresden", "kids", "schools", "zn", "dtl", "gmbh", "ag", "se",
+    "kg", "co", "ltd", "limited", "inc", "llc", "mbh",
+})
+
+
+def cop_employer_names_match(expected: object, observed: object) -> bool:
+    """COP accepts related brand names, descriptors, and reviewed aliases.
+
+    Compare employer fields only, never verbs or names found in job descriptions.
+    Generic legal/group words and character substrings do not establish a match.
+    This matcher changes employer-name eligibility, not completed-tenure checks.
+    """
+    def core(value: object) -> str:
+        return " ".join(word for word in normalize_cop_company_name(value).split()
+                        if word not in COP_EMPLOYER_DESCRIPTORS)
+
+    def contains_name(left: str, right: str) -> bool:
+        return bool(left and right and len(left.replace(" ", "")) >= 4
+                    and re.search(r"(?<!\w)" + re.escape(left) + r"(?!\w)", right))
+
+    left, right = core(expected), core(observed)
+    if not left or not right:
+        return False
+    if left == right or contains_name(left, right) or contains_name(right, left):
+        return True
+    for aliases in COP_EMPLOYER_ALIAS_GROUPS:
+        names = tuple(core(alias) for alias in aliases)
+        if any(contains_name(alias, left) for alias in names) and any(
+            contains_name(alias, right) for alias in names
+        ):
+            return True
+    return False
+
+
+def classify_cop_former_employer(company_name: object, experiences: object) -> Dict[str, str]:
+    """Require a related COP employer in a dated, completed Experience role."""
+    expected = normalize_cop_company_name(company_name)
+    if not expected:
+        return {"status": "company_missing"}
+    if not isinstance(experiences, list) or not experiences:
+        return {"status": "experience_unavailable"}
+    matched_but_not_past = False
+    for role in experiences:
+        if not isinstance(role, dict) or not cop_employer_names_match(company_name, role.get("company")):
+            continue
+        tenure = str(role.get("tenure") or "")
+        if re.search(r"\b(?:present|heute|aktuell|current|gegenwart)\b", tenure, re.I):
+            matched_but_not_past = True
+            continue
+        if re.search(r"(?:-|–|—|bis)\s*(?:[A-Za-zÄÖÜäöü]{2,12}\.?\s+)?(?:19|20)\d{2}\b", tenure):
+            return {"status": "verified", "matched_company": str(role.get("company") or ""), "tenure": tenure}
+        matched_but_not_past = True
+    return {"status": "not_past_employment" if matched_but_not_past else "company_mismatch"}
+
+
 def lead_display_name(lead: Dict[str, Any]) -> str:
     return " ".join(
         part for part in [
@@ -1059,7 +1142,12 @@ async def expand_about(page: Page) -> None:
 
 
 async def scrape_experience(page: Page, max_items: int = 3) -> List[Dict[str, str]]:
-    section = page.locator("section[id*=experience], section[data-section='experience'], section:has-text('Experience')")
+    selector = (
+        "main" if isinstance(getattr(page, "url", None), str) and "/details/experience/" in page.url
+        else "section[id*=experience], section[data-section='experience'], "
+             "section:has(h2:has-text('Experience')), section:has(h2:has-text('Berufserfahrung'))"
+    )
+    section = page.locator(selector)
     if await section.count() == 0:
         return []
 
@@ -1083,10 +1171,7 @@ async def scrape_experience(page: Page, max_items: int = 3) -> List[Dict[str, st
         except Exception:
             company = ""
         try:
-            tenure = safe_text(
-                await entry.locator("span:has-text('Present'), span:has-text(' yr'), span:has-text(' mos')")
-                .first.text_content(timeout=3_000)
-            )
+            tenure = safe_text(await entry.inner_text(timeout=4_000))
         except Exception:
             tenure = ""
 
@@ -1094,6 +1179,25 @@ async def scrape_experience(page: Page, max_items: int = 3) -> List[Dict[str, st
             results.append({"title": title, "company": company, "tenure": tenure})
 
     return results
+
+
+async def verify_cop_employer_on_page(page: Page, lead: Lead) -> Dict[str, str]:
+    """Read this person's complete LinkedIn Experience before COP outreach."""
+    name = await first_match_text(
+        page,
+        ["main h1.text-heading-xlarge", "main h1", "div.pv-text-details__left-panel h1"],
+        field_name="cop_profile_name",
+    )
+    if not profile_identity_matches_lead(name, lead):
+        return {"status": "profile_identity_mismatch"}
+    details = page.locator("main a[href*='/details/experience/']")
+    if await details.count():
+        href = await details.first.get_attribute("href")
+        if href:
+            await page.goto(urljoin("https://www.linkedin.com", href), wait_until="domcontentloaded", timeout=60_000)
+            await page.wait_for_selector("main", timeout=15_000)
+    experiences = await scrape_experience(page, max_items=100)
+    return classify_cop_former_employer(lead.company_name, experiences)
 
 
 async def scrape_profile(page: Page, url: str) -> Dict[str, Any]:
@@ -2441,7 +2545,18 @@ async def open_profile_and_get_last_message(
         return None
 
 
-async def search_conversation_by_name(page: Page, lead: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def verified_inbox_tail(header: str, bubble: Optional[Dict[str, Any]], lead: Dict[str, Any], own_sender_name: str = "") -> Optional[Dict[str, Any]]:
+    if not bubble or normalize_person_name(header) != normalize_person_name(lead_display_name(lead)):
+        return None
+    sender = normalize_person_name(bubble.get("sender"))
+    if own_sender_name and sender == normalize_person_name(own_sender_name):
+        bubble = {**bubble, "is_outbound": True}
+    if not sender and not bubble.get("is_outbound"):
+        return None
+    return {**bubble, "recipient_verified": True} if conversation_tail_belongs_to_lead(bubble, lead) else None
+
+
+async def search_conversation_by_name(page: Page, lead: Dict[str, Any], own_sender_name: str = "") -> Optional[Dict[str, Any]]:
     """Search for a conversation by lead name using LinkedIn's messaging search box.
     
     Returns conversation info if found, None otherwise.
@@ -2507,7 +2622,10 @@ async def search_conversation_by_name(page: Page, lead: Dict[str, Any]) -> Optio
 
             # Extract the last message from the opened conversation
             last_message_info = await extract_last_message_from_conversation(page)
-            if conversation_tail_belongs_to_lead(last_message_info, lead):
+            headers = page.locator("h2.msg-entity-lockup__entity-title:visible")
+            header = await headers.first.inner_text() if await headers.count() == 1 else ""
+            last_message_info = verified_inbox_tail(header, last_message_info, lead, own_sender_name)
+            if last_message_info:
                 try:
                     await searchbox.fill("")
                 except Exception:
@@ -2988,7 +3106,7 @@ def upsert_followup_for_reply(
     """
     lead_rows = (
         client.table("leads")
-        .select("id, linkedin_url, sequence_id, sequence_variant_id, sequence_step, linkedin_account_id, sequence:outreach_sequences(campaign_key)")
+        .select("id, batch_id, linkedin_url, sequence_id, sequence_variant_id, sequence_step, linkedin_account_id, sequence:outreach_sequences(campaign_key)")
         .eq("id", lead_id)
         .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .limit(1)
@@ -3002,6 +3120,8 @@ def upsert_followup_for_reply(
         sequence = sequence[0] if sequence else {}
     is_degura = str(sequence.get("campaign_key") or "").startswith("DEGURA_")
     decision = route_degura_reply(reply_snippet) if followup_type == "REPLY" and is_degura else None
+    if followup_type == "REPLY" and (lead.get("batch_id"), lead.get("sequence_id")) == (33, 10):
+        decision = ReplyDecision("cop_human_handling", True, "cop_reply_requires_human_handling", ("handoff",))
     source_touch = int(lead.get("sequence_step") or 0) or None
 
     if decision and "suppress" in decision.action_order:

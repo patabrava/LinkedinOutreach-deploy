@@ -3,13 +3,20 @@
 
 import sys
 import os
+import re
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 import sender as sender_module
-from sender import fetch_lead_by_id, load_sequence_messages, sanitize_followup_message
+from sender import (
+    _connect_invite_anchor_selectors,
+    _fetch_sequence_connect_note,
+    fetch_lead_by_id,
+    load_sequence_messages,
+    sanitize_followup_message,
+)
 
 
 class FakeResponse:
@@ -80,6 +87,9 @@ class SelectFallbackClient:
 
 
 class LoadSequenceMessagesTest(unittest.TestCase):
+    def test_invite_with_note_recognizes_linkedin_preload_anchor(self):
+        self.assertIn("a[href*='/preload/custom-invite/']", _connect_invite_anchor_selectors())
+
     def setUp(self):
         self.previous_slot = getattr(sender_module, "CURRENT_ACCOUNT_BROWSER_SLOT", None)
 
@@ -218,6 +228,55 @@ class LoadSequenceMessagesTest(unittest.TestCase):
         )))
         self.assertEqual(result["guide_url"], "https://www.degura.de/leitfaden")
 
+    def test_invite_note_resolver_uses_assigned_variant(self):
+        client = FakeClient(
+            {
+                "outreach_sequence_variants": [
+                    {
+                        "id": 17,
+                        "sequence_id": 7,
+                        "variant_key": 2,
+                        "connect_note": "Hallo {{first_name}} von {{company_name}}",
+                        "first_message": "",
+                        "second_message": "",
+                        "third_message": "",
+                        "asset_followup_1": "",
+                        "asset_followup_2": "",
+                        "is_active": True,
+                        "sequence": {"id": 7, "is_active": True},
+                    }
+                ],
+                "outreach_sequences": [
+                    {"id": 7, "connect_note": "Falsche Basisvorlage"},
+                ],
+            }
+        )
+        lead = {
+            "id": "lead-1",
+            "sequence_id": 7,
+            "sequence_variant_id": 17,
+            "first_name": "Mia",
+            "company_name": "ACME",
+        }
+
+        self.assertEqual(
+            _fetch_sequence_connect_note(client, lead),
+            "Hallo Mia von ACME",
+        )
+
+    def test_invite_note_resolver_fails_closed_when_assigned_variant_is_missing(self):
+        client = FakeClient(
+            {
+                "outreach_sequence_variants": [],
+                "outreach_sequences": [
+                    {"id": 7, "connect_note": "Falsche Basisvorlage"},
+                ],
+            }
+        )
+        lead = {"id": "lead-1", "sequence_id": 7, "sequence_variant_id": 17}
+
+        self.assertEqual(_fetch_sequence_connect_note(client, lead), "")
+
     def test_strict_followup_context_does_not_fallback_to_another_active_sequence(self):
         client = FakeClient(
             {
@@ -262,6 +321,78 @@ class LoadSequenceMessagesTest(unittest.TestCase):
 
         self.assertEqual(result["sequence_id"], 4)
         self.assertEqual(result["batch_id"], 21)
+
+
+class CopApprovedCopyTests(unittest.TestCase):
+    def test_cop_followup_rejects_missing_or_oversized_template(self):
+        lead = {"id": "cop-copy-fixture", "batch_id": 33, "sequence_id": 10, "sequence_step": 1}
+        for template in ("", "x" * 2001):
+            with self.subTest(length=len(template)):
+                client = FakeClient({"outreach_sequences": [{
+                    "id": 10, "delivery_mode": "invite_and_inmail",
+                    "is_active": True, "second_message": template,
+                }], "settings": []})
+                with self.assertRaisesRegex(ValueError, "cop_followup"):
+                    sender_module.resolve_followup_message(client, {
+                        "lead": lead, "followup_type": "NUDGE", "attempt": 1,
+                        "draft_text": "Stale draft must not be sent",
+                    })
+
+    def test_cop_followup_resolution_preserves_approved_copy_exactly(self):
+        root = Path(__file__).resolve().parents[2]
+        migration = (root / "supabase/migrations/029_restore_laura_cop_followups.sql").read_text()
+        bodies = re.findall(r"\$copy\$(.*?)\$copy\$", migration, re.S)
+        lead = {
+            "id": "cop-copy-fixture", "batch_id": 33, "sequence_id": 10,
+            "sequence_step": 1, "first_name": "Anna-Lena", "last_name": "D'Angelo",
+            "company_name": "X-FAB Dresden GmbH & Co. KG",
+        }
+        client = FakeClient({"outreach_sequences": [{
+            "id": 10, "delivery_mode": "invite_and_inmail", "is_active": True,
+            "second_message": bodies[0], "third_message": bodies[1],
+        }], "settings": []})
+        for attempt, body in enumerate(bodies, 1):
+            with self.subTest(attempt=attempt):
+                lead["sequence_step"] = attempt
+                resolved, step, source = sender_module.resolve_followup_message(client, {
+                    "lead": lead, "followup_type": "NUDGE", "attempt": attempt,
+                    "draft_text": "Stale draft that must not win",
+                })
+                expected = sender_module._render_template_message(body, lead)
+                self.assertEqual(resolved, expected)
+                self.assertEqual(step, attempt + 1)
+                self.assertTrue(source.startswith("sequence_template:"))
+
+    def test_cop_migration_matches_laura_reminders_with_full_name_greeting(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "Linkedin Mailing COP Cases.md").read_text()
+        migration = (root / "supabase/migrations/029_restore_laura_cop_followups.sql").read_text()
+        bodies = re.findall(r"\$copy\$(.*?)\$copy\$", migration, re.S)
+        self.assertEqual(len(bodies), 2)
+        headings = ["## **2\\. Erste Erinnerung**", "## **3\\. Zweite und letzte Erinnerung**"]
+        for index, heading in enumerate(headings):
+            section = source.split(heading, 1)[1]
+            if index == 0:
+                section = section.split(headings[1], 1)[0]
+            section = re.sub(r"\*\*Betreff:\*\*[^\n]*\n", "", section).strip()
+            section = section.replace("\\[Frau/Herr Nachname\\]", "{{first_name}} {{last_name}}")
+            section = section.replace("\\[ehemaliger Arbeitgeber\\]", "{{company_name}}")
+            self.assertEqual(bodies[index], section)
+            rendered = sender_module._render_template_message(
+                bodies[index], {"first_name": "Ada", "last_name": "Fixture", "company_name": "Example"}
+            )
+            self.assertTrue(rendered.startswith("Hallo Ada Fixture,\n\n"))
+            self.assertNotIn("{{", rendered)
+        assignments = migration.split("WHERE", 1)[0]
+        self.assertNotIn("first_message =", assignments)
+        self.assertNotIn("is_active =", assignments)
+        self.assertIn("AND linkedin_account_id = '13f81aad-8a5d-4cad-b94d-15aecef6ee03'", migration)
+
+
+class CampaignPreviewTokenParityTests(unittest.TestCase):
+    def test_legacy_token_forms_match_preview(self):
+        lead = {"first_name": "Ada", "last_name": "Fixture", "company_name": "Example", "profile_data": {"salutation": "Frau"}}
+        self.assertEqual(sender_module._render_template_message("Hello [first_name] {{ last_name }} { company_name } [salutation]", lead), "Hello Ada Fixture Example Frau")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,8 @@ from datetime import datetime, time as dtime, timedelta, timezone
 import re
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from zoneinfo import ZoneInfo
+from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
@@ -21,6 +22,13 @@ from supabase import Client, create_client
 # Import shared logger
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from credential_crypto import decrypt_password
+from campaign_management import (
+    CampaignControlHeld,
+    claim_followup,
+    followup_hold_reason,
+    parse_control_time,
+    read_outbound_controls,
+)
 from degura_campaign import event_payload
 from shared_logger import get_logger
 from thread_reader import extract_last_bubble, classify_last_sender
@@ -36,6 +44,7 @@ from scraper import (  # noqa: E402
     normalize_person_name as normalize_linkedin_person_name,
     open_invite_dialog_from_anchor,
     send_connection_request,
+    verify_cop_employer_on_page,
 )
 
 
@@ -59,12 +68,68 @@ load_runtime_env()
 
 # Initialize logger
 logger = get_logger("sender")
+DAILY_BEFORE_SUBMIT = None
+
+
+async def daily_before_submit(page: Page) -> None:
+    """Optional run-level evidence/quota/reply gate, awaited before any submit."""
+    if DAILY_BEFORE_SUBMIT is not None:
+        await DAILY_BEFORE_SUBMIT(page)
 CURRENT_ACCOUNT_ID = os.getenv("LINKEDIN_ACCOUNT_ID", "").strip()
 CURRENT_ACCOUNT_DISPLAY_NAME = ""
 CURRENT_ACCOUNT_BROWSER_SLOT = 0
 CURRENT_DAILY_INVITE_LIMIT = DAILY_SEND_DEFAULT if "DAILY_SEND_DEFAULT" in globals() else 50
 CURRENT_DAILY_MESSAGE_LIMIT = DAILY_SEND_DEFAULT if "DAILY_SEND_DEFAULT" in globals() else 50
 VERIFIED_SALUTATIONS = {"Frau", "Herr"}
+
+
+def refresh_campaign_controls(client: Client, lead: Dict[str, Any],
+                              followup: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Refresh persisted controls before work and before the composer submit."""
+    reason, fresh, current_followup = read_outbound_controls(
+        client, str(lead.get("id") or ""), CURRENT_ACCOUNT_ID,
+        followup_id=str(followup.get("id") or "") if followup else None,
+        processing_started_at=followup.get("processing_started_at") if followup else None,
+    )
+    if not reason and any(lead.get(key) is not None and str(lead[key]) != str(fresh.get(key))
+                          for key in ("linkedin_url", "sequence_id", "sequence_variant_id")):
+        reason = "outbound_context_changed"
+    if not reason and followup is None and not lead.get("sent_at") and fresh.get("sent_at"):
+        reason = "lead_already_sent"
+    if reason:
+        logger.warn("Outbound work held by persisted controls", {"leadId": lead.get("id")},
+                    {"reason": reason, "followupId": followup.get("id") if followup else None})
+        return reason
+    lead.update(fresh)
+    if followup is not None and current_followup is not None:
+        followup.update(current_followup)
+        followup["lead"] = lead
+    return None
+
+
+def require_campaign_controls(client: Client, lead: Dict[str, Any],
+                              followup: Optional[Dict[str, Any]] = None) -> None:
+    reason = refresh_campaign_controls(client, lead, followup)
+    if reason:
+        raise CampaignControlHeld(reason)
+
+
+def hold_processing_followup(client: Client, followup: Dict[str, Any], reason: str) -> str:
+    """Return our own claimed row to its schedule without overriding newer state."""
+    if not followup.get("processing_started_at"):
+        return "paused"
+    try:
+        query = (client.table("followups").update({"status": "APPROVED", "processing_started_at": None,
+                                                  "last_error": f"outbound_held:{reason}"[:500]})
+                 .eq("id", followup["id"]).eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+                 .eq("status", "PROCESSING"))
+        if followup.get("processing_started_at"):
+            query = query.eq("processing_started_at", followup["processing_started_at"])
+        query.execute()
+    except Exception as exc:
+        logger.warn("Held followup could not be requeued; stale recovery will retain it",
+                    {"followupId": followup.get("id"), "reason": reason}, error=exc)
+    return "paused"
 
 # Reuse the scraper's persisted auth state to avoid drift between workers.
 def _resolve_scraper_auth_path() -> Path:
@@ -459,9 +524,14 @@ async def insert_composer_text(page: Page, target: Any, text: str) -> str:
 
 
 def today_utc_iso() -> str:
-    now = datetime.utcnow()
-    start = datetime.combine(now.date(), dtime.min)
-    return start.isoformat() + "Z"
+    # Persist UTC timestamps, but count the operator's Europe/Berlin calendar day.
+    now = datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Berlin"))
+    return now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat()
+
+
+def require_first_message_channel(lead: Dict[str, Any], surface: str) -> None:
+    if (lead.get("batch_id"), lead.get("sequence_id")) in {(30, 7), (31, 8), (32, 9)} and surface != SURFACE_MESSAGE:
+        raise RuntimeError("managed_degura_direct_message_required")
 
 
 def sent_today_count(client: Client) -> int:
@@ -568,7 +638,7 @@ def fetch_approved_leads(client: Client, limit: int) -> list[Dict[str, Any]]:
     logger.db_query("select", "leads", {"status": "APPROVED", "limit": limit})
     resp = (
         client.table("leads")
-        .select("id, linkedin_url, first_name, last_name, company_name")
+        .select("id, linkedin_url, first_name, last_name, company_name, batch_id, sequence_id")
         .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .eq("status", "APPROVED")
         .order("updated_at", desc=True)
@@ -588,6 +658,7 @@ MESSAGE_ONLY_PIPELINE_STATUSES = [
     "MESSAGE_ONLY_APPROVED",
 ]
 MESSAGE_ONLY_PROCESSING_STATUSES = tuple(MESSAGE_ONLY_PIPELINE_STATUSES)
+MESSAGE_ONLY_CLAIM_STATUSES = ("NEW", "FAILED", "CONNECT_ONLY_SENT", *MESSAGE_ONLY_PROCESSING_STATUSES)
 SURFACE_MESSAGE = "message"
 SURFACE_CONNECT_NOTE = "connect_note"
 SURFACE_CONNECT = "connect"
@@ -597,6 +668,8 @@ SURFACE_SALES_NAVIGATOR = "sales_navigator_message"
 def _is_message_only_candidate(lead: Dict[str, Any]) -> bool:
     """Return True when a lead should be checked for post-acceptance messaging."""
     if not isinstance(lead, dict):
+        return False
+    if is_cop_lead(lead):
         return False
     if lead.get("sent_at"):
         return False
@@ -763,6 +836,67 @@ def is_cop_sales_navigator_followup(
         and _safe_int(lead.get("sequence_id"), 0) == 10
         and is_inmail_and_invite_sequence(sequence)
     )
+
+
+def is_cop_lead(lead: Optional[Dict[str, Any]]) -> bool:
+    lead = lead or {}
+    return _safe_int(lead.get("batch_id"), 0) == 33 and _safe_int(lead.get("sequence_id"), 0) == 10
+
+
+async def verify_and_record_cop_employer(page: Page, client: Client, lead: Dict[str, Any]) -> Dict[str, str]:
+    """Persist profile evidence before any COP outbound action."""
+    scraper_lead = ScraperLead(
+        id=str(lead.get("id") or ""),
+        linkedin_url=str(lead.get("linkedin_url") or ""),
+        first_name=lead.get("first_name"),
+        last_name=lead.get("last_name"),
+        company_name=lead.get("company_name"),
+    )
+    try:
+        result = await verify_cop_employer_on_page(page, scraper_lead)
+    except Exception as exc:
+        logger.warn("COP employer profile inspection failed", {"leadId": lead.get("id")}, error=exc)
+        result = {"status": "verification_unavailable"}
+    evidence = {
+        **result,
+        "company_name": str(lead.get("company_name") or ""),
+        "profile_url": str(lead.get("linkedin_url") or ""),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+    current = (
+        client.table("leads")
+        .select("profile_data")
+        .eq("id", lead.get("id"))
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+        .limit(1)
+        .execute()
+    )
+    rows = current.data or []
+    if not rows:
+        raise RuntimeError("cop_employer_evidence_lead_missing")
+    profile_data = rows[0].get("profile_data") or {}
+    if not isinstance(profile_data, dict):
+        raise RuntimeError("cop_employer_evidence_invalid_profile_data")
+    response = (
+        client.table("leads")
+        .update({"profile_data": {**profile_data, "cop_employer_verification": evidence}})
+        .eq("id", lead.get("id"))
+        .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+        .execute()
+    )
+    if getattr(response, "error", None) or not (response.data or []):
+        raise RuntimeError("cop_employer_evidence_persistence_failed")
+    lead["profile_data"] = {**profile_data, "cop_employer_verification": evidence}
+    return result
+
+
+def mark_cop_employer_ineligible(client: Client, lead_id: str, reason: str) -> None:
+    client.table("leads").update({
+        "campaign_paused": True,
+        "status": "FAILED",
+        "error_message": f"cop_employer_{reason}"[:500],
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", lead_id).eq("linkedin_account_id", CURRENT_ACCOUNT_ID).execute()
 
 
 def is_valid_cop_first_touch_event(event: Optional[Dict[str, Any]]) -> bool:
@@ -971,6 +1105,7 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
             client.table("leads")
             .select(LEAD_SELECT_FIELDS_EXTENDED)
             .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+            .or_("sequence_id.is.null,sequence_id.neq.10")
             .or_("outreach_mode.eq.connect_message,outreach_mode.eq.connect_only")
             .is_("sent_at", "null")
             .or_(
@@ -989,6 +1124,7 @@ def fetch_message_only_leads(client: Client, limit: int, batch_id: Optional[int]
             client.table("leads")
             .select(LEAD_SELECT_FIELDS_CORE)
             .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+            .or_("sequence_id.is.null,sequence_id.neq.10")
             .or_("outreach_mode.eq.connect_message,outreach_mode.eq.connect_only")
             .is_("sent_at", "null")
             .or_(
@@ -1035,6 +1171,8 @@ def update_invite_failure_streak(
 def _is_invite_candidate(lead: Dict[str, Any]) -> bool:
     if not isinstance(lead, dict):
         return False
+    if is_cop_lead(lead):
+        return False
     if lead.get("connection_sent_at") or lead.get("sent_at"):
         return False
     status = str(lead.get("status") or "").upper()
@@ -1080,6 +1218,7 @@ def fetch_invite_queue(
             "campaign_paused, source_last_activity_at, lead_batches!inner(batch_intent)"
         )
         .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+        .or_("sequence_id.is.null,sequence_id.neq.10")
         .in_("status", INVITE_RETRY_STATUSES)
         .is_("connection_sent_at", "null")
         .eq("campaign_paused", False)
@@ -1211,6 +1350,8 @@ def _mark_inmail_processing(client: Client, lead_id: str) -> bool:
         .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
         .in_("status", INVITE_RETRY_STATUSES)
         .is_("sent_at", "null")
+        .is_("connection_sent_at", "null")
+        .eq("campaign_paused", False)
         .execute()
     )
     return bool(getattr(response, "data", None))
@@ -1246,11 +1387,30 @@ def fetch_lead_by_id(client: Client, lead_id: str) -> Optional[Dict[str, Any]]:
             client.table("leads")
             .select(LEAD_SELECT_FIELDS_CORE)
             .eq("id", lead_id)
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
             .limit(1)
             .execute()
         )
     rows = resp.data or []
     return rows[0] if rows else None
+
+
+def fetch_targeted_inmail_lead(client: Client, lead_id: str,
+                               batch_id: Optional[int], sequence_id: Optional[int]) -> Optional[Dict[str, Any]]:
+    """Targeted launches keep queue eligibility and never expand into a batch run."""
+    lead = fetch_lead_by_id(client, lead_id)
+    if not lead or refresh_campaign_controls(client, lead):
+        return None
+    if str(lead.get("status") or "").upper() not in INVITE_RETRY_STATUSES:
+        return None
+    if lead.get("sent_at") or lead.get("connection_sent_at") or inmail_first_touch_already_sent(lead):
+        return None
+    if batch_id is not None and str(lead.get("batch_id")) != str(batch_id):
+        return None
+    if sequence_id is not None and str(lead.get("sequence_id")) != str(sequence_id):
+        return None
+    messages = load_sequence_messages(client, lead, require_explicit_sequence=True)
+    return lead if is_inmail_and_invite_sequence(messages) else None
 
 
 def fetch_draft(client: Client, lead_id: str) -> Optional[Dict[str, Any]]:
@@ -1374,6 +1534,14 @@ def _render_template_message(template: str, lead: Dict[str, Any]) -> str:
     rendered = (template or "").strip()
     for key, val in replacements.items():
         rendered = rendered.replace(key, val or "")
+    # Legacy stored copy can use curly and bracket canonical-variable forms.
+    rendered = re.sub(
+        r"\{\{\s*(first_name|last_name|full_name|company_name|salutation)\s*\}\}|"
+        r"\{\s*(first_name|last_name|full_name|company_name|salutation)\s*\}|"
+        r"\[\s*(first_name|last_name|full_name|company_name|salutation)\s*\]",
+        lambda match: replacements["{{" + next(group for group in match.groups() if group is not None) + "}}"],
+        rendered,
+    )
     # Preserve paragraph breaks for direct LinkedIn messages while normalizing
     # accidental extra spaces inside each line.
     lines = [re.sub(r"[ \t]{2,}", " ", line).strip() for line in rendered.splitlines()]
@@ -1607,6 +1775,10 @@ def load_sequence_messages(
                 "source": "outreach_sequences",
             }
         )
+        if is_cop_lead(lead):
+            # Missing COP copy must never inherit a DEGURA/default reminder.
+            for key in ("second_message", "third_message"):
+                result[key] = row.get(key) or ""
         logger.info(
             "Resolved sequence messages",
             {"leadId": lead.get("id")},
@@ -2375,7 +2547,7 @@ def typed_text_matches(actual_text: str, expected_text: str) -> Tuple[bool, Dict
     actual_words = set(w.lower() for w in re.findall(r"\b[\wÄÖÜäöüß]{4,}\b", actual))
     missing_words = [w for w in dict.fromkeys(expected_words) if w not in actual_words]
     length_floor = max(0, len(expected) - max(10, int(len(expected) * 0.03)))
-    matched = len(actual) >= length_floor and not missing_words
+    matched = len(actual) >= length_floor and not missing_words and DAILY_BEFORE_SUBMIT is None
     return matched, {
         "expected": len(expected),
         "actual": len(actual),
@@ -2958,6 +3130,9 @@ async def verify_latest_outbound_message(page: Page, expected_text: str, timeout
         if bubble:
             actual_text = bubble.get("text") or ""
             matched, details = typed_text_matches(actual_text, expected_text)
+            if DAILY_BEFORE_SUBMIT is not None:
+                matched = (normalize_typed_text(actual_text) == normalize_typed_text(expected_text)
+                           and bool(bubble.get("is_outbound") or sender_name_is_own_account(str(bubble.get("sender") or ""))))
             last_details = {
                 **details,
                 "sender": bubble.get("sender"),
@@ -2968,7 +3143,7 @@ async def verify_latest_outbound_message(page: Page, expected_text: str, timeout
                 logger.info("Verified latest outbound message contains full expected text", data=last_details)
                 return last_details
             sender = str(bubble.get("sender") or "")
-            if bubble.get("is_outbound") or sender_name_is_own_account(sender):
+            if DAILY_BEFORE_SUBMIT is None and (bubble.get("is_outbound") or sender_name_is_own_account(sender)):
                 near_matched, near_details = post_send_bubble_near_match(actual_text, expected_text)
                 if near_matched:
                     last_details = {**last_details, **near_details}
@@ -3434,7 +3609,8 @@ async def click_sales_navigator_visual_send_button(page: Page) -> bool:
     return False
 
 
-async def send_sales_navigator_message(page: Page, subject: str, body: str) -> None:
+async def send_sales_navigator_message(page: Page, subject: str, body: str, *,
+                                       before_send: Optional[Callable[[], None]] = None) -> None:
     safe_subject = _hard_cap_text((subject or "").strip(), 80)
     safe_body = (body or "").strip()
     if not safe_subject:
@@ -3475,16 +3651,25 @@ async def send_sales_navigator_message(page: Page, subject: str, body: str) -> N
     # "Send/Senden" text selectors. Scope the send button to the composer
     # form/dialog by walking up from the body locator.
     await page.wait_for_timeout(800)
+    if before_send:
+        before_send()
+    await daily_before_submit(page)
     if await click_editor_scoped_send_button(body_locator):
         logger.element_click("Sales Navigator send button (scoped)", success=True)
         await random_pause()
         return
 
+    if before_send:
+        before_send()
+    await daily_before_submit(page)
     if await click_sales_navigator_overlay_send_button(page):
         logger.element_click("Sales Navigator send button (overlay scoped)", success=True)
         await random_pause()
         return
 
+    if before_send:
+        before_send()
+    await daily_before_submit(page)
     if await click_sales_navigator_visual_send_button(page):
         logger.element_click("Sales Navigator send button (visual paper-plane)", success=True)
         await random_pause()
@@ -3645,6 +3830,8 @@ async def send_message(
     surface: str,
     draft: Optional[Dict[str, Any]] = None,
     lead: Optional[Dict[str, Any]] = None,
+    *,
+    before_send: Optional[Callable[[], None]] = None,
 ) -> None:
     """Send a message through the opened messaging surface.
     
@@ -3727,7 +3914,8 @@ async def send_message(
                     actual_length = len(actual_text.strip())
                     expected_length = len(safe_message)
 
-                    if actual_length >= expected_length - 2:  # Allow 1-2 char margin for encoding
+                    full_note_matches = normalize_typed_text(actual_text) == normalize_typed_text(safe_message)
+                    if (full_note_matches if DAILY_BEFORE_SUBMIT is not None else actual_length >= expected_length - 2):
                         logger.debug(f"Text verification passed", data={"expected": expected_length, "actual": actual_length})
                         break
                     else:
@@ -3737,7 +3925,7 @@ async def send_message(
                     logger.warn(f"Text verification attempt {verification_attempt} failed", error=e)
                     await page.wait_for_timeout(200)
             else:
-                logger.warn("Could not verify full text was entered, proceeding anyway")
+                raise RuntimeError("Could not verify full invitation text; refusing submit")
         else:
             logger.element_search("note textbox (all selectors)", 0, context={"surface": "connect_note"})
             raise RuntimeError("Could not find note textbox in connection request dialog")
@@ -3764,6 +3952,9 @@ async def send_message(
             # Additional safety pause before clicking to ensure typing is truly complete
             await page.wait_for_timeout(800)
 
+            if before_send:
+                before_send()
+            await daily_before_submit(page)
             await send_btn.click()
             logger.element_click("Send button (dialog)", success=True)
             await random_pause()
@@ -3864,10 +4055,14 @@ async def send_message(
         while asyncio.get_event_loop().time() < deadline:
             refreshed_candidates = await inspect_send_button_candidates(page, editor)
             candidate = _pick_send_button_candidate(refreshed_candidates)
-            if candidate and candidate.get("enabled") and await click_editor_scoped_send_button(editor):
-                click_succeeded = True
-                scoped_target = candidate
-                break
+            if before_send:
+                before_send()
+            if candidate and candidate.get("enabled"):
+                await daily_before_submit(page)
+                if await click_editor_scoped_send_button(editor):
+                    click_succeeded = True
+                    scoped_target = candidate
+                    break
             if await dismiss_keyboard_preference_popover(page):
                 continue
             await page.wait_for_timeout(250)
@@ -3892,6 +4087,8 @@ async def send_message(
         logger.element_click("Send button (message scoped)", success=True)
         if not await wait_for_composer_cleared(editor, page=page):
             if await dismiss_keyboard_preference_popover(page):
+                if before_send:
+                    before_send()
                 if await click_editor_scoped_send_button(editor) and await wait_for_composer_cleared(editor, page=page):
                     logger.element_click("Send button (message scoped after popover)", success=True)
                     await verify_latest_outbound_message(page, message)
@@ -3910,6 +4107,8 @@ async def send_message(
             raise RuntimeError("Direct message composer did not clear after scoped send click.")
         await verify_latest_outbound_message(page, message)
         await random_pause()
+    except CampaignControlHeld:
+        raise
     except PostSendVerificationError as e:
         logger.element_click("Send button (message scoped)", success=False)
         logger.warn("Post-send verification failed after scoped click; refusing resend fallback", error=e)
@@ -3918,6 +4117,8 @@ async def send_message(
         logger.element_click("Send button (message scoped)", success=False)
         logger.warn("Direct message scoped send failed; refusing unsafe keyboard submission", error=e)
         await dismiss_keyboard_preference_popover(page)
+        if before_send:
+            before_send()
         if await click_editor_scoped_send_button(editor):
             if await wait_for_composer_cleared(editor, page=page):
                 logger.element_click("Send button (message scoped fallback)", success=True)
@@ -3948,12 +4149,13 @@ async def send_message(
         raise RuntimeError("Direct message scoped send failed; keyboard send fallback is disabled.")
 
 
-def mark_processing(client: Client, lead_id: str) -> None:
+def mark_processing(client: Client, lead_id: str) -> bool:
     """Mark lead as PROCESSING to prevent re-fetching during the same run."""
     logger.db_query("update", "leads", {"leadId": lead_id}, {"status": "PROCESSING"})
-    client.table("leads").update({"status": "PROCESSING"}).eq("id", lead_id).execute()
-    logger.db_result("update", "leads", {"leadId": lead_id}, 1)
-    logger.debug(f"Lead marked as PROCESSING", {"leadId": lead_id})
+    response = (client.table("leads").update({"status": "PROCESSING"}).eq("id", lead_id)
+                .eq("linkedin_account_id", CURRENT_ACCOUNT_ID).eq("status", "APPROVED")
+                .eq("campaign_paused", False).is_("sent_at", "null").execute())
+    return bool(response.data)
 
 
 def mark_message_only_processing(
@@ -3968,6 +4170,8 @@ def mark_message_only_processing(
 
     has_invite_timestamp = bool(lead.get("connection_sent_at") or lead.get("connection_accepted_at"))
     status = str(lead.get("status") or "").upper()
+    if status not in MESSAGE_ONLY_CLAIM_STATUSES:
+        return False
     if (
         not has_invite_timestamp
         and status not in MESSAGE_ONLY_PROCESSING_STATUSES
@@ -3990,13 +4194,16 @@ def mark_message_only_processing(
             client.table("leads")
             .update({"status": "PROCESSING", "updated_at": datetime.utcnow().isoformat()})
             .eq("id", lead_id)
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+            .eq("campaign_paused", False)
+            .is_("sent_at", "null")
         )
         if has_invite_timestamp:
-            # Invite-sent leads are selected by timestamp, so status can be stale here.
-            # Claim them by ID + sent_at guard instead of requiring status promotion first.
-            query = query.is_("sent_at", "null")
+            # Historic invite rows can retain NEW/FAILED; still exclude active claims
+            # and completed states while preserving their timestamp evidence.
+            query = query.in_("status", list(MESSAGE_ONLY_CLAIM_STATUSES))
         elif allow_missing_invite_evidence:
-            query = query.is_("sent_at", "null")
+            query = query.in_("status", list(MESSAGE_ONLY_CLAIM_STATUSES))
         else:
             query = query.in_("status", list(MESSAGE_ONLY_PROCESSING_STATUSES))
 
@@ -4169,8 +4376,14 @@ def mark_lead_retry_later(client: Client, lead: Dict[str, Any], error_message: s
     return attempts
 
 
-async def process_one(context: BrowserContext, client: Client, lead: Dict[str, Any]) -> None:
+async def process_one(context: BrowserContext, client: Client, lead: Dict[str, Any]) -> Optional[str]:
+    if refresh_campaign_controls(client, lead):
+        return "paused"
+    if lead.get("sent_at") or lead.get("status") not in {"APPROVED", "PROCESSING"}:
+        return "paused"
     lead_id = lead["id"]
+    if is_cop_lead(lead):
+        raise RuntimeError("cop_requires_inmail_sender")
     logger.message_send_start(lead_id, {"url": lead.get("linkedin_url")})
 
     draft = fetch_draft(client, lead_id)
@@ -4255,7 +4468,11 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
                     "Missing connect_note on sequence; falling back to legacy draft message",
                     {"leadId": lead_id, "sequenceId": lead.get("sequence_id")},
                 )
-        await send_message(page, outbound_message, surface, draft)
+        await send_message(page, outbound_message, surface, draft, lead=lead,
+                           before_send=lambda: require_campaign_controls(client, lead))
+    except CampaignControlHeld:
+        await page.close()
+        return "paused"
     except Exception as e:
         logger.error(f"Failed to send message through surface", {"leadId": lead_id}, error=e)
         raise
@@ -4269,9 +4486,12 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
 
 # ------------------------- FOLLOW-UP FLOW -------------------------
 def _followup_is_due(row: Dict[str, Any], now_utc: datetime) -> bool:
-    next_send_at = _parse_iso_datetime(row.get("next_send_at"))
-    if not next_send_at:
+    value = row.get("next_send_at")
+    if value is None:
         return True
+    next_send_at = parse_control_time(value)
+    if not next_send_at:
+        return False
     return next_send_at <= now_utc
 
 
@@ -4325,65 +4545,42 @@ def _lead_has_recent_sent_followup(
     return bool(sent_at and sent_at >= cutoff)
 
 
+FOLLOWUP_SEND_SELECT = (
+    "id, lead_id, linkedin_account_id, status, followup_type, attempt, requires_human, reply_route, "
+    "processing_started_at, draft_text, sent_text, next_send_at, last_message_text, last_message_from, updated_at, "
+    "lead:leads(id, linkedin_account_id, linkedin_url, first_name, last_name, company_name, last_reply_at, "
+    "sequence_id, sequence_variant_id, batch_id, sequence_step, status, sent_at, outreach_mode, "
+    "connection_sent_at, connection_accepted_at)"
+)
+
+
 def fetch_approved_followups(
     client: Client,
     limit: int = 10,
     followup_type_filter: Optional[str] = None,
+    *,
+    lead_id: Optional[str] = None,
 ) -> list[Dict[str, Any]]:
     """Fetch APPROVED followups that are due and mark them PROCESSING."""
     now_utc = _utc_now()
     logger.db_query("select", "followups", {"status": "APPROVED", "limit": limit})
     try:
-        resp = (
+        query = (
             client.table("followups")
-            .select(
-                "id, lead_id, status, followup_type, attempt, draft_text, sent_text, next_send_at, "
-                "last_message_text, last_message_from, updated_at, "
-                "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, batch_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
-            )
+            .select(FOLLOWUP_SEND_SELECT)
             .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
             .eq("status", "APPROVED")
             .or_(f"next_send_at.is.null,next_send_at.lte.{now_utc.isoformat()}")
             .order("next_send_at", desc=False)
             .order("updated_at", desc=True)
             .limit(max(limit * 5, limit))
-            .execute()
         )
-    except Exception:
-        # Legacy schemas may miss `attempt` but still include `followup_type`.
-        try:
-            resp = (
-                client.table("followups")
-                .select(
-                    "id, lead_id, status, followup_type, draft_text, sent_text, next_send_at, "
-                    "last_message_text, last_message_from, updated_at, "
-                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, batch_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
-                )
-                .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
-                .eq("status", "APPROVED")
-                .or_(f"next_send_at.is.null,next_send_at.lte.{now_utc.isoformat()}")
-                .order("next_send_at", desc=False)
-                .order("updated_at", desc=True)
-                .limit(max(limit * 5, limit))
-                .execute()
-            )
-        except Exception:
-            # Last-resort legacy fallback.
-            resp = (
-                client.table("followups")
-                .select(
-                    "id, lead_id, status, draft_text, sent_text, next_send_at, "
-                    "last_message_text, last_message_from, updated_at, "
-                    "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, batch_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
-                )
-                .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
-                .eq("status", "APPROVED")
-                .or_(f"next_send_at.is.null,next_send_at.lte.{now_utc.isoformat()}")
-                .order("next_send_at", desc=False)
-                .order("updated_at", desc=True)
-                .limit(max(limit * 5, limit))
-                .execute()
-            )
+        if lead_id:
+            query = query.eq("lead_id", lead_id)
+        resp = query.execute()
+    except Exception as exc:
+        logger.warn("Followup control columns unavailable; holding queue", error=exc)
+        return []
     rows = resp.data or []
     logger.db_result("select", "followups", {"status": "APPROVED"}, len(rows))
 
@@ -4392,7 +4589,7 @@ def fetch_approved_followups(
     for row in rows:
         if followup_type_filter and (row.get("followup_type") or "").upper() != followup_type_filter.upper():
             continue
-        if not _followup_is_due(row, now_utc):
+        if followup_hold_reason(row, CURRENT_ACCOUNT_ID, now_utc):
             continue
 
         lead = row.get("lead") or {}
@@ -4436,41 +4633,32 @@ def fetch_approved_followups(
         if len(selected) >= limit:
             break
 
-    # Mark selected rows as PROCESSING immediately to prevent double-fetch
+    claimed = []
     for row in selected:
-        client.table("followups").update({
-            "status": "PROCESSING",
-            "processing_started_at": datetime.utcnow().isoformat(),
-        }).eq("id", row["id"]).execute()
-        logger.debug(f"Followup marked as PROCESSING", {"followupId": row["id"]})
-
-    if selected:
-        logger.info(
-            f"Fetched {len(selected)} APPROVED followups ready to send",
-            data={"followupTypeFilter": followup_type_filter},
-        )
-    return selected
+        claimed_row = claim_followup(client, row, CURRENT_ACCOUNT_ID, now=now_utc)
+        if claimed_row:
+            claimed.append(claimed_row)
+    if claimed:
+        logger.info(f"Claimed {len(claimed)} APPROVED followups ready to send",
+                    data={"followupTypeFilter": followup_type_filter})
+    return claimed
 
 
 def fetch_followup_by_id(client: Client, followup_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch a specific followup by id and mark it PROCESSING. Used for --followup-id testing."""
-    select_cols = (
-        "id, lead_id, status, followup_type, draft_text, sent_text, next_send_at, "
-        "last_message_text, last_message_from, updated_at, "
-        "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, batch_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
-    )
-    resp = client.table("followups").select(select_cols).eq("linkedin_account_id", CURRENT_ACCOUNT_ID).eq("id", followup_id).limit(1).execute()
-    rows = resp.data or []
-    if not rows:
-        logger.warn("Requested followup id not found", data={"followupId": followup_id})
+    """Claim a specific followup only when approved, due, and owned by this account."""
+    try:
+        resp = (client.table("followups").select(FOLLOWUP_SEND_SELECT)
+                .eq("linkedin_account_id", CURRENT_ACCOUNT_ID).eq("id", followup_id).limit(1).execute())
+        rows = resp.data or []
+        if not rows:
+            return None
+        claimed = claim_followup(client, rows[0], CURRENT_ACCOUNT_ID)
+        if not claimed:
+            logger.warn("Targeted followup is held, not due, or no longer approved", data={"followupId": followup_id})
+        return claimed
+    except Exception as exc:
+        logger.warn("Targeted followup query failed; holding outbound work", data={"followupId": followup_id}, error=exc)
         return None
-    row = rows[0]
-    client.table("followups").update({
-        "status": "PROCESSING",
-        "processing_started_at": datetime.utcnow().isoformat(),
-    }).eq("id", followup_id).execute()
-    logger.info("Targeted followup marked PROCESSING", data={"followupId": followup_id, "leadId": row.get("lead_id")})
-    return row
 
 
 def recover_stale_processing_followups(
@@ -4592,7 +4780,15 @@ def resolve_followup_message(client: Client, followup: Dict[str, Any]) -> Tuple[
 
     sequence_messages = load_sequence_messages(client, lead, require_explicit_sequence=True)
     message_key = "second_message" if next_step == 2 else "third_message"
-    candidate = sanitize_followup_message(str(sequence_messages.get(message_key) or ""))
+    template = str(sequence_messages.get(message_key) or "")
+    if is_cop_lead(lead):
+        candidate = template.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not candidate:
+            raise ValueError("cop_followup_template_missing")
+        if len(candidate) > 2000:
+            raise ValueError("cop_followup_template_exceeds_limit")
+    else:
+        candidate = sanitize_followup_message(template)
     if candidate:
         return candidate, next_step, f"sequence_template:{message_key}"
     return default_message, next_step, "followup_draft_text_empty_template"
@@ -5117,6 +5313,9 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
     """
     followup_id = followup["id"]
     lead = (followup.get("lead") or {})
+    reason = refresh_campaign_controls(client, lead, followup)
+    if reason:
+        return hold_processing_followup(client, followup, reason)
     lead_id = lead.get("id")
     linkedin_url = str(lead.get("linkedin_url") or "").replace("http://", "https://")
 
@@ -5129,6 +5328,7 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
         return "failed"
 
     followup_type = str(followup.get("followup_type") or "").upper()
+    cop_delivery = is_cop_lead(lead)
     sequence_messages: Dict[str, Any] = {}
     if followup_type == "NUDGE":
         sequence_messages = load_sequence_messages(client, lead, require_explicit_sequence=True)
@@ -5144,6 +5344,11 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
             logger.error(error_msg, {"followupId": followup_id, "leadId": lead_id})
             mark_followup_failed(client, followup_id, error_msg, permanent=True)
             return "failed"
+    elif is_cop_lead(lead):
+        # COP replies are handled by a human, including approved legacy rows.
+        error_msg = "cop_reply_requires_human_handling"
+        mark_followup_failed(client, followup_id, error_msg, permanent=True)
+        return "failed"
 
     message, resolved_step, source = resolve_followup_message(client, followup)
     if not message:
@@ -5177,6 +5382,18 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
         await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
         await page.wait_for_timeout(1_000)
         await random_pause()
+
+        if cop_delivery:
+            employer_result = await verify_and_record_cop_employer(page, client, lead)
+            if employer_result.get("status") != "verified":
+                mark_followup_failed(
+                    client, followup_id,
+                    f"cop_employer_{employer_result.get('status') or 'verification_unavailable'}",
+                    permanent=True,
+                )
+                return "failed"
+            await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
+            await page.wait_for_timeout(1_000)
 
         message_page, surface = await open_followup_message_surface(page)
         is_cop_followup = is_cop_sales_navigator_followup(lead, sequence_messages)
@@ -5286,6 +5503,7 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
                     str(sequence_messages.get("inmail_subject") or "").strip(),
                 ),
                 build_sales_navigator_body(message),
+                before_send=lambda: require_campaign_controls(client, lead, followup),
             )
             await verify_latest_outbound_message(
                 message_page,
@@ -5293,7 +5511,8 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
             )
         else:
             try:
-                await send_message(message_page, message, surface, lead=lead)
+                await send_message(message_page, message, surface, lead=lead,
+                                   before_send=lambda: require_campaign_controls(client, lead, followup))
             except Exception as send_error:
                 if not is_direct_thread_mismatch_error(send_error):
                     raise
@@ -5315,7 +5534,8 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
                 message_page, surface = await open_followup_message_surface(page)
                 if surface != SURFACE_MESSAGE:
                     raise RuntimeError(f"followup_surface_not_direct_message:{surface}")
-                await send_message(message_page, message, surface, lead=lead)
+                await send_message(message_page, message, surface, lead=lead,
+                                   before_send=lambda: require_campaign_controls(client, lead, followup))
 
         mark_followup_sent(client, followup_id, message, followup, sequence_step=resolved_step)
         if followup_type == "NUDGE":
@@ -5359,6 +5579,8 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
         )
         return "sent"
 
+    except CampaignControlHeld as exc:
+        return hold_processing_followup(client, followup, exc.reason)
     except Exception as e:
         error_msg = str(e)
         logger.error(f"Failed to send followup", {"followupId": followup_id}, error=e)
@@ -5411,7 +5633,11 @@ def mark_invite_processing(client: Client, lead_id: str) -> bool:
             client.table("leads")
             .update({"status": "PROCESSING", "updated_at": datetime.utcnow().isoformat()})
             .eq("id", lead_id)
+            .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
+            .eq("campaign_paused", False)
             .in_("status", INVITE_RETRY_STATUSES)
+            .is_("connection_sent_at", "null")
+            .is_("sent_at", "null")
             .execute()
         )
     except Exception as exc:
@@ -5531,7 +5757,8 @@ def _fetch_sequence_connect_note(client: Client, lead: Dict[str, Any]) -> str:
         return ""
 
 
-async def _send_invite_with_note(page: Page, lead: Dict[str, Any], note_text: str) -> str:
+async def _send_invite_with_note(page: Page, lead: Dict[str, Any], note_text: str, *,
+                                 before_send: Optional[Callable[[], None]] = None) -> str:
     """Open the invite-with-note dialog and send. Returns 'sent' | 'failed' | 'limit_reached'."""
     lead_id = str(lead.get("id") or "")
     profile_url = normalize_linkedin_profile_url(str(lead.get("linkedin_url") or ""))
@@ -5574,7 +5801,9 @@ async def _send_invite_with_note(page: Page, lead: Dict[str, Any], note_text: st
         return "limit_reached"
 
     try:
-        await send_message(page, note_text, "connect_note", None)
+        await send_message(page, note_text, "connect_note", None, lead=lead, before_send=before_send)
+    except CampaignControlHeld:
+        raise
     except Exception as exc:
         screenshot_path = await capture_connect_failure_screenshot(page, "invite_send_click_failed", lead_id)
         logger.error(
@@ -5710,6 +5939,13 @@ async def process_invite_one(
     """
     from sequence_render import render
 
+    if refresh_campaign_controls(client, lead):
+        return "paused"
+    if lead.get("sent_at") or lead.get("connection_sent_at"):
+        return "paused"
+    if is_cop_lead(lead):
+        raise RuntimeError("cop_requires_inmail_sender")
+
     lead_id = str(lead.get("id") or "")
     sequence_id = lead.get("sequence_id")
     outreach_mode = lead.get("outreach_mode")
@@ -5734,7 +5970,8 @@ async def process_invite_one(
     page = await context.new_page()
     try:
         if invite_requires_note and note_text:
-            outcome = await _send_invite_with_note(page, lead, note_text)
+            outcome = await _send_invite_with_note(page, lead, note_text,
+                                                 before_send=lambda: require_campaign_controls(client, lead))
         else:
             scraper_lead = ScraperLead(
                 id=lead_id,
@@ -5771,6 +6008,7 @@ async def process_invite_one(
                     )
                     return "paused"
             try:
+                require_campaign_controls(client, lead)
                 invite_result = await send_connection_request(page, scraper_lead)
             except WeeklyInviteLimitReached:
                 outcome = "limit_reached"
@@ -5779,6 +6017,8 @@ async def process_invite_one(
                     outcome = invite_result
                 else:
                     outcome = "sent" if invite_result else "send_failed"
+    except CampaignControlHeld:
+        return "paused"
     finally:
         try:
             await page.close()
@@ -5935,11 +6175,18 @@ async def process_inmail_and_invite_one(
     test_override: bool = False,
 ) -> str:
     """Send the connection request first, then send the first-touch InMail."""
+    if refresh_campaign_controls(client, lead):
+        return "paused"
     validate_inmail_test_override(str(lead.get("id") or ""), test_override)
+    if not test_override and (lead.get("sent_at") or inmail_first_touch_already_sent(lead)):
+        return "already_sent"
+    if not test_override and sequence_id_override is not None and str(lead.get("sequence_id")) != str(sequence_id_override):
+        return "paused"
     sequence_messages = load_sequence_messages(client, lead, sequence_id_override)
     if not is_inmail_and_invite_sequence(sequence_messages):
         raise RuntimeError("Lead is not assigned to the invite_and_inmail delivery mode.")
     sequence_id = sequence_id_override or _resolve_launch_sequence_id(lead)
+    cop_delivery = is_cop_lead(lead) or _safe_int(sequence_id, 0) == 10
     if _inmail_event_exists(client, lead, sequence_id, test_override):
         logger.info("Skipping already-recorded InMail first touch", {"leadId": lead.get("id")})
         return "already_sent"
@@ -5961,6 +6208,7 @@ async def process_inmail_and_invite_one(
     page = await context.new_page()
     message_page: Optional[Page] = None
     inmail_sent_at = datetime.now(timezone.utc).isoformat()
+    employer_verified = False
     try:
         await page.goto(profile_url, wait_until="domcontentloaded", timeout=60_000)
         await page.wait_for_selector("main", timeout=15_000)
@@ -5969,12 +6217,22 @@ async def process_inmail_and_invite_one(
         if unavailable_reason:
             raise RuntimeError(f"LinkedIn profile unavailable: {unavailable_reason}")
 
+        if cop_delivery:
+            employer_result = await verify_and_record_cop_employer(page, client, lead)
+            employer_verified = employer_result.get("status") == "verified"
+            if not employer_verified:
+                raise RuntimeError(f"cop_employer_{employer_result.get('status') or 'verification_unavailable'}")
+            # Full Experience may navigate away from the profile top card.
+            await page.goto(profile_url, wait_until="domcontentloaded", timeout=60_000)
+            await page.wait_for_selector("main", timeout=15_000)
+
         relationship = await probe_connect_only_surface(page, scraper_lead)
         if relationship == "already_connected":
             invite_result = "connected"
         elif relationship == "pending_invite":
             invite_result = "sent"
         else:
+            require_campaign_controls(client, lead)
             invite_result = await send_connection_request(page, scraper_lead)
         if invite_result not in {"sent", "connected"}:
             logger.warn(
@@ -5992,6 +6250,7 @@ async def process_inmail_and_invite_one(
             message_page,
             build_sales_navigator_subject(lead, message, subject),
             build_sales_navigator_body(message),
+            before_send=lambda: require_campaign_controls(client, lead),
         )
         inmail_sent_at = datetime.now(timezone.utc).isoformat()
         _record_inmail_event(client, lead, sequence_id, test_override=test_override)
@@ -6006,10 +6265,15 @@ async def process_inmail_and_invite_one(
 
         _persist_inmail_success(client, lead, inmail_sent_at, invite_result)
         return "sent"
+    except CampaignControlHeld:
+        return "paused"
     except Exception as exc:
         logger.error("Failed InMail + invite first touch", {"leadId": lead_id}, error=exc)
         if not test_override:
-            _mark_inmail_failed(client, lead_id, str(exc))
+            if cop_delivery and not employer_verified:
+                mark_cop_employer_ineligible(client, lead_id, str(exc).removeprefix("cop_employer_"))
+            else:
+                _mark_inmail_failed(client, lead_id, str(exc))
         raise
     finally:
         if message_page is not None and message_page is not page:
@@ -6033,6 +6297,12 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
         'retry' - transient failure, queued for retry
         'failed' - could not process
     """
+    if refresh_campaign_controls(client, lead):
+        return "paused"
+    if lead.get("sent_at"):
+        return "paused"
+    if is_cop_lead(lead):
+        raise RuntimeError("cop_requires_inmail_sender")
     lead_id = lead["id"]
     first_name = (lead.get("first_name") or "").strip()
     last_name = (lead.get("last_name") or "").strip()
@@ -6051,6 +6321,8 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
         return "retry"
     
     page = await context.new_page()
+    message_page: Optional[Page] = None
+    sales_page: Optional[Page] = None
     url = normalize_linkedin_profile_url(str(lead["linkedin_url"]))
     logger.debug(f"Navigating to profile for message-only", {"leadId": lead_id}, {"url": url})
     
@@ -6103,6 +6375,12 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                 )
         
         # Look for explicit connected-user messaging affordances first.
+        if (lead.get("batch_id"), lead.get("sequence_id")) in {(30, 7), (31, 8), (32, 9)}:
+            profile_text = await profile_container.inner_text()
+            if not re.search(r"(?:·|•)\s*1\.?\b|1st", profile_text):
+                logger.warn("Managed first message requires live first-degree acceptance", {"leadId": lead_id})
+                mark_message_only_pending(client, lead)
+                return "pending"
         explicit_message_targets = [
             profile_container.get_by_role("button", name=re.compile(r"(Nachricht an|Message to)", re.I)),
             profile_container.get_by_role("link", name=re.compile(r"(Nachricht an|Message to)", re.I)),
@@ -6163,6 +6441,8 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                 await random_pause()
                 is_sales_page = "linkedin.com/sales/" in (message_page.url or "")
                 if is_sales_page:
+                    require_first_message_channel(lead, SURFACE_SALES_NAVIGATOR)
+                if is_sales_page:
                     sales_ready = await wait_for_sales_navigator_composer(
                         message_page,
                         timeout_ms=20_000,
@@ -6171,11 +6451,13 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                 else:
                     sales_ready = await wait_for_sales_navigator_composer(message_page)
                 if sales_ready:
+                    require_first_message_channel(lead, SURFACE_SALES_NAVIGATOR)
                     logger.info("Nachricht opened Sales Navigator composer", {"leadId": lead_id})
                     await send_sales_navigator_message(
                         message_page,
                         build_sales_navigator_subject(lead, message),
                         build_sales_navigator_body(message),
+                        before_send=lambda: require_campaign_controls(client, lead),
                     )
                 else:
                     try:
@@ -6183,7 +6465,8 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                             DIRECT_MESSAGE_COMPOSER_SELECTOR,
                             timeout=20_000,
                         )
-                        await send_message(message_page, message, SURFACE_MESSAGE, lead=lead)
+                        await send_message(message_page, message, SURFACE_MESSAGE, lead=lead,
+                                           before_send=lambda: require_campaign_controls(client, lead))
                     except Exception as send_error:
                         if not is_direct_thread_mismatch_error(send_error):
                             raise
@@ -6204,6 +6487,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                         await close_existing_chat_overlays(page)
                         message_page, retry_surface = await open_followup_message_surface(page)
                         if retry_surface == SURFACE_SALES_NAVIGATOR:
+                            require_first_message_channel(lead, retry_surface)
                             logger.info(
                                 "First-message retry routed through Sales Navigator composer",
                                 {"leadId": lead_id},
@@ -6212,9 +6496,11 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                                 message_page,
                                 build_sales_navigator_subject(lead, message),
                                 build_sales_navigator_body(message),
+                                before_send=lambda: require_campaign_controls(client, lead),
                             )
                         else:
-                            await send_message(message_page, message, retry_surface, lead=lead)
+                            await send_message(message_page, message, retry_surface, lead=lead,
+                                               before_send=lambda: require_campaign_controls(client, lead))
                 
                 # Mark as SENT, capture acceptance, and initialize sequence progress metadata.
                 accepted_at = datetime.utcnow().isoformat()
@@ -6278,6 +6564,8 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                         pass
                 await page.close()
                 return "sent"
+            except CampaignControlHeld:
+                raise
             except Exception as e:
                 logger.error("Failed to send message to connected lead", {"leadId": lead_id}, error=e)
                 await page.close()
@@ -6298,6 +6586,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                     return "failed"
                 return "retry"
         else:
+            require_first_message_channel(lead, SURFACE_SALES_NAVIGATOR)
             logger.info("No normal Message button found; trying Sales Navigator fallback", {"leadId": lead_id})
             sales_page = await open_sales_navigator_message_surface(page)
             if sales_page is None:
@@ -6311,6 +6600,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                     sales_page,
                     build_sales_navigator_subject(lead, message),
                     build_sales_navigator_body(message),
+                    before_send=lambda: require_campaign_controls(client, lead),
                 )
                 accepted_at = datetime.utcnow().isoformat()
                 sequence_started_at = lead.get("sequence_started_at") or accepted_at
@@ -6366,6 +6656,8 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                 if page != sales_page:
                     await page.close()
                 return "sent"
+            except CampaignControlHeld:
+                raise
             except Exception as exc:
                 logger.error("Failed to send Sales Navigator message", {"leadId": lead_id}, error=exc)
                 try:
@@ -6380,6 +6672,14 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                     return "failed"
                 return "retry"
             
+    except CampaignControlHeld:
+        for target in (message_page, sales_page, page):
+            if target is not None:
+                try:
+                    await target.close()
+                except Exception:
+                    pass
+        return "paused"
     except Exception as e:
         logger.error("Error processing message-only lead", {"leadId": lead_id}, error=e)
         attempts = mark_lead_retry_later(client, lead, str(e))
@@ -6633,10 +6933,8 @@ async def main() -> None:
         logger.info("Daily send limit computed", data={"limit": daily_limit, "env": os.getenv("DAILY_SEND_LIMIT"), "default": DAILY_SEND_DEFAULT})
         if args.send_invites:
             already_sent = connect_only_sent_today_count(client)
-        elif args.followup:
-            already_sent = sent_today_count(client) + followups_sent_today_count(client)
         else:
-            already_sent = sent_today_count(client)
+            already_sent = sent_today_count(client) + followups_sent_today_count(client)
 
         if args.send_inmail_invites:
             already_sent = max(connect_only_sent_today_count(client), sent_today_count(client))
@@ -6654,30 +6952,9 @@ async def main() -> None:
                 items = [row] if row else []
                 batch_limit = 1
             elif args.lead_id:
-                # Targeted run by lead id: pick the APPROVED row for this lead.
-                recover_stale_processing_followups(client)
-                recover_due_retry_later_nudges(client)
-                schedule_missing_due_nudges(client)
-                resp = (
-                    client.table("followups")
-                    .select(
-                        "id, lead_id, status, followup_type, draft_text, sent_text, next_send_at, "
-                        "last_message_text, last_message_from, updated_at, "
-                        "lead:leads(id, linkedin_url, first_name, last_name, company_name, last_reply_at, sequence_id, sequence_variant_id, batch_id, sequence_step, status, sent_at, outreach_mode, connection_sent_at, connection_accepted_at)"
-                    )
-                    .eq("linkedin_account_id", CURRENT_ACCOUNT_ID)
-                    .eq("lead_id", args.lead_id)
-                    .eq("status", "APPROVED")
-                    .order("updated_at", desc=True)
-                    .limit(1)
-                    .execute()
-                )
-                items = resp.data or []
-                if items:
-                    client.table("followups").update({
-                        "status": "PROCESSING",
-                        "processing_started_at": datetime.utcnow().isoformat(),
-                    }).eq("id", items[0]["id"]).execute()
+                # Preserve the normal due, history and conditional claim gates,
+                # while selecting only this lead and scheduling no other rows.
+                items = fetch_approved_followups(client, 1, lead_id=args.lead_id)
                 batch_limit = 1
             else:
                 recover_stale_processing_followups(client)
@@ -6774,20 +7051,16 @@ async def main() -> None:
         if args.message_only:
             # Process message-only pipeline (pending connections or approved drafts)
             leads_to_process: list[Dict[str, Any]] = []
-            allow_missing_invite_evidence = False
 
             if args.lead_id:
                 lead = fetch_lead_by_id(client, args.lead_id)
                 if not lead:
                     logger.warn("Requested lead id not found for message-only send", {"leadId": args.lead_id})
                     return
-                targeted_connect_only_probe = (
-                    not lead.get("sent_at")
-                    and str(lead.get("outreach_mode") or "").lower() == "connect_only"
-                    and isinstance(lead.get("sequence_id"), int)
-                    and lead.get("sequence_id", 0) > 0
-                )
-                if not _is_message_only_candidate(lead) and not targeted_connect_only_probe:
+                targeted_statuses = {*MESSAGE_ONLY_PIPELINE_STATUSES, "CONNECT_ONLY_SENT", "FAILED"}
+                if (not _is_message_only_candidate(lead)
+                        or not (lead.get("connection_sent_at") or lead.get("connection_accepted_at"))
+                        or str(lead.get("status") or "").upper() not in targeted_statuses):
                     logger.warn(
                         "Requested lead is not eligible for message-only send",
                         {
@@ -6799,7 +7072,6 @@ async def main() -> None:
                         },
                     )
                     return
-                allow_missing_invite_evidence = targeted_connect_only_probe and not _is_message_only_candidate(lead)
                 leads_to_process = [lead]
             else:
                 probe_limit = resolve_message_only_probe_limit(remaining)
@@ -6847,11 +7119,9 @@ async def main() -> None:
                                 },
                             )
                             break
-                        if not mark_message_only_processing(
-                            client,
-                            lead,
-                            allow_missing_invite_evidence=allow_missing_invite_evidence and str(lead.get("id")) == str(args.lead_id or ""),
-                        ):
+                        if refresh_campaign_controls(client, lead):
+                            continue
+                        if not mark_message_only_processing(client, lead):
                             continue
                         result = await process_message_only_one(context, client, lead)
                         if result == "sent":
@@ -6895,7 +7165,11 @@ async def main() -> None:
                     return
                 leads_to_process = [lead]
             else:
-                leads_to_process = fetch_inmail_and_invite_queue(client, remaining, args.batch_id)
+                if args.lead_id:
+                    lead = fetch_targeted_inmail_lead(client, args.lead_id, args.batch_id, args.sequence_id)
+                    leads_to_process = [lead] if lead else []
+                else:
+                    leads_to_process = fetch_inmail_and_invite_queue(client, remaining, args.batch_id)
                 if not leads_to_process:
                     logger.info("No NEW or FAILED invite_and_inmail leads to process", {"batchId": args.batch_id})
                     return
@@ -6914,6 +7188,8 @@ async def main() -> None:
                 for lead in leads_to_process:
                     lead_id = str(lead.get("id") or "")
                     try:
+                        if refresh_campaign_controls(client, lead):
+                            continue
                         if not args.test_override and not _mark_inmail_processing(client, lead_id):
                             continue
                         result = await process_inmail_and_invite_one(
@@ -6955,7 +7231,9 @@ async def main() -> None:
                 if not lead:
                     logger.warn("Requested invite lead id not found", {"leadId": args.lead_id})
                     return
-                if not _is_invite_candidate(lead):
+                if (not _is_invite_candidate(lead) or lead.get("status") != "NEW"
+                        or (args.sequence_id is not None and str(lead.get("sequence_id")) != str(args.sequence_id))
+                        or (args.batch_id is not None and str(lead.get("batch_id")) != str(args.batch_id))):
                     logger.warn(
                         "Requested lead is not eligible for invite send",
                         {
@@ -7000,6 +7278,9 @@ async def main() -> None:
                         lead_id = str(lead.get("id") or "")
                         if lead_id:
                             attempted_invite_ids.add(lead_id)
+                        if refresh_campaign_controls(client, lead):
+                            skipped_count += 1
+                            continue
                         if not mark_invite_processing(client, lead_id):
                             skipped_count += 1
                             continue
@@ -7113,14 +7394,20 @@ async def main() -> None:
             await ensure_linkedin_auth(context, client)
 
             # Mark all leads as PROCESSING immediately to prevent re-fetching
+            claimed_leads = []
             for lead in leads_to_send:
-                mark_processing(client, lead["id"])
+                if refresh_campaign_controls(client, lead):
+                    continue
+                if mark_processing(client, lead["id"]):
+                    claimed_leads.append(lead)
 
             success_count = 0
-            for lead in leads_to_send:
+            for lead in claimed_leads:
                 lead_id = lead["id"]
                 try:
-                    await process_one(context, client, lead)
+                    result = await process_one(context, client, lead)
+                    if result == "paused":
+                        continue
                     success_count += 1
                 except Exception as exc:
                     error_msg = str(exc)
