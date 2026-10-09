@@ -1,5 +1,10 @@
 import type { CSSProperties } from "react";
 import Link from "next/link";
+import { createServerComponentClient } from "@supabase/auth-helpers-nextjs";
+import { cookies } from "next/headers";
+import { isAllowed } from "../../../lib/allowlist";
+import { isSupabaseAuthConfigured } from "../../../lib/authConfig";
+import CampaignRecipients from "../../../components/CampaignRecipients";
 import { notFound } from "next/navigation";
 
 import {
@@ -80,7 +85,13 @@ export default async function CampaignAnalyticsPage({ params, searchParams }: Pa
   const campaign = params.campaign;
   const parsedDays = Number(searchParams?.days || 30);
   const validDays = [7, 30, 90].includes(parsedDays) ? parsedDays : 30;
-  const analytics = await fetchCampaignAnalytics(campaign, validDays);
+  let showRecipients = false;
+  if (isSupabaseAuthConfigured()) {
+    const client = createServerComponentClient({ cookies });
+    const { data: { user } } = await client.auth.getUser();
+    showRecipients = Boolean(user && isAllowed(user.email || ""));
+  }
+  const analytics = await fetchCampaignAnalytics(campaign, validDays, showRecipients);
   const scope = CAMPAIGN_ANALYTICS_SCOPES[campaign];
 
   return (
@@ -234,6 +245,12 @@ export default async function CampaignAnalyticsPage({ params, searchParams }: Pa
           <p className="campaign-ledger-note">Sends are reconciled from persisted lead timestamps, sent follow-up records, and campaign events without double-counting. Booking and attendance outcomes require their own recorded events.</p>
         </section>
       </div>
+
+      {analytics.recipients ? <CampaignRecipients key={`${campaign}:${validDays}`} rows={analytics.recipients} highlights={analytics.conversationHighlights || []} days={validDays} campaign={campaign} /> : (
+        <section className="campaign-panel"><div className="campaign-panel__heading"><h2>RECIPIENT TRACKING</h2></div>
+          <p className="campaign-ledger-note"><Link href={`/login?next=${encodeURIComponent(`/analytics/${campaign}?days=${validDays}`)}`}>Sign in</Link> to view recipient names, message history and CSV export.</p>
+        </section>
+      )}
 
       <section className="campaign-panel" aria-labelledby="status-heading">
         <div className="campaign-panel__heading">

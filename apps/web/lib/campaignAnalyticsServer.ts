@@ -24,6 +24,8 @@ type CampaignSequenceRow = {
   delivery_mode: string;
 };
 
+import { buildCampaignRecipients, buildCampaignConversationHighlights, type CampaignConversationHighlight, type CampaignRecipient, type RecipientLead, type RecipientFollowup } from "./campaignRecipients";
+
 const PAGE_SIZE = 1000;
 
 type PagedQuery<Row> = {
@@ -47,7 +49,8 @@ const expectedDeliveryMode = (kind: CampaignAnalyticsKind): string =>
 export async function fetchCampaignAnalytics(
   kind: CampaignAnalyticsKind,
   days = 30,
-): Promise<CampaignAnalytics> {
+  includeRecipients = false,
+): Promise<CampaignAnalytics & { recipients?: CampaignRecipient[]; conversationHighlights?: CampaignConversationHighlight[] }> {
   const scope = CAMPAIGN_ANALYTICS_SCOPES[kind];
   const safeDays = [7, 30, 90].includes(days) ? days : 30;
   const client = supabaseAdmin();
@@ -83,10 +86,10 @@ export async function fetchCampaignAnalytics(
       fetchPaged<CampaignAnalyticsLead>(() =>
         client
           .from("leads")
-          .select("id, batch_id, sequence_id, linkedin_account_id, status, connection_sent_at, sent_at, last_reply_at")
+          .select(includeRecipients ? "id, batch_id, sequence_id, linkedin_account_id, status, connection_sent_at, sent_at, last_reply_at, first_name, last_name, company_name, linkedin_url, last_inbox_scan_at" : "id, batch_id, sequence_id, linkedin_account_id, status, connection_sent_at, sent_at, last_reply_at")
           .eq("batch_id", triple.batchId)
           .eq("sequence_id", triple.sequenceId)
-          .order("id", { ascending: true }),
+          .order("id", { ascending: true }).returns<RecipientLead[]>(),
       ),
     ),
   );
@@ -107,30 +110,42 @@ export async function fetchCampaignAnalytics(
 
   const eventPages = await Promise.all(
     triples.map((triple) =>
-      fetchPaged<CampaignAnalyticsEvent>(() =>
-        client
+      fetchPaged<CampaignAnalyticsEvent>(() => {
+        const query = client
           .from("outreach_events")
           .select("lead_id, sequence_id, linkedin_account_id, event_type, touch_number, occurred_at, metadata")
           .eq("sequence_id", triple.sequenceId)
-          .gte("occurred_at", since.toISOString())
           .lt("occurred_at", until.toISOString())
-          .order("occurred_at", { ascending: true }),
-      ),
+          .order("occurred_at", { ascending: true });
+        return includeRecipients ? query : query.gte("occurred_at", since.toISOString());
+      }),
     ),
   );
   // Batch/sequence owners describe the shared family, not every lead's sender.
   // The aggregator checks each event against its lead's exact account ownership.
   const events = eventPages.flat().filter((event) => leadIds.has(event.lead_id));
   const followupPages = await Promise.all(triples.map((triple) =>
-    fetchPaged<CampaignAnalyticsFollowup>(() => client.from("followups")
-      .select("id, lead_id, linkedin_account_id, status, sent_at, attempt, leads!inner(batch_id, sequence_id)")
+    fetchPaged<CampaignAnalyticsFollowup>(() => {
+      const query = client.from("followups")
+      .select(includeRecipients ? "id, lead_id, linkedin_account_id, status, sent_at, attempt, sent_text, followup_type, source_touch, reply_timestamp, reply_snippet, reply_intent, reply_intent_confidence, reply_route, last_message_text, last_message_from, leads!inner(batch_id, sequence_id)" : "id, lead_id, linkedin_account_id, status, sent_at, attempt, leads!inner(batch_id, sequence_id)")
       .eq("leads.batch_id", triple.batchId)
       .eq("leads.sequence_id", triple.sequenceId)
-      .eq("status", "SENT")
-      .order("id", { ascending: true })),
+      .order("id", { ascending: true });
+      return (includeRecipients ? query : query.eq("status", "SENT")).returns<RecipientFollowup[]>();
+    }),
   ));
   const reconciled = reconcileCampaignEvents({
     leads, events, followups: followupPages.flat(), since: since.toISOString(), until: until.toISOString(),
   });
-  return aggregateCampaignAnalytics({ scope, leads, events: reconciled, days: safeDays, accounts });
+  const analytics = aggregateCampaignAnalytics({ scope, leads, events: reconciled, days: safeDays, accounts });
+  if (!includeRecipients) return analytics;
+  const recipientInput = {
+    scope, leads: leads as RecipientLead[], events, followups: followupPages.flat() as RecipientFollowup[], accounts,
+    since: since.toISOString(), until: until.toISOString(),
+  };
+  return {
+    ...analytics,
+    recipients: buildCampaignRecipients(recipientInput),
+    conversationHighlights: buildCampaignConversationHighlights(recipientInput),
+  } as CampaignAnalytics & { recipients: CampaignRecipient[]; conversationHighlights: CampaignConversationHighlight[] };
 }

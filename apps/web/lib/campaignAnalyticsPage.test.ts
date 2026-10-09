@@ -14,7 +14,7 @@ test("analytics overview links to both isolated campaign pages", () => {
 test("analytics reports are public and use campaign-scoped analytics", () => {
   assert.doesNotMatch(analyticsIndex, /requireServerSession/);
   assert.doesNotMatch(campaignPage, /requireServerSession/);
-  assert.match(campaignPage, /fetchCampaignAnalytics\(campaign, validDays\)/);
+  assert.match(campaignPage, /fetchCampaignAnalytics\(campaign, validDays, showRecipients\)/);
   assert.match(campaignPage, /Sends are reconciled from persisted lead timestamps/);
   assert.doesNotMatch(campaignPage, /infer/i);
 });
@@ -24,4 +24,10 @@ test("campaign pages show sender breakdowns and combined totals", () => {
   assert.match(campaignPage, /analytics\.accounts\.map/);
   assert.match(campaignPage, /TOTAL · ALL SENDERS/);
   assert.match(campaignPage, /MESSAGES TOTAL/);
+});
+
+test("recipient evidence is gated by verified operator identity", () => {
+  assert.match(campaignPage, /client.auth.getUser\(\)/);
+  assert.match(campaignPage, /isAllowed\(user.email/);
+  assert.match(campaignPage, /Sign in/);
 });
