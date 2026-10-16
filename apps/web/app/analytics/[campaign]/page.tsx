@@ -12,7 +12,8 @@ import {
   type CampaignAnalytics,
   type CampaignAnalyticsKind,
 } from "../../../lib/campaignAnalytics";
-import { fetchCampaignAnalytics } from "../../../lib/campaignAnalyticsServer";
+import { fetchCampaignAnalytics, fetchReplyAnalytics } from "../../../lib/campaignAnalyticsServer";
+import ReplyAnalytics from "../../../components/ReplyAnalytics";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -91,7 +92,10 @@ export default async function CampaignAnalyticsPage({ params, searchParams }: Pa
     const { data: { user } } = await client.auth.getUser();
     showRecipients = Boolean(user && isAllowed(user.email || ""));
   }
-  const analytics = await fetchCampaignAnalytics(campaign, validDays, showRecipients);
+  const [analytics, replies] = await Promise.all([
+    fetchCampaignAnalytics(campaign, validDays, showRecipients),
+    fetchReplyAnalytics(validDays, showRecipients, campaign),
+  ]);
   const scope = CAMPAIGN_ANALYTICS_SCOPES[campaign];
 
   return (
@@ -148,6 +152,8 @@ export default async function CampaignAnalyticsPage({ params, searchParams }: Pa
         <Metric label="Replies" value={number(analytics.repliesReceived)} note="Unique recorded leads" />
         <Metric label="Reply rate" value={percent(analytics.responseRate)} note="Replies / first touches" emphasis />
       </section>
+
+      <ReplyAnalytics report={replies} days={validDays} scoped />
 
       <section className="campaign-panel" aria-labelledby="accounts-heading">
         <div className="campaign-panel__heading">

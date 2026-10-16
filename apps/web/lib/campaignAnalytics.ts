@@ -35,6 +35,8 @@ export type CampaignAnalyticsFollowup = {
   status: string;
   sent_at: string | null;
   attempt: number | null;
+  followup_type?: string | null;
+  reply_timestamp?: string | null;
 };
 
 export type CampaignAnalyticsEvent = {
@@ -173,8 +175,12 @@ export function reconcileCampaignEvents(input: {
   for (const followup of input.followups) {
     const lead = owners.get(followup.lead_id);
     // Legacy null account rows inherit the owning lead; explicit mismatches fail closed.
-    if (!lead || (followup.linkedin_account_id && followup.linkedin_account_id !== lead.linkedin_account_id) ||
-      followup.status !== "SENT" || !validTimestamp(followup.sent_at)) continue;
+    if (!lead || (followup.linkedin_account_id && followup.linkedin_account_id !== lead.linkedin_account_id)) continue;
+    if (followup.followup_type === "REPLY" && inWindow(followup.reply_timestamp) &&
+      ![...deliveries.values()].some(event => event.lead_id === lead.id && event.event_type === "reply_received")) {
+      record(lead, "reply_received", followup.reply_timestamp!, null, `reply:${lead.id}`);
+    }
+    if (followup.status !== "SENT" || !validTimestamp(followup.sent_at)) continue;
     record(lead, "touch_sent", followup.sent_at!, Math.max(2, (followup.attempt || 1) + 1), `followup:${lead.id}:${followup.id}`);
   }
   return [...deliveries.values()];

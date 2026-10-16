@@ -1,6 +1,7 @@
 import "server-only";
 
 import { supabaseAdmin } from "./supabaseAdmin";
+import { buildReplyAnalytics, type ReplyLead, type ReplyRecord } from "./replyAnalytics";
 import {
   aggregateCampaignAnalytics,
   reconcileCampaignEvents,
@@ -127,11 +128,11 @@ export async function fetchCampaignAnalytics(
   const followupPages = await Promise.all(triples.map((triple) =>
     fetchPaged<CampaignAnalyticsFollowup>(() => {
       const query = client.from("followups")
-      .select(includeRecipients ? "id, lead_id, linkedin_account_id, status, sent_at, attempt, sent_text, followup_type, source_touch, reply_timestamp, reply_snippet, reply_intent, reply_intent_confidence, reply_route, last_message_text, last_message_from, leads!inner(batch_id, sequence_id)" : "id, lead_id, linkedin_account_id, status, sent_at, attempt, leads!inner(batch_id, sequence_id)")
+      .select(includeRecipients ? "id, lead_id, linkedin_account_id, status, sent_at, attempt, sent_text, followup_type, source_touch, reply_timestamp, reply_snippet, reply_intent, reply_intent_confidence, reply_route, last_message_text, last_message_from, leads!inner(batch_id, sequence_id)" : "id, lead_id, linkedin_account_id, status, sent_at, attempt, followup_type, reply_timestamp, leads!inner(batch_id, sequence_id)")
       .eq("leads.batch_id", triple.batchId)
       .eq("leads.sequence_id", triple.sequenceId)
       .order("id", { ascending: true });
-      return (includeRecipients ? query : query.eq("status", "SENT")).returns<RecipientFollowup[]>();
+      return query.returns<RecipientFollowup[]>();
     }),
   ));
   const reconciled = reconcileCampaignEvents({
@@ -148,4 +149,30 @@ export async function fetchCampaignAnalytics(
     recipients: buildCampaignRecipients(recipientInput),
     conversationHighlights: buildCampaignConversationHighlights(recipientInput),
   } as CampaignAnalytics & { recipients: CampaignRecipient[]; conversationHighlights: CampaignConversationHighlight[] };
+}
+
+// Includes inactive and legacy campaigns. Only aggregate values leave the server for public visitors.
+export async function fetchReplyAnalytics(days = 30, includeDetails = false, kind?: CampaignAnalyticsKind) {
+  const client = supabaseAdmin();
+  const since = new Date();
+  since.setUTCDate(since.getUTCDate() - (days - 1));
+  since.setUTCHours(0, 0, 0, 0);
+  const until = new Date(since);
+  until.setUTCDate(until.getUTCDate() + days);
+  const [leads, followups, events, accounts, sequences] = await Promise.all([
+    fetchPaged<ReplyLead>(() => client.from('leads').select(includeDetails
+      ? 'id,batch_id,sequence_id,linkedin_account_id,status,last_reply_at,first_name,last_name'
+      : 'id,batch_id,sequence_id,linkedin_account_id,status,last_reply_at').order('id').returns<ReplyLead[]>()),
+    fetchPaged<ReplyRecord>(() => client.from('followups').select('id,lead_id,linkedin_account_id,status,sent_at,attempt,followup_type,reply_timestamp,reply_intent,reply_snippet,last_message_from,last_message_text')
+      .eq('followup_type', 'REPLY').order('id')),
+    fetchPaged<CampaignAnalyticsEvent>(() => client.from('outreach_events').select('lead_id,sequence_id,linkedin_account_id,event_type,touch_number,occurred_at')
+      .eq('event_type', 'reply_received').lt('occurred_at', until.toISOString()).order('id')),
+    fetchPaged<{ id: string; display_name: string | null; sender_display_name: string | null; label: string | null }>(() => client.from('linkedin_accounts').select('id,display_name,sender_display_name,label').order('id')),
+    fetchPaged<{ id: number; name: string }>(() => client.from('outreach_sequences').select('id,name').order('id')),
+  ]);
+  return buildReplyAnalytics({ leads, followups, events, sequences,
+    accounts: accounts.map(a => ({ id: a.id, label: a.display_name?.trim() || a.sender_display_name?.trim() || a.label?.trim() || 'Unlabelled sender' })),
+    since: since.toISOString(), until: until.toISOString(), includeDetails,
+    pairs: kind ? CAMPAIGN_ANALYTICS_SCOPES[kind].sequences : undefined,
+  });
 }

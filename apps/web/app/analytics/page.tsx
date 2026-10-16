@@ -6,6 +6,12 @@ import {
     fetchDailyMetrics,
 } from "../actions";
 import { buildConversionFunnel } from "../../lib/analyticsFunnel";
+import ReplyAnalytics from "../../components/ReplyAnalytics";
+import { fetchReplyAnalytics } from "../../lib/campaignAnalyticsServer";
+import { createServerComponentClient } from "@supabase/auth-helpers-nextjs";
+import { cookies } from "next/headers";
+import { isAllowed } from "../../lib/allowlist";
+import { isSupabaseAuthConfigured } from "../../lib/authConfig";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -23,10 +29,27 @@ export default async function AnalyticsPage({ searchParams }: PageProps) {
     const days = daysParam ? parseInt(daysParam, 10) : 7;
     const validDays = [7, 30, 90].includes(days) ? days : 7;
 
-    const [analytics, dailyMetrics] = await Promise.all([
+    let showReplies = false;
+    if (isSupabaseAuthConfigured()) {
+        const client = createServerComponentClient({ cookies });
+        const { data: { user } } = await client.auth.getUser();
+        showReplies = Boolean(user && isAllowed(user.email || ""));
+    }
+    const [originalAnalytics, originalDaily, replies] = await Promise.all([
         fetchOutreachAnalytics(validDays),
         fetchDailyMetrics(validDays),
+        fetchReplyAnalytics(validDays, showReplies),
     ]);
+    const analytics = { ...originalAnalytics, repliesReceived: replies.periodPeople,
+        positiveReplies: replies.periodPositivePeople,
+        messageResponseRate: originalAnalytics.messagesSent ? Math.round(replies.periodPeople / originalAnalytics.messagesSent * 1000) / 10 : 0,
+        positiveReplyRate: originalAnalytics.messagesSent ? Math.round(replies.periodPositivePeople / originalAnalytics.messagesSent * 1000) / 10 : 0,
+        overallConversionRate: originalAnalytics.totalLeads ? Math.round(replies.periodPeople / originalAnalytics.totalLeads * 1000) / 10 : 0,
+    };
+    const dailyMetrics = originalDaily.map(row => ({ ...row,
+        replies: replies.daily.find(day => day.date === row.date)?.replies || 0,
+        positiveReplies: replies.daily.find(day => day.date === row.date)?.positiveReplies || 0,
+    }));
     const funnel = buildConversionFunnel(analytics);
 
     return (
@@ -53,6 +76,8 @@ export default async function AnalyticsPage({ searchParams }: PageProps) {
                     <span className="analytics-campaign-card__cta">OPEN OVERVIEW →</span>
                 </Link>
             </section>
+
+            <ReplyAnalytics report={replies} days={validDays} />
 
             <div className="analytics-legacy-heading">
                 <span className="campaign-kicker">Historical view</span>
