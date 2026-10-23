@@ -887,7 +887,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
 
         self.assertIn("is_direct_thread_mismatch_error(send_error)", source)
         self.assertIn("First-message direct surface opened a stale or mismatched thread", source)
-        self.assertIn("open_followup_message_surface(page)", source)
+        self.assertIn("open_followup_message_surface(page, lead)", source)
 
     def test_normalize_typed_text_matches_linkedin_collapsed_paragraph_spacing(self):
         expected = "Hi Sabrina,\n\nfreut mich, dass wir uns vernetzen.\n\nViele Gruesse,\nKatharina"
@@ -1286,7 +1286,7 @@ class SalesNavigatorRoutingTest(unittest.TestCase):
     def test_close_existing_chat_overlays_scans_role_button_controls(self):
         source = inspect.getsource(sender_module.close_existing_chat_overlays)
 
-        self.assertIn('querySelectorAll("button, [role=\\"button\\"]")', source)
+        self.assertIn("querySelectorAll('button, [role=\"button\"]')", source)
 
     def test_send_message_has_no_direct_keyboard_send_fallback(self):
         source = inspect.getsource(sender_module.send_message)

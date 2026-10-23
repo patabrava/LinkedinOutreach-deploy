@@ -14,8 +14,10 @@ from urllib.parse import unquote, urlsplit
 
 try:
     from .daily_campaign import ACCOUNTS, SCOPES, berlin_day_start, in_scope, remaining_capacity, invite_limit_signal, campaign_report
+    from .connection_acceptance import scan_connections, acceptance_hold, scoped_leads
 except ImportError:
     from daily_campaign import ACCOUNTS, SCOPES, berlin_day_start, in_scope, remaining_capacity, invite_limit_signal, campaign_report
+    from connection_acceptance import scan_connections, acceptance_hold, scoped_leads
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -78,6 +80,7 @@ class DailyAdapter:
         self.context=None; self.browser=None; self.playwright=None; self.renderer=None; self.lock=None
         self.stage='preflight'; self.lead=None; self.attempted=False; self.counter=0
         self.seen_replies=[]; self.leads=[]; self.blocked={}; self.scan_verified=set()
+        self.accepted_ids=set(); self.followups_only=False
 
     async def __aenter__(self):
         try: return await self.open()
@@ -93,7 +96,7 @@ class DailyAdapter:
         self.client=sender.get_supabase_client()
         sender.configure_runtime_account(self.client,self.account)
         scraper.configure_runtime_account(self.account)
-        folder=ROOT/'.linkedin-accounts'/self.account
+        folder=sender.AUTH_STATE_PATH.parent
         folder.mkdir(parents=True,exist_ok=True)
         self.lock=open(folder/'daily_campaign.lock','a')
         try: fcntl.flock(self.lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -169,6 +172,53 @@ class DailyAdapter:
                 result[names[lead['sequence_id']]]['not_yet_due_nudges']+=1
         return result
 
+    async def reconcile_acceptances(self,execute=False):
+        self.stage='acceptance'
+        page=await self.context.new_page()
+        try:
+            report=await scan_connections(page,self.leads,self.account)
+            report['screenshot']=await self.capture(page,'connections-coverage')
+        finally:
+            await page.close()
+        self.accepted_ids={item['lead_id'] for item in report['accepted']}
+        if execute:
+            observed_at=datetime.now(timezone.utc).isoformat()
+            for item in report['accepted']:
+                if not item['acceptance_recorded']:
+                    # Acceptance time means first verified observation, not an invented time of day.
+                    self.client.table('leads').update({'connection_accepted_at':observed_at}).eq(
+                        'id',item['lead_id']).eq('linkedin_account_id',self.account).is_(
+                        'connection_accepted_at','null').execute()
+        known=self.accepted_ids | {lead['id'] for lead in scoped_leads(self.leads,self.account)
+                                  if lead.get('connection_accepted_at')}
+        backlog=[lead for lead in scoped_leads(self.leads,self.account)
+                 if lead['id'] in known and not lead.get('sent_at')]
+        report['accepted_without_first_message']=[{
+            'lead_id':lead['id'],'name':self.sender.lead_display_name(lead),
+            'sequence_id':lead['sequence_id'],'hold_reason':acceptance_hold(lead),
+            'acceptance_source':'live_connection' if lead['id'] in self.accepted_ids else 'stored_acceptance',
+            'requires_live_thread_check':True
+        } for lead in backlog]
+        report['needs_first_message']=sum(not acceptance_hold(lead) for lead in backlog)
+        report['held_first_messages']=sum(bool(acceptance_hold(lead)) for lead in backlog)
+        return report
+
+    async def check_followups(self):
+        """Queue counts cannot stand in for a live acceptance check."""
+        acceptance=await self.reconcile_acceptances(False)
+        by_id={lead['id']:lead for lead in scoped_leads(self.leads,self.account)}
+        rows=paginated(self.client.table('followups').select('*').eq('linkedin_account_id',self.account)
+                       .in_('status',['APPROVED','RETRY_LATER','PROCESSING']).order('id'))
+        due=[{'followup_id':row['id'],'lead_id':row['lead_id'],
+              'name':self.sender.lead_display_name(by_id[row['lead_id']]),
+              'sequence_id':by_id[row['lead_id']]['sequence_id'],'status':row['status'],
+              'hold_reason':acceptance_hold(by_id[row['lead_id']]),'next_send_at':row.get('next_send_at')}
+             for row in rows if row['lead_id'] in by_id and row.get('followup_type')=='NUDGE'
+             and self.sender._followup_is_due(row,datetime.now(timezone.utc))]
+        return {'acceptance_check':acceptance,'due_nudges':due,
+                'approved_due_nudges':sum(row['status']=='APPROVED' for row in due),
+                'outbound_submits':0,'campaign_state_writes':0}
+
     async def persist_reply(self,lead,bubble,execute):
         fingerprint=hashlib.sha256(bubble['text'].encode()).hexdigest()
         item={'lead_id':lead['id'],'campaign':lead['sequence_id'],'name':self.sender.lead_display_name(lead),
@@ -187,6 +237,9 @@ class DailyAdapter:
         self.stage='inbox'
         pending=[r for r in self.leads if r.get('sent_at') or r.get('connection_sent_at') or r.get('last_reply_at') or r.get('status')=='SENT']
         direct=[r for r in pending if r['sequence_id']!=10 and (r.get('sent_at') or r.get('last_reply_at'))]
+        if self.followups_only:
+            due_ids={row['lead_id'] for row in self.candidates('nudge')}
+            direct=[lead for lead in direct if lead['id'] in due_ids]
         # Oldest scan first, stable order; no offset is applied after Python filtering.
         direct.sort(key=lambda r:(r.get('last_inbox_scan_at') or '',r['id']))
         chosen=direct[:self.scan_limit] if self.scan_limit else direct
@@ -276,7 +329,7 @@ class DailyAdapter:
             if lead.get('sent_at'): continue
             cop=lead['sequence_id']==10
             if stage=='invite' and not cop and lead['status']=='NEW' and not lead.get('connection_sent_at'): rows.append(lead)
-            if stage=='first_message' and not cop and (lead.get('connection_sent_at') or lead.get('connection_accepted_at')): rows.append(lead)
+            if stage=='first_message' and not cop and (lead['id'] in self.accepted_ids or lead.get('connection_accepted_at')): rows.append(lead)
             if stage=='cop_initial' and cop and lead['status']=='NEW': rows.append(lead)
         rows.sort(key=lambda r:r.get('source_last_activity_at') or '',reverse=True)
         return rows
@@ -313,6 +366,8 @@ class DailyAdapter:
             self.sender.require_first_message_channel(self.lead,self.sender.SURFACE_MESSAGE)
             if info:
                 verdict=self.sender.classify_last_sender(info,self.sender.lead_display_name(self.lead),self.lead.get('first_name') or '')
+                if verdict=='unknown' and self.sender.sender_name_is_own_account(str(info.get('sender') or '').strip()):
+                    verdict='us'
                 if verdict=='lead':
                     await self.persist_reply(self.lead,info,True)
                     raise self.sender.CampaignControlHeld('reply_received')
@@ -323,6 +378,8 @@ class DailyAdapter:
                     raise self.sender.CampaignControlHeld('first_touch_already_visible_requires_reconciliation')
         elif self.stage=='nudge':
             verdict=self.sender.classify_last_sender(info,self.sender.lead_display_name(self.lead),self.lead.get('first_name') or '')
+            if verdict=='unknown' and self.sender.sender_name_is_own_account(str(info.get('sender') or '').strip()):
+                verdict='us'
             if verdict=='lead':
                 await self.persist_reply(self.lead,info,True)
                 raise self.sender.CampaignControlHeld('reply_received')
@@ -371,6 +428,9 @@ class DailyAdapter:
             if self.attempted and result!='sent':
                 self.quarantine_unconfirmed()
                 return 'unconfirmed'
+            if stage=='first_message' and result=='paused' and not self.attempted:
+                self.client.table('leads').update({'status':'CONNECT_ONLY_SENT'}).eq('id',row['id']).eq(
+                    'linkedin_account_id',self.account).eq('status','PROCESSING').is_('sent_at','null').execute()
             return result
         except Exception as exc:
             if self.attempted:

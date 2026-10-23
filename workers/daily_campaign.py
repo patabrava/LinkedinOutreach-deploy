@@ -45,10 +45,11 @@ def invite_limit_signal(rows, now=None):
 
 
 async def run_account(adapter, *, execute=False, stage_limit=1, stages=STAGES):
+    acceptance_check = await adapter.reconcile_acceptances(execute)
     scan = await adapter.scan(execute)
     touched=set(); replied={r['lead_id'] for r in scan['replies']}
     report={'scan_complete':scan['complete'],'replies':scan['replies'], 'scan_blockers':scan['blocked'],
-            'stages':{},'halted':False,'suggestions':[]}
+            'stages':{},'halted':False,'suggestions':[], 'acceptance_check':acceptance_check}
     for stage in stages:
         summary={'sent':0,'skipped':0,'outcomes':[]}
         report['stages'][stage]=summary
@@ -119,10 +120,13 @@ async def main():
     parser.add_argument('--stage-limit',type=int,default=1,help='Attempts per stage/account; 0 uses remaining quota')
     parser.add_argument('--scan-limit',type=int,default=0,help='Optional bounded scan; unscanned nudges stay blocked')
     parser.add_argument('--reconcile-only',action='store_true',help='Persist inbound/drafts without any outbound stage')
+    parser.add_argument('--check-followups',action='store_true',help='Read-only ABC acceptance and due-queue check; never sends or writes campaign state')
+    parser.add_argument('--followups-only',action='store_true',help='ABC acceptance-triggered first messages and due nudges only; excludes invitations and COP')
     parser.add_argument('--headed',action='store_true',help='Show the terminal-controlled browser during the run')
     parser.add_argument('--output',type=Path,default=Path('output/playwright/daily-campaign'))
     args=parser.parse_args()
     if args.stage_limit<0 or args.scan_limit<0: parser.error('limits must be nonnegative')
+    if args.check_followups and args.execute: parser.error('--check-followups is read-only; use --followups-only --execute for sending')
     from daily_campaign_live import DailyAdapter
     args.output.mkdir(parents=True,exist_ok=True)
     run_id=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
@@ -130,9 +134,16 @@ async def main():
     for account in ([args.account_id] if args.account_id else ACCOUNTS):
         try:
             async with DailyAdapter(account,args.output/run_id,args.scan_limit,headed=args.headed) as adapter:
-                results['accounts'][account]=await run_account(adapter,execute=args.execute,stage_limit=args.stage_limit,
-                                                             stages=() if args.reconcile_only else STAGES)
-                results['accounts'][account]['campaigns']=adapter.report_inventory(results['accounts'][account])
+                if args.check_followups or args.followups_only:
+                    adapter.leads=[lead for lead in adapter.leads if lead['sequence_id'] in (7,8,9)]
+                    adapter.followups_only=True
+                if args.check_followups:
+                    check=await adapter.check_followups()
+                    results['accounts'][account]={'check':check,'halted':not check['acceptance_check']['complete']}
+                else:
+                    stages=() if args.reconcile_only else (('first_message','nudge') if args.followups_only else STAGES)
+                    results['accounts'][account]=await run_account(adapter,execute=args.execute,stage_limit=args.stage_limit,stages=stages)
+                    results['accounts'][account]['campaigns']=adapter.report_inventory(results['accounts'][account])
         except Exception as exc:
             results['accounts'][account]={'halted':True,'blocker':type(exc).__name__+': '+str(exc)[:300]}
     # Report contains IDs for local reconciliation, never credentials; screenshot files remain private.

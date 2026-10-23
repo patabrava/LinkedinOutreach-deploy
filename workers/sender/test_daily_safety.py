@@ -7,6 +7,24 @@ import sender
 
 
 class DailySafetyTests(unittest.TestCase):
+    def test_stale_overlay_cleanup_executes_valid_javascript_and_closes_chat(self):
+        import asyncio
+        from playwright.async_api import async_playwright
+        async def check():
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    page = await browser.new_page()
+                    await page.set_content('''<div class="msg-overlay-conversation-bubble">
+                    <button aria-label="Unterhaltung schließen" onclick="this.parentElement.remove()">×</button>
+                    </div><button id="other">Keep unrelated action</button>''')
+                    self.assertEqual(await sender.close_existing_chat_overlays(page), 1)
+                    self.assertEqual(await page.locator('.msg-overlay-conversation-bubble').count(), 0)
+                    self.assertEqual(await page.locator('#other').count(), 1)
+                finally:
+                    await browser.close()
+        asyncio.run(check())
+
     def test_sender_berlin_quota_boundary(self):
         from unittest.mock import patch
         with patch.object(sender,'datetime') as clock:

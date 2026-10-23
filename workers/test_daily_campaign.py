@@ -5,6 +5,57 @@ from datetime import datetime, timezone
 
 
 class DailyCampaignTests(unittest.TestCase):
+    def test_bubble_reader_preserves_rendered_line_breaks_and_complete_url(self):
+        from playwright.async_api import async_playwright
+        from workers.thread_reader import extract_last_bubble
+        async def check():
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    page = await browser.new_page()
+                    await page.set_content('<li class="msg-s-message-list__event"><span class="msg-s-message-group__name">Katharina Hoffmann</span><p class="msg-s-event-listitem__body">Hello Laura.<br><br>Complete message.<br>https://example.com/?a=1&amp;b=2</p></li>')
+                    self.assertEqual((await extract_last_bubble(page))['text'],
+                                     'Hello Laura. Complete message. https://example.com/?a=1&b=2')
+                finally:
+                    await browser.close()
+        asyncio.run(check())
+
+    def test_acceptance_reconciliation_precedes_inbox_and_empty_queue(self):
+        adapter = MemoryAdapter()
+        adapter.candidates = lambda _stage: []
+        result = asyncio.run(self.m.run_account(adapter, execute=False, stages=('nudge',)))
+        self.assertEqual(adapter.calls[:2], ['acceptances', 'scan'])
+        self.assertEqual(result['acceptance_check']['needs_first_message'], 12)
+        self.assertEqual(result['stages']['nudge']['outcomes'], [])
+
+    def test_first_message_guard_recognizes_named_own_sender_after_recipient_check(self):
+        from workers.daily_campaign_live import DailyAdapter
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from pathlib import Path
+        async def check():
+            adapter = DailyAdapter('13f81aad-8a5d-4cad-b94d-15aecef6ee03', Path('/tmp'))
+            adapter.stage = 'first_message'; adapter.lead = {'first_name':'Laura','sequence_id':7}
+            adapter.capture = AsyncMock(); adapter.capacity = lambda: {'messages':1}
+            adapter.sender = SimpleNamespace(PostSendVerificationError=RuntimeError, CampaignControlHeld=RuntimeError,
+                SURFACE_MESSAGE='message', require_first_message_channel=lambda *args: None,
+                find_direct_message_editor=AsyncMock(return_value=(object(),'')),
+                assert_direct_message_editor_matches_lead=AsyncMock(),
+                extract_last_bubble=AsyncMock(return_value={'sender':'Katharina Hoffmann','text':'Prior note','is_outbound':False}),
+                classify_last_sender=lambda *args:'unknown', lead_display_name=lambda lead:'Laura Bayer',
+                sender_name_is_own_account=lambda name:name=='Katharina Hoffmann',
+                load_sequence_messages=lambda *args:{'first_message':'Approved next message'},
+                typed_text_matches=lambda *args:(False, {}))
+            adapter.client = object()
+            await adapter.before_submit(object())
+            self.assertTrue(adapter.attempted)
+            adapter.sender.assert_direct_message_editor_matches_lead.assert_awaited_once()
+            adapter.attempted = False
+            adapter.sender.extract_last_bubble.return_value['sender'] = 'Unrelated Person'
+            with self.assertRaisesRegex(RuntimeError,'latest_sender_ambiguous'):
+                await adapter.before_submit(object())
+            self.assertFalse(adapter.attempted)
+        asyncio.run(check())
     def test_invite_recipient_supports_profile_h2_without_accepting_sidebar_names(self):
         from playwright.async_api import async_playwright
         from workers.daily_campaign_live import DailyAdapter
@@ -83,7 +134,7 @@ class DailyCampaignTests(unittest.TestCase):
     def test_inbound_first_and_one_outbound_per_lead(self):
         adapter = MemoryAdapter()
         result = asyncio.run(self.m.run_account(adapter, execute=True, stage_limit=1))
-        self.assertEqual(adapter.calls[0], 'scan')
+        self.assertEqual(adapter.calls[:2], ['acceptances', 'scan'])
         self.assertNotIn('replied', adapter.sent)
         self.assertEqual(adapter.sent.count('shared'), 1)
         self.assertEqual(result['stages']['invite']['sent'],1)
@@ -147,6 +198,9 @@ class MemoryAdapter:
     def __init__(self):
         self.calls=[]; self.sent=[]; self.outcome='sent'
         self.scan_result={'verified':{'shared','next','replied'}, 'blocked':{}, 'replies':[{'lead_id':'replied'}], 'complete':True}
+    async def reconcile_acceptances(self, execute):
+        self.calls.append('acceptances')
+        return {'complete': True, 'needs_first_message': 12}
     async def scan(self, execute):
         self.calls.append('scan'); return self.scan_result
     def capacity(self):

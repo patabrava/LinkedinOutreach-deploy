@@ -22,6 +22,7 @@ from supabase import Client, create_client
 # Import shared logger
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from credential_crypto import decrypt_password
+from connection_acceptance import ABC_SCOPES, verified_primary_profile
 from campaign_management import (
     CampaignControlHeld,
     claim_followup,
@@ -2177,7 +2178,7 @@ async def close_existing_chat_overlays(page: Page) -> int:
                 """() => {
                     const visible = (el) => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
                     const overlayRoot = (el) => el.closest('[class*="msg-overlay"], [class*="msg-conversation"], [data-control-name*="overlay"]');
-                    const buttons = Array.from(document.querySelectorAll("button, [role=\"button\"]"))
+                    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
                         .map((button, index) => {
                             const text = (button.innerText || button.textContent || '').replace(/\\s+/g, ' ').trim();
                             const aria = (button.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
@@ -2208,7 +2209,7 @@ async def close_existing_chat_overlays(page: Page) -> int:
                             candidate.text === '✕'
                         );
                     if (!buttons.length) {
-                        const fallback = Array.from(document.querySelectorAll("button, [role=\"button\"]"))
+                        const fallback = Array.from(document.querySelectorAll('button, [role="button"]'))
                             .map((button, index) => {
                                 const text = (button.innerText || button.textContent || '').replace(/\\s+/g, ' ').trim();
                                 const aria = (button.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
@@ -2372,7 +2373,7 @@ async def find_profile_more_menu_message_target(page: Page, profile_container):
     return None, 0
 
 
-async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
+async def open_followup_message_surface(page: Page, lead: Optional[Dict[str, Any]] = None) -> Tuple[Page, str]:
     """Open a messaging surface for a follow-up send.
 
     Mirrors `process_message_only`'s SN-aware pattern so a Sales Navigator
@@ -2387,21 +2388,18 @@ async def open_followup_message_surface(page: Page) -> Tuple[Page, str]:
     await wiggle_mouse(page)
 
     profile_container = None
-    try:
-        profile_container = page.get_by_test_id("lazy-column")
-        await profile_container.wait_for(state="visible", timeout=5_000)
-        logger.element_search("lazy-column", 1, context={"method": "test_id"})
-    except Exception:
+    if lead and (lead.get('batch_id'), lead.get('sequence_id')) in ABC_SCOPES:
+        profile_container = await verified_primary_profile(page, lead)
+    else:
         try:
-            profile_container = page.locator("main.scaffold-layout__main, section.artdeco-card").first
+            profile_container = page.get_by_test_id("lazy-column")
             await profile_container.wait_for(state="visible", timeout=5_000)
-            logger.selector_fallback("lazy-column", "main.scaffold-layout__main", success=True)
         except Exception:
-            logger.selector_fallback("lazy-column", "main.scaffold-layout__main", success=False)
-            raise RuntimeError(
-                "Profile container not found; refusing to fall back to page-level "
-                "selectors (which can match the global 'Nachrichten' nav link)."
-            )
+            try:
+                profile_container = page.locator("main.scaffold-layout__main, section.artdeco-card").first
+                await profile_container.wait_for(state="visible", timeout=5_000)
+            except Exception:
+                raise RuntimeError("Profile container not found; refusing to fall back to page-level selectors.")
 
     explicit_targets = [
         profile_container.get_by_role("button", name=re.compile(r"(Nachricht an|Message to)", re.I)),
@@ -5395,7 +5393,7 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
             await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
             await page.wait_for_timeout(1_000)
 
-        message_page, surface = await open_followup_message_surface(page)
+        message_page, surface = await open_followup_message_surface(page, lead)
         is_cop_followup = is_cop_sales_navigator_followup(lead, sequence_messages)
         if is_cop_followup and followup_type != "NUDGE":
             raise RuntimeError("cop_reply_requires_human_handling")
@@ -5531,7 +5529,7 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
                 await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=60_000)
                 await page.wait_for_timeout(1_000)
                 await close_existing_chat_overlays(page)
-                message_page, surface = await open_followup_message_surface(page)
+                message_page, surface = await open_followup_message_surface(page, lead)
                 if surface != SURFACE_MESSAGE:
                     raise RuntimeError(f"followup_surface_not_direct_message:{surface}")
                 await send_message(message_page, message, surface, lead=lead,
@@ -6337,12 +6335,25 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
             await page.close()
             return "failed"
 
-        # Check for pending connection indicator (Ausstehend)
+        managed_abc = (lead.get('batch_id'), lead.get('sequence_id')) in ABC_SCOPES
+        profile_container = None
+        if managed_abc:
+            try:
+                profile_container = await verified_primary_profile(page, lead)
+            except RuntimeError as exc:
+                if str(exc) != 'connection_not_verified':
+                    raise
+                mark_message_only_pending(client, lead)
+                await page.close()
+                return 'pending'
+
+        # Managed profiles have already proved their own header and degree.
+        pending_root = profile_container if managed_abc else page
         pending_indicators = [
-            page.locator("button:has-text('Ausstehend')"),
-            page.locator("button:has-text('Pending')"),
-            page.locator("span:has-text('Ausstehend')"),
-            page.locator("span:has-text('Pending')"),
+            pending_root.locator("button:has-text('Ausstehend')"),
+            pending_root.locator("button:has-text('Pending')"),
+            pending_root.locator("span:has-text('Ausstehend')"),
+            pending_root.locator("span:has-text('Pending')"),
         ]
         
         for indicator in pending_indicators:
@@ -6356,31 +6367,16 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                 continue
         
         # Try to find the Message button (Nachricht) - indicates we're connected
-        profile_container = None
-        try:
-            profile_container = page.get_by_test_id("lazy-column")
-            await profile_container.wait_for(state="visible", timeout=5_000)
-        except Exception:
+        if not managed_abc:
             try:
-                profile_container = page.locator("main.scaffold-layout__main, section.artdeco-card").first
+                profile_container = page.get_by_test_id("lazy-column")
                 await profile_container.wait_for(state="visible", timeout=5_000)
             except Exception:
-                unavailable_reason = await linkedin_profile_unavailable_reason(page)
-                if unavailable_reason:
-                    mark_failed(client, lead_id, f"LinkedIn profile unavailable: {unavailable_reason}; url={page.url}")
-                    await page.close()
-                    return "failed"
-                raise RuntimeError(
-                    "Profile container not found; refusing to fall back to page-level selectors for message-only send."
-                )
-        
-        # Look for explicit connected-user messaging affordances first.
-        if (lead.get("batch_id"), lead.get("sequence_id")) in {(30, 7), (31, 8), (32, 9)}:
-            profile_text = await profile_container.inner_text()
-            if not re.search(r"(?:·|•)\s*1\.?\b|1st", profile_text):
-                logger.warn("Managed first message requires live first-degree acceptance", {"leadId": lead_id})
-                mark_message_only_pending(client, lead)
-                return "pending"
+                try:
+                    profile_container = page.locator("main.scaffold-layout__main, section.artdeco-card").first
+                    await profile_container.wait_for(state="visible", timeout=5_000)
+                except Exception:
+                    raise RuntimeError("Profile container not found; refusing to fall back to page-level selectors for message-only send.")
         explicit_message_targets = [
             profile_container.get_by_role("button", name=re.compile(r"(Nachricht an|Message to)", re.I)),
             profile_container.get_by_role("link", name=re.compile(r"(Nachricht an|Message to)", re.I)),
@@ -6485,7 +6481,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                         await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
                         await page.wait_for_timeout(1_000)
                         await close_existing_chat_overlays(page)
-                        message_page, retry_surface = await open_followup_message_surface(page)
+                        message_page, retry_surface = await open_followup_message_surface(page, lead)
                         if retry_surface == SURFACE_SALES_NAVIGATOR:
                             require_first_message_channel(lead, retry_surface)
                             logger.info(
@@ -6964,7 +6960,8 @@ async def main() -> None:
                 items = fetch_approved_followups(client, batch_limit)
 
             if not items:
-                logger.info("No APPROVED followups to send")
+                logger.info("No APPROVED rows in the followup queue; acceptance-triggered first messages are a separate check",
+                            data={"check_command": f"python workers/daily_campaign.py --check-followups --account-id {CURRENT_ACCOUNT_ID}"})
                 return
 
             logger.info(f"Processing {len(items)} followups", data={"batch_limit": batch_limit})

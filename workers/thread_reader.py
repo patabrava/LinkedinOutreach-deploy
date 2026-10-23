@@ -134,7 +134,7 @@ async def extract_last_bubble(page: Page) -> Optional[Bubble]:
             try:
                 text_el = last_msg.locator(sel).first
                 if await text_el.count():
-                    text = _safe_text(await text_el.text_content(timeout=2_000))
+                    text = _safe_text(await text_el.inner_text(timeout=2_000))
                     if text:
                         break
             except Exception:
