@@ -29,7 +29,7 @@ const openStatuses = new Set(['PENDING_REVIEW', 'APPROVED', 'FAILED', 'RETRY_LAT
 export function buildReplyAnalytics(input: {
   leads: ReplyLead[]; followups: ReplyRecord[]; events: CampaignAnalyticsEvent[];
   accounts: { id: string; label: string }[]; sequences: { id: number; name: string }[];
-  since: string; until: string; includeDetails?: boolean;
+  since: string; until: string; includeDetails?: boolean; includeOpenDetails?: boolean;
   pairs?: readonly { batchId: number; sequenceId: number }[];
 }): ReplyAnalytics {
   const pairs = input.pairs && new Set(input.pairs.map(p => `${p.batchId}:${p.sequenceId}`));
@@ -64,7 +64,9 @@ export function buildReplyAnalytics(input: {
   }
 
   const empty = (): ReplyCounts => ({ peopleReplied: 0, openReplies: 0, periodPeople: 0 });
-  const result: ReplyAnalytics = { ...empty(), periodPositivePeople: 0, accounts: [], campaigns: [], daily: [], ...(input.includeDetails ? { openItems: [], historyItems: [] } : {}) };
+  const result: ReplyAnalytics = { ...empty(), periodPositivePeople: 0, accounts: [], campaigns: [], daily: [],
+    ...(input.includeDetails || input.includeOpenDetails ? { openItems: [] } : {}),
+    ...(input.includeDetails ? { historyItems: [] } : {}) };
   const accounts = new Map(input.accounts.map(a => [a.id, { ...empty(), accountId: a.id, label: a.label }]));
   const campaigns = new Map<string, ReplyAnalytics['campaigns'][number]>();
   const daily = new Map<string, ReplyAnalytics['daily'][number]>();

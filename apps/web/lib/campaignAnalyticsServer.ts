@@ -151,7 +151,7 @@ export async function fetchCampaignAnalytics(
   } as CampaignAnalytics & { recipients: CampaignRecipient[]; conversationHighlights: CampaignConversationHighlight[] };
 }
 
-// Includes inactive and legacy campaigns. Only aggregate values leave the server for public visitors.
+// Public analytics includes open reply names/text by operator request; closed history remains gated.
 export async function fetchReplyAnalytics(days = 30, includeDetails = false, kind?: CampaignAnalyticsKind) {
   const client = supabaseAdmin();
   const since = new Date();
@@ -160,9 +160,7 @@ export async function fetchReplyAnalytics(days = 30, includeDetails = false, kin
   const until = new Date(since);
   until.setUTCDate(until.getUTCDate() + days);
   const [leads, followups, events, accounts, sequences] = await Promise.all([
-    fetchPaged<ReplyLead>(() => client.from('leads').select(includeDetails
-      ? 'id,batch_id,sequence_id,linkedin_account_id,status,last_reply_at,first_name,last_name'
-      : 'id,batch_id,sequence_id,linkedin_account_id,status,last_reply_at').order('id').returns<ReplyLead[]>()),
+    fetchPaged<ReplyLead>(() => client.from('leads').select('id,batch_id,sequence_id,linkedin_account_id,status,last_reply_at,first_name,last_name').order('id').returns<ReplyLead[]>()),
     fetchPaged<ReplyRecord>(() => client.from('followups').select('id,lead_id,linkedin_account_id,status,sent_at,attempt,followup_type,reply_timestamp,reply_intent,reply_snippet,last_message_from,last_message_text')
       .eq('followup_type', 'REPLY').order('id')),
     fetchPaged<CampaignAnalyticsEvent>(() => client.from('outreach_events').select('lead_id,sequence_id,linkedin_account_id,event_type,touch_number,occurred_at')
@@ -172,7 +170,7 @@ export async function fetchReplyAnalytics(days = 30, includeDetails = false, kin
   ]);
   return buildReplyAnalytics({ leads, followups, events, sequences,
     accounts: accounts.map(a => ({ id: a.id, label: a.display_name?.trim() || a.sender_display_name?.trim() || a.label?.trim() || 'Unlabelled sender' })),
-    since: since.toISOString(), until: until.toISOString(), includeDetails,
+    since: since.toISOString(), until: until.toISOString(), includeDetails, includeOpenDetails: true,
     pairs: kind ? CAMPAIGN_ANALYTICS_SCOPES[kind].sequences : undefined,
   });
 }

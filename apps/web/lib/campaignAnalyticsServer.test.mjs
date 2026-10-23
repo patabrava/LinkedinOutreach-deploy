@@ -73,12 +73,23 @@ test("shared campaign queries include both senders while rejecting mismatched ev
     "server-only": {}, "./supabaseAdmin": { supabaseAdmin: () => client }, "./campaignAnalytics": aggregation,
     "./campaignRecipients": load("./campaignRecipients.ts", {}), "./replyAnalytics": load("./replyAnalytics.ts", {}),
   });
+  Object.assign(rows.leads[0], { first_name: 'Open', last_name: 'Contact' });
+  rows.followups.find(row => row.id === 'open-reply').reply_snippet = 'Please send details.';
+  rows.leads.push({ ...rows.leads[0], id: 'answered', first_name: 'Closed', last_name: 'Contact' });
+  rows.followups.push({ id: 'answered-reply', lead_id: 'answered', linkedin_account_id: 'owner',
+    followup_type: 'REPLY', status: 'SENT', sent_at: now, reply_timestamp: now, reply_snippet: 'Private archived reply.' });
   const publicReplies = await fetchReplyAnalytics(30, false, 'regular');
-  assert.equal(publicReplies.peopleReplied, 1);
+  assert.equal(publicReplies.peopleReplied, 2);
   assert.equal(publicReplies.openReplies, 1);
-  assert.equal(publicReplies.openItems, undefined);
+  assert.equal(publicReplies.openItems.length, 1);
+  assert.equal(publicReplies.openItems[0].name, 'Open Contact');
+  assert.equal(publicReplies.openItems[0].text, 'Please send details.');
+  assert.equal(publicReplies.historyItems, undefined);
+  assert.ok(!JSON.stringify(publicReplies).includes('Private archived reply.'));
+  assert.ok(!JSON.stringify(publicReplies).includes('Closed Contact'));
   const privateReplies = await fetchReplyAnalytics(30, true, 'regular');
   assert.equal(privateReplies.openItems.length, 1);
+  assert.equal(privateReplies.historyItems.length, 2);
 });
 
 const { buildCampaignRecipients, buildCampaignConversationHighlights, recipientsCsv } = load('./campaignRecipients.ts', {});
