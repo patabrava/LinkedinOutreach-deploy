@@ -178,7 +178,7 @@ async def verified_primary_profile(page, lead):
     if not await heading.count() or not name_matches(await heading.inner_text(), lead):
         raise RuntimeError('profile_identity_mismatch')
     container = heading
-    for _ in range(8):
+    for _ in range(16):
         container = container.locator('xpath=..')
         text = await container.inner_text()
         primary = text.split('Aktivitäten')[0].split('Activity')[0][:600]

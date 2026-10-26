@@ -89,6 +89,11 @@ class ConnectionAcceptanceTests(unittest.TestCase):
                     await page.set_content('<main><section><h2>Elin Lisa Würfel</h2><p>· 1.</p><a href="/messaging/">Nachricht</a></section><aside><h2>Other</h2></aside></main>')
                     container = await m.verified_primary_profile(page, self.lead())
                     self.assertIn('Elin Lisa Würfel', await container.inner_text())
+                    # Current LinkedIn profiles nest the name ten parents below its own action.
+                    nested = '<div>' * 9 + '<h2>Elin Lisa Würfel</h2>' + '</div>' * 9
+                    await page.set_content('<main><section>' + nested + '<p>· 1.</p><a href="/messaging/">Nachricht</a></section><aside><h2>Other</h2></aside></main>')
+                    container = await m.verified_primary_profile(page, self.lead())
+                    self.assertEqual(await container.evaluate('e => e.tagName'), 'SECTION')
                     await page.set_content('<main><section><h2>Elin Lisa Würfel</h2><p>· 2.</p><a>Nachricht</a></section><aside><h2>Other</h2><p>· 1.</p></aside></main>')
                     with self.assertRaisesRegex(RuntimeError, 'connection_not_verified'):
                         await m.verified_primary_profile(page, self.lead())
