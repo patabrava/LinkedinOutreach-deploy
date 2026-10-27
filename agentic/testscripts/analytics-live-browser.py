@@ -9,6 +9,7 @@ async def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--url',default='http://127.0.0.1:3000')
     parser.add_argument('--expect-live',action='store_true')
+    parser.add_argument('--operator-email',help='Optional existing local development operator; uses the app dev sign-in without sending email')
     args=parser.parse_args()
     async with async_playwright() as pw:
         browser=await pw.chromium.launch(headless=True)
@@ -68,6 +69,29 @@ async def main():
         await regular.screenshot(path='/tmp/analytics-live-mobile.png',full_page=True)
         assert await regular.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
         assert not errors, errors
+        if args.operator_email:
+            operator=await browser.new_context()
+            login=await operator.request.post(args.url+'/api/dev/signin',form={'email':args.operator_email,'next':'/analytics/regular'},max_redirects=0)
+            assert login.status==303, 'This check needs an allowlisted development operator'
+            response=await operator.request.get(args.url+'/api/analytics/live?scope=regular&days=7')
+            private=await response.json()
+            assert ':private:' in private['revision'] and 'recipients' in private['analytics'] and 'historyItems' in private['replies']
+            detail=await operator.new_page()
+            await detail.goto(args.url+'/analytics/regular?days=7',wait_until='networkidle')
+            await detail.locator('.campaign-recipient-filters select').nth(0).select_option(index=1)
+            selected=await detail.locator('.campaign-recipient-filters select').nth(0).input_value()
+            await detail.locator('.campaign-recipients tbody details summary').first.click()
+            previous=await detail.locator('[data-analytics-revision]').get_attribute('data-analytics-revision')
+            await detail.wait_for_function('(revision)=>document.querySelector("[data-analytics-revision]").dataset.analyticsRevision!==revision',arg=previous,timeout=55000)
+            assert await detail.locator('.campaign-recipients tbody details[open]').count()==1
+            assert await detail.locator('.campaign-recipient-filters select').nth(0).input_value()==selected
+            await operator.clear_cookies()
+            await detail.evaluate('window.dispatchEvent(new Event("focus"))')
+            await detail.wait_for_function('()=>document.querySelector("[data-analytics-revision]").dataset.analyticsRevision.includes(":public:")',timeout=15000)
+            assert await detail.locator('.campaign-recipients').count()==0
+            assert await detail.get_by_role('button',name='Export CSV',exact=False).count()==0
+            print('PASS: operator history/filter persistence; session removal strips private details.',flush=True)
+            await operator.close()
         await browser.close()
         print('PASS: overview/DEGURA/COP live subscriptions; anonymous privacy; unchanged/invalid requests; offline recovery; mobile overflow; page errors.',flush=True)
 
