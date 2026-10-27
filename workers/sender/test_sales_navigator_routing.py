@@ -367,7 +367,7 @@ class InmailInviteOrderTest(unittest.IsolatedAsyncioTestCase):
             sender_module, "open_followup_message_surface", AsyncMock(side_effect=open_inmail)
         ), patch.object(sender_module, "_verify_inmail_recipient", AsyncMock()), patch.object(
             sender_module, "send_sales_navigator_message", AsyncMock(side_effect=send_inmail)
-        ), patch.object(sender_module, "_record_inmail_event"), patch.object(
+        ), patch.object(sender_module, "verify_latest_outbound_message", AsyncMock()), patch.object(sender_module, "_record_inmail_event"), patch.object(
             sender_module, "_record_inmail_invite_event", side_effect=record_invite
         ), patch.object(
             sender_module, "logger"
@@ -429,7 +429,7 @@ class InmailInviteOrderTest(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value=(message_page, sender_module.SURFACE_SALES_NAVIGATOR)),
         ), patch.object(sender_module, "_verify_inmail_recipient", AsyncMock()), patch.object(
             sender_module, "send_sales_navigator_message", AsyncMock()
-        ) as send_inmail, patch.object(sender_module, "_record_inmail_event"), patch.object(
+        ) as send_inmail, patch.object(sender_module, "verify_latest_outbound_message", AsyncMock()), patch.object(sender_module, "_record_inmail_event"), patch.object(
             sender_module, "_record_inmail_invite_event"
         ) as record_invite, patch.object(sender_module, "logger"), patch.object(
             sender_module, "verify_and_record_cop_employer", AsyncMock(return_value={"status": "verified"}), create=True
@@ -2363,6 +2363,7 @@ class FollowupSalesNavigatorRoutingTest(unittest.IsolatedAsyncioTestCase):
             sent_body,
         )
         mocks["mark_followup_sent"].assert_called_once()
+        self.assertEqual(mocks["mark_followup_sent"].call_args.args[2], sent_body)
 
     async def test_cop_nudge_rejects_missing_employer_evidence_before_composer(self):
         from unittest.mock import AsyncMock, MagicMock, patch

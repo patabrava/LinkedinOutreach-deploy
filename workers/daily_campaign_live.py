@@ -411,13 +411,6 @@ class DailyAdapter:
             elif stage=='first_message':
                 if not self.sender.mark_message_only_processing(self.client,row): return 'claim_conflict'
                 result=await self.sender.process_message_only_one(self.context,self.client,row)
-                if result=='sent':
-                    self.client.table('outreach_events').insert(self.sender.event_payload(
-                        account_id=self.account,lead_id=row['id'],event_type='touch_sent',
-                        sequence_id=row['sequence_id'],variant_id=row.get('sequence_variant_id'),touch_number=1,
-                        metadata={'surface':'message','verified':True,'source':'daily_campaign',
-                                  'message_sha256':hashlib.sha256(self.sender.load_sequence_messages(self.client,row)['first_message'].encode()).hexdigest()}
-                    )).execute()
             elif stage=='nudge':
                 claimed=self.sender.claim_followup(self.client,row,self.account)
                 if not claimed: return 'claim_conflict'

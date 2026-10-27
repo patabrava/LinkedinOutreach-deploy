@@ -1,33 +1,13 @@
-# Current State
+# Live Analytics — Release State (2026-10-27)
 
-## Goal
+Implemented on deployment baseline efddaca in an isolated worktree. No unrelated COP copy, campaign-management or UI work is included. Budget: 17 implementation/test/rule paths plus this ledger; zero dependencies; new modules <=300 LOC.
 
-Publish campaign-isolated analytics for the current DEGURA outreach: one overview for the regular A/B/C sequences and one for the COP Sales Navigator campaign.
+Contract: database revision triggers cover persisted lead, follow-up and outreach-event changes. Public broadcasts carry only revisions. Anonymous snapshots retain the approved public-open-reply exception; recipient history, closed reply history and CSV require a freshly verified allowlisted user. Client snapshots preserve filters, coalesce changes, recover after visibility/reconnect and check revisions every30 seconds without full-tree refreshes. Verified initial receipts preserve submitted body, original time and account; failed event writes spool privately and replay only database writes. InMail follow-up history stores the actual signature-trimmed submitted body.
 
-## Implemented Contract
+Acceptance:18 analytics/refresh/access regressions;163 focused release worker regressions; real disposable PostgreSQL trigger/privacy/rollback/broadcast-failure checks; TypeScript and focused lint; production build using the repository no-lint command; real browser overview/DEGURA/COP subscriptions, offline recovery, anonymous privacy and mobile layout. A real database broadcast produced an updated snapshot in1.85 seconds. Original mixed workspace additionally passes209 worker tests, including its pre-existing COP-copy changes; unrelated baseline COP rendering tests are not part of this release's focused worker suite.
 
-- `/analytics` is the authenticated campaign index and retains the historical all-outreach dashboard below it.
-- `/analytics/regular` covers exact triples for Batches 30/31/32 and Sequences 7/8/9.
-- `/analytics/sales-navigator` covers the exact Batch 33 / Sequence 10 Sales Navigator scope.
-- Server queries validate batch, sequence, account ownership, and delivery mode before loading leads.
-- Activity and outcomes come only from immutable `outreach_events`; booking and attendance values require their own persisted events.
-- The selected 7/30/90-day window limits activity events, while cohort size and current lead statuses describe the exact campaign batches.
-- The interface preserves the existing Mission Control design system and adapts through desktop and mobile layouts.
+Migration034 is applied to Supabase project pbwiyglvnhrtfcnmviir. Production VPS health/configuration inspected through recovered Hostinger access; app and both browser slots healthy, Traefik routing and persistent volumes intact. No VPS application deployment yet. Temporary SSH-key permission requested under the saved explicit-authorization preference; do not add a key before the user answers.
 
-## Validation
+Real acceptance work: both accounts' read-only acceptance coverage completed. Katharina follow-up-only run completed with zero sends; due RETRY_LATER work was not approved. Her broader A/B/C reply scan verified14 threads and held2 identity mismatches; no new replies. Sandra's exact-scope follow-up-only run is active under its account lock; verified new initial sends and nudges and one captured inbound reply have persisted. Do not relaunch that account while its daily lock is held. Source workspace reports live under output/playwright/analytics-live-validation; summarize final account reports and database readback before completion.
 
-- 68 web regression tests pass, including new exact-scope, cross-join exclusion, persisted-outcome, and page-authentication checks.
-- Changed TypeScript files pass focused ESLint.
-- The production Next.js build passes with the repository's `--no-lint` production command; the unscoped default build remains blocked by the pre-existing global lint backlog.
-- Docker Compose resolves the public Supabase URL/key into Next build args while keeping the service-role credential out of the image build.
-- Authenticated production browser acceptance passes for the index and both campaign pages with no console warnings or errors.
-- Live Supabase readback during browser acceptance showed 2,015 leads across regular A/B/C and 102 COP leads with 101 verified first touches, 4 replies, and a 4.0% recorded reply rate.
-- Hostinger action `116662926` deployed commit `f949f03`; the app and both persistent browser-slot containers are healthy and `/api/health` returns HTTP 200.
-
-## Locality Budget
-
-`{files: 10 implementation/test/deployment files plus this canonical ledger and one prevention-rule update, LOC/file: all changed/new files under 2,000, deps: 0}`
-
-## Current Work
-
-No active implementation or release work remains.
+Remaining: finish active sender and broader Sandra reply scan, confirm final persisted counts/text and production browser updates, deploy the tested release through authorized VPS access, then remove and verify removal of any temporary SSH key. Background workers must stay idle on web restart; remote browser containers and their profiles must remain untouched.

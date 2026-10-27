@@ -1,95 +1,11 @@
-import Link from "next/link";
-
-import { AnalyticsDashboard } from "../../components/AnalyticsDashboard";
-import {
-    fetchOutreachAnalytics,
-    fetchDailyMetrics,
-} from "../actions";
-import { buildConversionFunnel } from "../../lib/analyticsFunnel";
-import ReplyAnalytics from "../../components/ReplyAnalytics";
-import { fetchReplyAnalytics } from "../../lib/campaignAnalyticsServer";
-import { createServerComponentClient } from "@supabase/auth-helpers-nextjs";
-import { cookies } from "next/headers";
-import { isAllowed } from "../../lib/allowlist";
-import { isSupabaseAuthConfigured } from "../../lib/authConfig";
-
-export const dynamic = "force-dynamic";
+import AnalyticsOverviewView from '../../components/AnalyticsOverviewView';
+import { analyticsAccess, analyticsRevision, analyticsSnapshot } from '../../lib/analyticsLiveServer';
+export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-
-type PageProps = {
-    searchParams?: {
-        days?: string;
-        account?: string;
-        variant?: string;
-    };
-};
-
-export default async function AnalyticsPage({ searchParams }: PageProps) {
-    const daysParam = searchParams?.days;
-    const days = daysParam ? parseInt(daysParam, 10) : 7;
-    const validDays = [7, 30, 90].includes(days) ? days : 7;
-
-    let showReplies = false;
-    if (isSupabaseAuthConfigured()) {
-        const client = createServerComponentClient({ cookies });
-        const { data: { user } } = await client.auth.getUser();
-        showReplies = Boolean(user && isAllowed(user.email || ""));
-    }
-    const [originalAnalytics, originalDaily, replies] = await Promise.all([
-        fetchOutreachAnalytics(validDays),
-        fetchDailyMetrics(validDays),
-        fetchReplyAnalytics(validDays, showReplies),
-    ]);
-    const analytics = { ...originalAnalytics, repliesReceived: replies.periodPeople,
-        positiveReplies: replies.periodPositivePeople,
-        messageResponseRate: originalAnalytics.messagesSent ? Math.round(replies.periodPeople / originalAnalytics.messagesSent * 1000) / 10 : 0,
-        positiveReplyRate: originalAnalytics.messagesSent ? Math.round(replies.periodPositivePeople / originalAnalytics.messagesSent * 1000) / 10 : 0,
-        overallConversionRate: originalAnalytics.totalLeads ? Math.round(replies.periodPeople / originalAnalytics.totalLeads * 1000) / 10 : 0,
-    };
-    const dailyMetrics = originalDaily.map(row => ({ ...row,
-        replies: replies.daily.find(day => day.date === row.date)?.replies || 0,
-        positiveReplies: replies.daily.find(day => day.date === row.date)?.positiveReplies || 0,
-    }));
-    const funnel = buildConversionFunnel(analytics);
-
-    return (
-        <div className="page">
-            <div style={{ marginBottom: 24 }}>
-                <div className="pill">Analytics</div>
-                <h1 className="page-title" style={{ textTransform: "uppercase" }}>
-                    Campaign Overview
-                </h1>
-                <p className="muted">Choose an isolated campaign ledger, or continue to the historical all-outreach snapshot below.</p>
-            </div>
-
-            <section className="analytics-campaign-index" aria-label="Campaign analytics pages">
-                <Link href="/analytics/regular" className="analytics-campaign-card">
-                    <span className="campaign-kicker">Campaign 01</span>
-                    <strong>REGULAR · A/B/C</strong>
-                    <span>Three DEGURA sequences · direct LinkedIn outreach</span>
-                    <span className="analytics-campaign-card__cta">OPEN OVERVIEW →</span>
-                </Link>
-                <Link href="/analytics/sales-navigator" className="analytics-campaign-card analytics-campaign-card--dark">
-                    <span className="campaign-kicker">Campaign 02</span>
-                    <strong>SALES NAVIGATOR · COP</strong>
-                    <span>InMail and invite campaign · isolated delivery surface</span>
-                    <span className="analytics-campaign-card__cta">OPEN OVERVIEW →</span>
-                </Link>
-            </section>
-
-            <ReplyAnalytics report={replies} days={validDays} />
-
-            <div className="analytics-legacy-heading">
-                <span className="campaign-kicker">Historical view</span>
-                <h2>ALL OUTREACH ACTIVITY</h2>
-            </div>
-
-            <AnalyticsDashboard
-                analytics={analytics}
-                dailyMetrics={dailyMetrics}
-                funnel={funnel}
-                days={validDays}
-            />
-        </div>
-    );
+export default async function AnalyticsPage({ searchParams }: { searchParams?: { days?: string } }) {
+  const parsed = Number(searchParams?.days || 7);
+  const days = [7, 30, 90].includes(parsed) ? parsed : 7;
+  const privateDetails = await analyticsAccess();
+  const revision = await analyticsRevision('all', privateDetails);
+  return <AnalyticsOverviewView key={days} initial={await analyticsSnapshot('all', days, privateDetails, revision)} />;
 }

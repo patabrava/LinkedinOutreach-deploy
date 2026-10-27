@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import random
 import sys
@@ -209,6 +211,7 @@ def configure_runtime_account(client: Client, account_id: str) -> None:
     CURRENT_ACCOUNT_BROWSER_SLOT = _safe_int(account.get("browser_slot"), 0)
     CURRENT_DAILY_INVITE_LIMIT = max(int(account.get("daily_invite_limit") or 50), 1)
     CURRENT_DAILY_MESSAGE_LIMIT = max(int(account.get("daily_message_limit") or 50), 1)
+    reconcile_analytics_receipts(client)
 NETWORK_OUTAGE_PATTERNS = (
     "ERR_INTERNET_DISCONNECTED",
     "nodename nor servname provided",
@@ -1317,12 +1320,70 @@ def _inmail_event_exists(
     return False
 
 
+def _persist_analytics_receipt(client: Client, payload: Dict[str, Any]) -> None:
+    """Spool only verified send facts; replay database writes, never LinkedIn actions."""
+    payload.setdefault("occurred_at", datetime.now(timezone.utc).isoformat())
+    folder = AUTH_STATE_PATH.parent / "analytics-receipts"
+    key = f"{payload['linkedin_account_id']}:{payload['lead_id']}:{payload['touch_number']}"
+    path = folder / (hashlib.sha256(key.encode()).hexdigest() + ".json")
+    try:
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Keep first evidence if a receipt is already awaiting reconciliation.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+            handle.flush(); os.fsync(handle.fileno())
+    except FileExistsError:
+        try:
+            payload = json.loads(path.read_text())
+        except Exception:
+            logger.warn("Existing analytics receipt spool requires manual inspection", {"file": path.name})
+    except Exception:
+        logger.warn("Analytics receipt spool unavailable; trying database", {"leadId": payload.get("lead_id")})
+    try:
+        client.table("outreach_events").insert(payload).execute()
+    except Exception as exc:
+        if not ("23505" in str(exc) and "idx_outreach_events_delivery_idempotency" in str(exc)):
+            logger.warn("Verified message receipt awaiting database reconciliation; do not resend", {"leadId": payload.get("lead_id")})
+            return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warn("Confirmed analytics receipt spool cleanup deferred")
+
+
+def reconcile_analytics_receipts(client: Client) -> None:
+    for path in (AUTH_STATE_PATH.parent / "analytics-receipts").glob("*.json"):
+        try:
+            payload = json.loads(path.read_text())
+            if payload.get("linkedin_account_id") == CURRENT_ACCOUNT_ID:
+                _persist_analytics_receipt(client, payload)
+        except Exception:
+            logger.warn("Analytics receipt requires manual reconciliation", {"file": path.name})
+
+
+def record_initial_message_receipt(client: Client, lead: Dict[str, Any], sent_text: str,
+                                   surface: str, *, sent_at: Optional[str] = None) -> None:
+    payload = event_payload(
+        account_id=CURRENT_ACCOUNT_ID, lead_id=str(lead["id"]), event_type="touch_sent",
+        sequence_id=lead.get("sequence_id"), variant_id=lead.get("sequence_variant_id"), touch_number=1,
+        correlation_id=os.getenv("CORRELATION_ID"),
+        metadata={"surface": surface, "verified": True, "sent_text": sent_text,
+                  "message_sha256": hashlib.sha256(sent_text.encode()).hexdigest()},
+    )
+    if sent_at:
+        payload["occurred_at"] = sent_at
+    _persist_analytics_receipt(client, payload)
+
+
 def _record_inmail_event(
     client: Client,
     lead: Dict[str, Any],
     sequence_id: Optional[int],
     *,
     test_override: bool,
+    sent_text: str = "",
+    subject: str = "",
 ) -> None:
     touch_number = INMAIL_TEST_TOUCH_NUMBER if test_override else 1
     payload = event_payload(
@@ -1338,9 +1399,12 @@ def _record_inmail_event(
             "delivery_mode": INMAIL_AND_INVITE_MODE,
             "test_override": test_override,
             "first_touch": True,
+            "verified": True,
+            "sent_text": sent_text,
+            "subject": subject,
         },
     )
-    client.table("outreach_events").insert(payload).execute()
+    _persist_analytics_receipt(client, payload)
 
 
 def _mark_inmail_processing(client: Client, lead_id: str) -> bool:
@@ -4476,6 +4540,8 @@ async def process_one(context: BrowserContext, client: Client, lead: Dict[str, A
         raise
 
     mark_sent(client, lead_id)
+    if surface == SURFACE_MESSAGE:
+        record_initial_message_receipt(client, lead, outbound_message, surface)
     await page.close()
 
     logger.message_send_complete(lead_id)
@@ -5535,7 +5601,8 @@ async def process_followup_one(context: BrowserContext, client: Client, followup
                 await send_message(message_page, message, surface, lead=lead,
                                    before_send=lambda: require_campaign_controls(client, lead, followup))
 
-        mark_followup_sent(client, followup_id, message, followup, sequence_step=resolved_step)
+        submitted_message = build_sales_navigator_body(message) if surface == SURFACE_SALES_NAVIGATOR else message
+        mark_followup_sent(client, followup_id, submitted_message, followup, sequence_step=resolved_step)
         if followup_type == "NUDGE":
             record_followup_touch_event(
                 client,
@@ -6251,7 +6318,9 @@ async def process_inmail_and_invite_one(
             before_send=lambda: require_campaign_controls(client, lead),
         )
         inmail_sent_at = datetime.now(timezone.utc).isoformat()
-        _record_inmail_event(client, lead, sequence_id, test_override=test_override)
+        await verify_latest_outbound_message(message_page, build_sales_navigator_body(message))
+        _record_inmail_event(client, lead, sequence_id, test_override=test_override,
+                             sent_text=build_sales_navigator_body(message), subject=subject)
 
         if test_override:
             logger.info(
@@ -6267,6 +6336,11 @@ async def process_inmail_and_invite_one(
         return "paused"
     except Exception as exc:
         logger.error("Failed InMail + invite first touch", {"leadId": lead_id}, error=exc)
+        if isinstance(exc, PostSendVerificationError):
+            client.table("leads").update({
+                "human_handoff_required": True,
+                "human_handoff_reason": "outbound_unconfirmed_requires_live_reconciliation",
+            }).eq("id", lead_id).eq("linkedin_account_id", CURRENT_ACCOUNT_ID).execute()
         if not test_override:
             if cop_delivery and not employer_verified:
                 mark_cop_employer_ineligible(client, lead_id, str(exc).removeprefix("cop_employer_"))
@@ -6321,6 +6395,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
     page = await context.new_page()
     message_page: Optional[Page] = None
     sales_page: Optional[Page] = None
+    receipt_surface = SURFACE_MESSAGE
     url = normalize_linkedin_profile_url(str(lead["linkedin_url"]))
     logger.debug(f"Navigating to profile for message-only", {"leadId": lead_id}, {"url": url})
     
@@ -6448,6 +6523,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                     sales_ready = await wait_for_sales_navigator_composer(message_page)
                 if sales_ready:
                     require_first_message_channel(lead, SURFACE_SALES_NAVIGATOR)
+                    receipt_surface = SURFACE_SALES_NAVIGATOR
                     logger.info("Nachricht opened Sales Navigator composer", {"leadId": lead_id})
                     await send_sales_navigator_message(
                         message_page,
@@ -6484,6 +6560,7 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                         message_page, retry_surface = await open_followup_message_surface(page, lead)
                         if retry_surface == SURFACE_SALES_NAVIGATOR:
                             require_first_message_channel(lead, retry_surface)
+                            receipt_surface = SURFACE_SALES_NAVIGATOR
                             logger.info(
                                 "First-message retry routed through Sales Navigator composer",
                                 {"leadId": lead_id},
@@ -6527,6 +6604,9 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                         fallback_update["profile_data"] = cleaned_profile_data
                     client.table("leads").update(fallback_update).eq("id", lead_id).execute()
 
+                record_initial_message_receipt(client, lead,
+                    build_sales_navigator_body(message) if receipt_surface == SURFACE_SALES_NAVIGATOR else message,
+                    receipt_surface, sent_at=accepted_at)
                 accepted_base = _parse_iso_datetime(accepted_at) or _utc_now()
                 try:
                     schedule_nudge_followup(client, lead, 1, sequence_messages, accepted_base, message)
@@ -6647,6 +6727,8 @@ async def process_message_only_one(context: BrowserContext, client: Client, lead
                         error=schedule_error,
                     )
                 logger.message_send_complete(lead_id)
+                record_initial_message_receipt(client, lead, build_sales_navigator_body(message),
+                                               SURFACE_SALES_NAVIGATOR, sent_at=accepted_at)
                 logger.info("Sales Navigator message sent to lead", {"leadId": lead_id})
                 await sales_page.close()
                 if page != sales_page:

@@ -7,6 +7,48 @@ import sender
 
 
 class DailySafetyTests(unittest.TestCase):
+    def test_initial_receipt_preserves_exact_sent_body_and_failure_never_resends(self):
+        from unittest.mock import MagicMock, patch
+        lead = {'id': 'receipt-lead', 'sequence_id': 7, 'sequence_variant_id': 2}
+        client = MagicMock()
+        body = 'Hallo Ada,\n\nDetails https://example.org/?a=1&b=2\nViele Grüße'
+        import tempfile
+        folder = tempfile.TemporaryDirectory(); self.addCleanup(folder.cleanup)
+        self.enterContext(patch.object(sender, 'AUTH_STATE_PATH', Path(folder.name) / 'auth.json'))
+        with patch.object(sender, 'CURRENT_ACCOUNT_ID', 'sender-account'):
+            sender.record_initial_message_receipt(client, lead, body, 'message', sent_at='2026-10-27T10:00:00Z')
+        payload = client.table.return_value.insert.call_args.args[0]
+        self.assertEqual(payload['metadata']['sent_text'], body)
+        self.assertEqual(payload['metadata']['surface'], 'message')
+        self.assertEqual(payload['linkedin_account_id'], 'sender-account')
+        self.assertEqual(payload['sequence_variant_id'], 2)
+        self.assertEqual(payload['occurred_at'], '2026-10-27T10:00:00Z')
+        self.assertTrue(payload['metadata']['verified'])
+        client.table.return_value.insert.return_value.execute.side_effect = RuntimeError('database offline')
+        # Analytics failure cannot escape into the sender retry path after a verified submit.
+        sender.record_initial_message_receipt(client, lead, body, 'message')
+
+    def test_receipt_replay_keeps_original_timestamp_body_and_account(self):
+        from unittest.mock import MagicMock, patch
+        import tempfile, json
+        client = MagicMock()
+        lead = {'id':'receipt-lead','sequence_id':7,'sequence_variant_id':2}
+        with tempfile.TemporaryDirectory() as folder, patch.object(sender, 'AUTH_STATE_PATH', Path(folder)/'auth.json'), patch.object(sender, 'CURRENT_ACCOUNT_ID', 'account-a'):
+            client.table.return_value.insert.return_value.execute.side_effect = RuntimeError('offline')
+            sender.record_initial_message_receipt(client, lead, 'Exact\nBody', 'message', sent_at='2026-10-27T01:00:00Z')
+            pending = list((Path(folder)/'analytics-receipts').glob('*.json'))
+            self.assertEqual(len(pending),1)
+            self.assertEqual(pending[0].stat().st_mode & 0o777,0o600)
+            with patch.object(sender, 'CURRENT_ACCOUNT_ID', 'account-b'):
+                sender.reconcile_analytics_receipts(client)
+            self.assertTrue(pending[0].exists())
+            client.table.return_value.insert.return_value.execute.side_effect = None
+            sender.reconcile_analytics_receipts(client)
+            payload = client.table.return_value.insert.call_args.args[0]
+            self.assertEqual(payload['occurred_at'],'2026-10-27T01:00:00Z')
+            self.assertEqual(payload['metadata']['sent_text'],'Exact\nBody')
+            self.assertFalse(pending[0].exists())
+
     def test_stale_overlay_cleanup_executes_valid_javascript_and_closes_chat(self):
         import asyncio
         from playwright.async_api import async_playwright
