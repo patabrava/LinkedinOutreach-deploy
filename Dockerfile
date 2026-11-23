@@ -13,6 +13,7 @@ RUN apt-get update \
       curl \
       dumb-init \
       git \
+      libatomic1 \
       python3 \
       python3-pip \
       python3-venv \
