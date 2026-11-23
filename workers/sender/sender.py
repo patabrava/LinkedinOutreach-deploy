@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Any, Callable, Dict, Optional, Tuple
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
@@ -1984,6 +1984,32 @@ async def open_message_surface(page: Page, *, invite_only: bool = False) -> str:
             logger.element_click("Message link", success=False)
             logger.path_attempt("Message link", 1, success=False)
 
+    # Modern profile links can point back to the profile while their click opens
+    # a roleless overlay. Bind the action to the first visible profile heading
+    # and the exact current profile URL, never to a recommendation card.
+    if invite_only:
+        headings = page.locator("main h1:visible, main h2:visible")
+        if await headings.count():
+            primary_name = (await headings.first.inner_text()).strip()
+            action = page.locator("main").get_by_role(
+                "link", name=re.compile(rf"^{re.escape(primary_name)}\s+(?:als Kontakt einladen|als Kontakt hinzufügen)$", re.I)
+            )
+            if await action.count() == 1 and await action.first.is_visible():
+                href = await action.first.get_attribute("href")
+                current = urlsplit(page.url)
+                target = urlsplit(urljoin(page.url, href or ""))
+                if (href and current.scheme == target.scheme == "https"
+                        and current.hostname in {"linkedin.com", "www.linkedin.com"}
+                        and target.hostname == current.hostname
+                        and unquote(target.path).rstrip("/").casefold() == unquote(current.path).rstrip("/").casefold()
+                        and current.path.startswith("/in/")):
+                    await action.first.click(timeout=8_000)
+                    add_note = page.get_by_role("link", name=re.compile(r"^(?:Nachricht hinzufügen|Add a note|Notiz hinzufügen)$", re.I))
+                    await add_note.wait_for(state="visible", timeout=10_000)
+                    await add_note.click(timeout=6_000)
+                    await page.locator("[data-testid='ui-core-tiptap-text-editor-wrapper'] [contenteditable='true'][role='textbox']").wait_for(state="visible", timeout=10_000)
+                    return "connect_note"
+
     # PATH 2: Direct invite link inside profile container (Invite <Name> to ...)
     invite_link = profile_container.get_by_role("link", name=re.compile(r"(Invite .+ to|Einladen .+ zu)", re.I))
     invite_link_count = await invite_link.count()
@@ -2517,6 +2543,15 @@ def _pick_invite_dialog_candidate(candidates: list[Dict[str, Any]]) -> Optional[
 
 
 async def find_invite_dialog(page: Page):
+    modern = page.locator("[data-testid='ui-core-tiptap-text-editor-wrapper'] [contenteditable='true'][role='textbox']:visible")
+    modern_count = await modern.count()
+    if modern_count > 1:
+        raise RuntimeError("Multiple visible invitation editors; refusing submit")
+    if modern_count == 1:
+        container = modern.first.locator("xpath=ancestor::*[.//*[@id='customInviteNoteCounterRef'] and (.//button[normalize-space(.)='Senden' or normalize-space(.)='Send'] or .//a[normalize-space(.)='Senden' or normalize-space(.)='Send'])][1]")
+        if await container.count() == 1:
+            return container
+        raise RuntimeError("Could not identify the invitation editor's send controls")
     dialogs = page.locator("section[role='dialog'], div[role='dialog']")
     candidates = await dialogs.evaluate_all(
         """els => els.map((dialog) => ({
@@ -3856,6 +3891,7 @@ async def send_message(
 
         # Use the exact selector provided by user (support English & German labels)
         note_box_selectors = [
+            ("modern invitation editor", lambda: page.locator("[data-testid='ui-core-tiptap-text-editor-wrapper'] [contenteditable='true'][role='textbox']:visible")),
             ("textbox:Personal note limit", lambda: page.get_by_role("textbox", name=re.compile(r"Please limit personal note to", re.I))),
             ("textbox:Ihre persönliche Nachricht", lambda: page.get_by_role("textbox", name=re.compile(r"Ihre persönliche Nachricht", re.I))),
             ("textbox:Nachricht hinzufügen", lambda: page.get_by_role("textbox", name=re.compile(r"Nachricht hinzufügen", re.I))),
@@ -3932,7 +3968,7 @@ async def send_message(
         dialog = await find_invite_dialog(page)
         # Support both English and German
         send_btn = dialog.locator(
-            "button:has-text('Send invitation'), button:has-text('Send'), button:has-text('Einladung senden'), button:has-text('Senden'), button[aria-label*='Send']"
+            "button:has-text('Send invitation'), button:has-text('Send'), button:has-text('Einladung senden'), button:has-text('Senden'), button[aria-label*='Send'], a:text-is('Senden'), a:text-is('Send')"
         ).first
 
         # Wait for button to be enabled
@@ -3946,6 +3982,8 @@ async def send_message(
                     logger.debug(f"Send button enabled", data={"attempts": attempt})
                     break
                 await page.wait_for_timeout(300)
+            else:
+                raise CampaignControlHeld("invite_send_disabled")
 
             # Additional safety pause before clicking to ensure typing is truly complete
             await page.wait_for_timeout(800)

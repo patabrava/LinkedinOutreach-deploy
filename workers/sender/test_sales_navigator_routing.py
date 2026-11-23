@@ -455,6 +455,7 @@ class ProfileMoreMenuMessageTest(unittest.IsolatedAsyncioTestCase):
         profile = MagicMock()
         profile.wait_for = AsyncMock()
         page.get_by_test_id.return_value = profile
+        page.locator.return_value.count = AsyncMock(return_value=0)
         message_button = MagicMock()
         message_button.count = AsyncMock(return_value=1)
         message_link = MagicMock()
