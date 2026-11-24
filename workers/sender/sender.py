@@ -2120,6 +2120,21 @@ async def open_message_surface(page: Page, *, invite_only: bool = False) -> str:
                 await invite_menuitem.first.click(timeout=8_000)
                 logger.element_click("Invite menuitem", success=True)
 
+                # Newer More-menu invitations can open a roleless overlay whose
+                # add-note action is a link. Bind it to the primary profile name.
+                if invite_only:
+                    add_note = page.get_by_role("link", name=re.compile(r"^(?:Nachricht hinzufügen|Add a note|Notiz hinzufügen)$", re.I))
+                    if await add_note.count() == 1 and await add_note.first.is_visible():
+                        heading = page.locator("main h1:visible, main h2:visible")
+                        overlay = add_note.first.locator("xpath=ancestor::*[contains(normalize-space(.), 'Eine Nachricht zu Ihrer Einladung hinzufügen?') or contains(normalize-space(.), 'Add a note to your invitation')][1]")
+                        if await heading.count() and await overlay.count() == 1:
+                            profile_name = (await heading.first.inner_text()).strip()
+                            overlay_text = await overlay.inner_text()
+                            if profile_name and profile_name.casefold() in overlay_text.casefold():
+                                await add_note.first.click(timeout=6_000)
+                                await page.locator("[data-testid='ui-core-tiptap-text-editor-wrapper'] [contenteditable='true'][role='textbox']").wait_for(state="visible", timeout=10_000)
+                                return "connect_note"
+
                 # Wait for connection dialog
                 await page.wait_for_selector("section[role='dialog'], div[role='dialog']", timeout=8_000)
                 await random_pause()
