@@ -41,7 +41,7 @@ class ModernInviteSurfaceTest(unittest.IsolatedAsyncioTestCase):
     async def test_more_menu_opens_roleless_invite_note_without_sending(self):
         await self.page.set_content('''<main class="scaffold-layout__main"><h2>Test Person</h2>
           <button aria-label="Mehr" onclick="document.getElementById('menu').hidden=false">Mehr</button>
-          <div id="menu" hidden><button role="menuitem" onclick="document.getElementById('menu').hidden=true;document.getElementById('invite').hidden=false">Vernetzen</button></div></main>
+          <div id="menu" hidden><button role="menuitem" onclick="document.getElementById('menu').hidden=true;setTimeout(()=>document.getElementById('invite').hidden=false,500)">Vernetzen</button></div></main>
           <div id="invite" hidden><h3>Eine Nachricht zu Ihrer Einladung hinzufügen?</h3><p>Fügen Sie eine Nachricht zu Ihrer Einladung an Test Person hinzu.</p><a href="#" onclick="event.preventDefault();document.getElementById('invite').hidden=true;document.getElementById('composer').hidden=false">Nachricht hinzufügen</a><button onclick="window.wrong=true">Ohne Nachricht senden</button></div>
           <div id="composer" hidden><div data-testid="ui-core-tiptap-text-editor-wrapper"><div contenteditable="true" role="textbox"></div></div><div id="customInviteNoteCounterRef">0/300</div><button onclick="window.sent=true">Senden</button></div>''')
         with patch.object(sender, 'close_existing_chat_overlays', AsyncMock()), patch.object(sender, 'wiggle_mouse', AsyncMock()), patch.object(sender, 'random_pause', AsyncMock()):
